@@ -10,16 +10,16 @@ TASTIN-Python 是 TASTIN 程序的 Python 重构版本，采用了模块化和�
 
 ### 核心组件 (Components)
 
-| 组件 | 说明 |
-|------|------|
-| `ReactorCore` | 堆芯宏观容器，集成点堆动力学和热电耦合电路 |
-| `TFEUnit` | 热离子能量转换单元 (Thermionic Energy Conversion) |
-| `RingHP` | 环形热管组件 |
-| `HPwithFin` | 带鳍片的热管组件 |
-| `AnnularPipe` | 环形管道 |
-| `Pipe` | 管道组件 |
-| `TECCircuitManager` | 热电耦合电路管理器 |
-| `ExternalHeatSources` | 外部热源（太阳直射、地球反照、地球红外） |
+| 组件                    | 说明                                       |
+| --------------------- | ---------------------------------------- |
+| `ReactorCore`         | 堆芯宏观容器，集成点堆动力学和热电耦合电路                    |
+| `TFEUnit`             | 热离子能量转换单元 (Thermionic Energy Conversion) |
+| `RingHP`              | 环形热管组件                                   |
+| `HPwithFin`           | 带鳍片的热管组件                                 |
+| `AnnularPipe`         | 环形管道                                     |
+| `Pipe`                | 管道组件                                     |
+| `TECCircuitManager`   | 热电耦合电路管理器                                |
+| `ExternalHeatSources` | 外部热源（太阳直射、地球反照、地球红外）                     |
 
 ### 求解器 (Solvers)
 
@@ -31,11 +31,13 @@ TASTIN-Python 是 TASTIN 程序的 Python 重构版本，采用了模块化和�
 ### 材料库 (Materials)
 
 #### 流体材料
+
 - `Sodium`: 钠 (Na) - 快堆冷却剂
 - `NaK78`: 钠钾合金 (NaK78)
 - `Potassium`: 钾 (K)
 
 #### 固体材料
+
 - `UO2`: 二氧化铀 - 燃料
 - `StainlessSteel`: 不锈钢 - 结构材料
 - `Molybdenum`: 钼 - 结构材料
@@ -52,6 +54,7 @@ TASTIN-Python 是 TASTIN 程序的 Python 重构版本，采用了模块化和�
 ### 热电耦合计算 (ThermoCalc)
 
 C++ 实现的 热离子能量转换 (Thermionic Energy Conversion) 计算模块，支持:
+
 - 电路 TEC 建模
 - 非线性求解器
 
@@ -122,7 +125,7 @@ system.run_transient(end_time=3600.0, dt=1.0)
 
 ## 致谢
 
-本项目基于中国核工业集团相关技术积累开发，参考了 TASTIN Fortran 程序的设计思路。
+<br />
 
 ## 许可证
 
