@@ -74,6 +74,7 @@ class HeatPipe2D(HeatConduction2D):
 
         # ==================== 提前定义 shape_nodes 网格形状 避免报错 ====================
         self.shape_nodes = mesh.shape_nodes
+        self.name = name
 
         # ==================== 调用父类初始化 ====================
         # 注意：这里传入 wall_mat 作为基类的占位符。
@@ -83,6 +84,8 @@ class HeatPipe2D(HeatConduction2D):
 
         # 构建虚拟切片边界，覆盖父类的统一 right 边界
         self._setup_virtual_boundaries()
+        # 补充初始化，确保切片边界获取正确的 t=0 状态
+        self._update_boundaries_state(current_time=0.0)
 
     def _setup_virtual_boundaries(self):
         """
@@ -114,7 +117,7 @@ class HeatPipe2D(HeatConduction2D):
         self.boundaries['outer_aba'] = BoundaryRegion(shape=(self.n_aba,), area_array=area_aba)
         self.boundaries['outer_con'] = BoundaryRegion(shape=(self.n_con,), area_array=area_con)
 
-        # 5. 【极其关键】移除原始的全局 'right' 边界
+        # 5. 移除原始的全局 'right' 边界
         # 销毁该对象可以防止外部 Couplers 或基础类误调用一个横跨三段物理区域的统一边界
         if 'right' in self.boundaries:
             del self.boundaries['right']

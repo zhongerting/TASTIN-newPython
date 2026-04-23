@@ -1,6 +1,13 @@
 import numpy as np
 from scipy.integrate import solve_ivp
-from numba import njit
+
+try:
+    from numba import njit
+except ImportError:  # pragma: no cover - allow pure-Python fallback
+    def njit(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
 
 # =============================================================================
 # 底层纯数学/物理核心 (使用 Numba JIT 编译以绕过 Python 循环开销)
@@ -173,3 +180,43 @@ class PointReactor:
     @property
     def current_state(self) -> np.ndarray:
         return self._y_trial
+
+    def get_state_dict(self, prefix: str) -> dict:
+        """
+        保存点堆动力学状态。
+
+        说明：
+        1. 这里只保存数值状态向量与主要求解参数
+        2. 便于由 ReactorCore 或 SystemManager 统一纳入断点续算
+        """
+        return {
+            f"{prefix}/y_committed": self._y_committed.copy(),
+            f"{prefix}/y_trial": self._y_trial.copy(),
+            f"{prefix}/Lambda": np.array([self.Lambda], dtype=float),
+            f"{prefix}/rtol": np.array([self.rtol], dtype=float),
+            f"{prefix}/atol": np.array([self.atol], dtype=float),
+        }
+
+    def load_state_dict(self, data: dict, prefix: str):
+        """
+        恢复点堆动力学状态。
+        """
+        key_committed = f"{prefix}/y_committed"
+        key_trial = f"{prefix}/y_trial"
+        key_lambda = f"{prefix}/Lambda"
+        key_rtol = f"{prefix}/rtol"
+        key_atol = f"{prefix}/atol"
+
+        if key_committed in data:
+            self._y_committed = np.asarray(data[key_committed], dtype=float).copy()
+        if key_trial in data:
+            self._y_trial = np.asarray(data[key_trial], dtype=float).copy()
+        else:
+            self._y_trial = self._y_committed.copy()
+
+        if key_lambda in data:
+            self.Lambda = float(data[key_lambda][0])
+        if key_rtol in data:
+            self.rtol = float(data[key_rtol][0])
+        if key_atol in data:
+            self.atol = float(data[key_atol][0])

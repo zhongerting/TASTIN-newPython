@@ -55,7 +55,7 @@ class ThermoCalcModel:
         self._input_data.V_init = np.full((self.N_elem, self.n_node), 0.2)
 
         # 默认几何分配 (以单根 TFE 的经验值为基准，后续提供自定义接口)
-        dl_val = 0.377 / float(self.n_node)
+        dl_val = 0.507 / float(self.n_node)
         self._input_data.dlE = np.full((self.N_elem, self.n_node), dl_val)
         self._input_data.dlC = np.full((self.N_elem, self.n_node), dl_val)
 

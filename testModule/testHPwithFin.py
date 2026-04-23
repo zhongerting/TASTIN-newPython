@@ -4,17 +4,20 @@ import time
 import os
 import sys
 
-from profiler import TEASAProfiler
+# from profiler import TEASAProfiler
 
 # =============================================================================
 # 0. 路径与系统导入配置 (与您的 test_TEC 保持一致)
 # =============================================================================
-current_dir = os.path.dirname(os.path.abspath(__file__))
-thermo_calc_dir = os.path.join(current_dir, '..', 'ThermoCalc')
-thermo_calc_dir = os.path.abspath(thermo_calc_dir)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
-if thermo_calc_dir not in sys.path:
-    sys.path.insert(0, thermo_calc_dir)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+root_dir = os.path.abspath(os.path.join(current_dir, ".."))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
 
 # 导入 TASTIN 系统组件
 from Solvers.SystemManager import SystemManager
@@ -83,8 +86,8 @@ def main():
     T_init = 800.0  # 热管初始均匀温度
     T_eva_ext = 800.0  # 蒸发段强制加热边界
     T_env = 3.0  # 太空环境温度
-    up_vf = 1.0  # 朝上角系数
-    down_vf = 0.675  # 朝下角系数
+    up_vf = 0.0  # 内侧向上角系数
+    down_vf = 0.3  # 内侧向下角系数
     emissivity = 0.93  # 发射率
 
     # 轴向尺寸划分
@@ -286,5 +289,5 @@ def plot_axial_temp_contour(time_history, z_centers, temp_history_2d):
 
 if __name__ == '__main__':
     main()
-    TEASAProfiler.report()
+    # TEASAProfiler.report()
 

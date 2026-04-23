@@ -101,7 +101,7 @@ class RingHP(BaseComponent):
                  hp_wall_mat, hp_fluid_mat, hp_wick_mat,
                  header_correlation_func: Callable,
                  hp_crossflow_base_func: Callable,
-                 C_D: float = 1.0,
+                 C_D: float = 1.0, hp_L_aba: float = 0.0, hp_n_aba: int = 0,
                  external_heat_config: Optional[Dict[str, Any]] = None):
         super().__init__(name)
 
@@ -159,10 +159,10 @@ class RingHP(BaseComponent):
                     r_in_wall=hp_r_in,
                     r_vapor=hp_r_vapor,
                     L_eva=hp_L_eva,
-                    L_aba=0.0,
+                    L_aba=hp_L_aba,
                     L_con=hp_L_con,
                     n_eva=hp_n_eva,
-                    n_aba=0,
+                    n_aba=hp_n_aba,
                     n_con=hp_n_con,
                     n_wick=hp_n_wick,
                     n_wall=hp_n_wall,

@@ -57,7 +57,7 @@ class Electrode(HeatConduction2D):
             raise ValueError(
                 f"焦耳热数组长度 ({len(q_joule_array)}) 必须与电极 '{self.name}' 的网格节点数 ({self.N}) 一致！")
 
-        # 1. 极致优化：使用 [:] 原地切片赋值，避免改变 NumPy 数组的底层内存指针
+        # 1. 使用 [:] 原地切片赋值，避免改变 NumPy 数组的底层内存指针
         self.Q_source[:] = q_joule_array
 
         # 2. [核心修复点] 激活外部热源标记！

@@ -42,6 +42,7 @@ class HPwithFin(BaseComponent):
         self.fin_wrap_ratio = fin_wrap_ratio
 
         # 接触热阻按单位根部面积给出，这里先保留接口，默认取理想接触。
+        # 单位面积接触热阻 [K·m²/W]
         self.R_contact_sq = 0.0
 
         self.emissivity = emissivity
@@ -52,7 +53,21 @@ class HPwithFin(BaseComponent):
         # 上下视角因子折算到一个平均有效发射率。
         self.up_view_factor = up_view_factor
         self.down_view_factor = down_view_factor
-        self.F_avg = (self.up_view_factor + self.down_view_factor) / 2.0
+        self.inner_view_factor = self.up_view_factor + self.down_view_factor
+        if self.inner_view_factor > 1.0 + 1.0e-12:
+            raise ValueError(
+                "Invalid HPwithFin inner-side view factors: "
+                "up_view_factor + down_view_factor must be <= 1.0. "
+                f"Got up={self.up_view_factor}, down={self.down_view_factor}."
+            )
+        if self.inner_view_factor < -1.0e-12:
+            raise ValueError(
+                "Invalid HPwithFin inner-side view factors: "
+                "up_view_factor + down_view_factor must be >= 0.0. "
+                f"Got up={self.up_view_factor}, down={self.down_view_factor}."
+            )
+        # 外侧半周完全向太空辐射，内侧半周按 up/down 角系数之和折算。
+        self.F_avg = (1.0 + self.inner_view_factor) / 2.0
         self.effective_emissivity = self.emissivity * self.F_avg
 
         # ===== 2. 构造热管二维网格 =====
@@ -85,6 +100,7 @@ class HPwithFin(BaseComponent):
 
         # ===== 3. 实例化热管本体 =====
         self.hp = HeatPipe2D(
+            name=f"{self.name}_HP_inner",
             mesh=self.hp_mesh,
             solid1=wall_mat,
             solid2=fluid_mat,
@@ -119,6 +135,16 @@ class HPwithFin(BaseComponent):
 
         # 翅片支路不是显式网格，而是等效成一条“外部热阻边界”。
         # pre_step() 每一步都会重新计算这条支路的等效热阻。
+        # 翅片支路不是显式网格，而是等效成一条"外部热阻边界"。
+        # pre_step() 每一步都会重新计算这条支路的等效热阻。
+        # 这里初始化时设置一个极大的热阻(1e15 K/W)，相当于"开路"状态，
+        # 确保在第一次pre_step()执行前不会有热量通过翅片支路。
+        # 这个值会在“pre_step()”中根据翅片准稳态求解结果被动态修正。
+
+        # TODO: 翅片支路的热阻计算需要根据实际物理模型进行。
+        # 当前这里简单地设置为一个极大的热阻(1e15 K/W)，相当于"开路"状态，
+        # 确保在第一次pre_step()执行前不会有热量通过翅片支路。
+        # 这个值会在“pre_step()”中根据翅片准稳态求解结果被动态修正。
         self.bc_fin_con = self.hp.boundaries['outer_con'].add_resistance_condition(
             T_ext=self.T_space,
             R_ext=1e15
@@ -126,16 +152,36 @@ class HPwithFin(BaseComponent):
 
         # ===== 5. 翅片几何折算 =====
         # area_fin_root: 每个轴向切片上，真正长出翅片的根部面积。
+        # area_con是数组，fin_wrap_ratio是实数，结果area_fin_root是数组
         area_fin_root = area_con * self.fin_wrap_ratio
 
         # 降维后的一维翅片方程需要一个“翅片宽度”，
         # 这里由根部面积 / 厚度得到等效宽度。
+        # fin_width_array 是降维后一维翅片模型的"特征宽度"。
+        # 注意这里不是几何意义上的"翅片宽度"，而是为了保持导热截面积
+        # 和辐射周长计算正确而引入的等效参数。
+        #
+        # 对于矩形截面翅片，导热截面积 A_c = width * thickness，
+        # 辐射周长 P = 2 * width（双面辐射）。
+        # 因此 width = A_c / thickness = area_fin_root / thickness。
+        #
+        # 这里 area_fin_root 是根部实际面积（考虑 fin_wrap_ratio 后），
+        # 除以厚度得到等效宽度，确保后续一维导热方程的截面积和周长计算
+        # 与真实三维几何保持热等效，而不是直接使用某个几何宽度。
         self.fin_width_array = area_fin_root / self.fin_thickness
 
         # 这里定义的是“一侧受照的投影面积”，用于轨道外热流加载，
         # 对当前简化模型来说，比直接使用双面辐射面积更合适。
         self.fin_illuminated_area_array = self.fin_width_array * self.fin_height
 
+        # 保留 R_contact_abs 接口以支持未来扩展：
+        # 1. 允许用户通过 set_contact_resistance() 等方法动态设置接触热阻
+        # 2. 支持非理想接触情况下的热阻叠加计算
+        # 3. 保持与现有边界条件接口的兼容性，便于后续模型升级
+        # 当前默认理想接触（R_contact_sq = 0），但接口保留供未来使用
+        # R_contact_sq 是单位面积接触热阻 [K·m²/W]
+        # area_fin_root 是根部面积 [m²]
+        # 因此 R_contact_abs 的单位是 [K/W]，符合热阻的量纲要求
         with np.errstate(divide='ignore', invalid='ignore'):
             self.R_contact_abs = self.R_contact_sq / area_fin_root
             self.R_contact_abs = np.nan_to_num(self.R_contact_abs, posinf=0.0)
@@ -157,6 +203,9 @@ class HPwithFin(BaseComponent):
         self.last_fin_radiation_distribution = np.zeros_like(area_con)
         self.last_fin_absorption_distribution = np.zeros_like(area_con)
         self.last_fin_net_from_root_distribution = np.zeros_like(area_con)
+        self.last_fin_conductance_distribution = np.zeros_like(area_con)
+        self.last_fin_effective_temperature_distribution = np.full_like(area_con, self.T_space)
+        self.last_fin_equivalent_resistance_distribution = np.full_like(area_con, 1e15)
 
     def set_fin_external_heat_source(self, heat_source, illuminated_area_scale: float = 1.0):
         """
@@ -198,7 +247,9 @@ class HPwithFin(BaseComponent):
             self.fin_external_absorption_area.fill(0.0)
             return
 
+        # 获取冷凝段外边界的期望形状，用于验证输入热流源的维度一致性
         expected_shape = self.hp.boundaries['outer_con'].shape
+        # 检查热流源形状是否与期望形状匹配，若不匹配则抛出异常
         if heat_source.shape != expected_shape:
             raise ValueError(
                 f"Accounting heat source shape {heat_source.shape} mismatch with condenser boundary shape {expected_shape}"
@@ -249,6 +300,134 @@ class HPwithFin(BaseComponent):
         total_absorption = wall_absorption + fin_absorption
         return wall_absorption, fin_absorption, total_absorption
 
+    def _solve_fin_quasi_steady(self, T_root: np.ndarray, q_fin_abs_density: np.ndarray):
+        """
+        对每个冷凝段轴向切片求解降维后的一维翅片问题。
+
+        返回:
+        - T_fin: 翅片温度场，形状为 (n_con, n_fin_height)
+        - Q_fin_radiation: 翅片向空间辐射的热量 [W]
+        - Q_fin_absorption: 翅片直接吸收的热量 [W]
+        - Q_fin_net_from_root: 从热管根部抽取的净热量 [W]
+
+        Q_fin_net_from_root 的符号约定为：当热量通过翅片根部离开热管时为正。
+        """
+        T_root = np.asarray(T_root, dtype=float)
+        q_fin_abs_density = np.asarray(q_fin_abs_density, dtype=float)
+
+        Nc = len(T_root)
+        Nh = self.n_fin_height
+        if Nh <= 0:
+            raise ValueError("n_fin_height must be positive for HPwithFin")
+
+        dx = self.fin_height / Nh
+        Ac = self.fin_width_array * self.fin_thickness
+        P = 2.0 * self.fin_width_array
+
+        T = np.repeat(T_root[:, np.newaxis], Nh, axis=1)
+        Q_fin_radiation_array = np.zeros_like(T_root)
+        Q_fin_absorption_array = (
+            q_fin_abs_density
+            * self.fin_illuminated_area_array
+            * self.fin_external_area_scale
+        )
+
+        active = (
+            np.isfinite(T_root)
+            & np.isfinite(q_fin_abs_density)
+            & (self.fin_height > 0.0)
+            & (Ac > 0.0)
+            & (P > 0.0)
+        )
+
+        if not np.any(active):
+            Q_fin_net_from_root_array = Q_fin_radiation_array - Q_fin_absorption_array
+            return T, Q_fin_radiation_array, Q_fin_absorption_array, Q_fin_net_from_root_array
+
+        T_active = T[active].copy()
+        T_root_active = T_root[active]
+        q_abs_density_active = q_fin_abs_density[active]
+        Ac_active = Ac[active]
+        P_active = P[active]
+        k_fin_array = np.full_like(T_root_active, 348.9)
+
+        q_fin_abs_segment = np.repeat(
+            (
+                q_abs_density_active
+                * self.fin_width_array[active]
+                * dx
+                * self.fin_external_area_scale
+            )[:, np.newaxis],
+            Nh,
+            axis=1
+        )
+
+        G = k_fin_array * Ac_active / dx
+        G_base = 2.0 * G
+
+        max_iter = 50
+        tol = 1e-4
+        Na = len(T_root_active)
+
+        for _ in range(max_iter):
+            h_rad = self.effective_emissivity * self.sigma * (
+                T_active ** 2 + self.T_space ** 2
+            ) * (T_active + self.T_space)
+            rad_term = h_rad * P_active[:, np.newaxis] * dx
+
+            a = np.zeros((Na, Nh))
+            b = np.zeros((Na, Nh))
+            c = np.zeros((Na, Nh))
+            d = np.zeros((Na, Nh))
+
+            b[:, 0] = G_base + G + rad_term[:, 0]
+            c[:, 0] = -G
+            d[:, 0] = G_base * T_root_active + rad_term[:, 0] * self.T_space + q_fin_abs_segment[:, 0]
+
+            if Nh > 1:
+                a[:, 1:-1] = -G[:, np.newaxis]
+                b[:, 1:-1] = 2.0 * G[:, np.newaxis] + rad_term[:, 1:-1]
+                c[:, 1:-1] = -G[:, np.newaxis]
+                d[:, 1:-1] = rad_term[:, 1:-1] * self.T_space + q_fin_abs_segment[:, 1:-1]
+
+                a[:, -1] = -G
+                b[:, -1] = G + rad_term[:, -1]
+                d[:, -1] = rad_term[:, -1] * self.T_space + q_fin_abs_segment[:, -1]
+
+            c_prime = np.zeros((Na, Nh))
+            d_prime = np.zeros((Na, Nh))
+
+            c_prime[:, 0] = c[:, 0] / b[:, 0]
+            d_prime[:, 0] = d[:, 0] / b[:, 0]
+
+            for j in range(1, Nh):
+                denom = b[:, j] - a[:, j] * c_prime[:, j - 1]
+                c_prime[:, j] = c[:, j] / denom
+                d_prime[:, j] = (d[:, j] - a[:, j] * d_prime[:, j - 1]) / denom
+
+            T_new = np.zeros((Na, Nh))
+            T_new[:, -1] = d_prime[:, -1]
+            for j in range(Nh - 2, -1, -1):
+                T_new[:, j] = d_prime[:, j] - c_prime[:, j] * T_new[:, j + 1]
+
+            if np.max(np.abs(T_new - T_active)) < tol:
+                T_active = T_new
+                break
+            T_active = T_new
+
+        T[active] = T_active
+        Q_fin_radiation_array[active] = np.sum(
+            self.effective_emissivity
+            * self.sigma
+            * P_active[:, np.newaxis]
+            * dx
+            * (T_active ** 4 - self.T_space ** 4),
+            axis=1
+        )
+
+        Q_fin_net_from_root_array = Q_fin_radiation_array - Q_fin_absorption_array
+        return T, Q_fin_radiation_array, Q_fin_absorption_array, Q_fin_net_from_root_array
+
     def pre_step(self, dt: float, current_time: float):
         """
         在每个时间步开始前，求解翅片的准稳态一维导热问题。
@@ -265,130 +444,79 @@ class HPwithFin(BaseComponent):
         2. 这就对应之前的简化模型。
         """
 
-        # 冷凝段外壁温度是翅片根部边界条件。
         T_surf, _ = self.hp.boundaries['outer_con'].get_coupling_surface_snapshot()
-        k_fin_array = np.full_like(T_surf, 348.9)
 
-        Nc = len(T_surf)
-        Nh = self.n_fin_height
-
-        # dx: 翅高方向单元尺寸
-        # Ac: 翅片沿导热方向的截面积
-        # P : 单位长度参与辐射换热的周长
-        dx = self.fin_height / Nh
-        Ac = self.fin_width_array * self.fin_thickness
-        P = 2.0 * self.fin_width_array
-
-        # 如果启用了“翅片直接受照”，这里会拿到翅片根部每个轴向切片对应的热流密度。
+        # 初始化翅片外热流密度为零，作为默认状态
         q_fin_abs_density = np.zeros_like(T_surf)
+        # 如果设置了翅片外热流源，则获取当前时刻的热流密度
         if self.fin_external_heat_source is not None:
             q_fin_abs_density = np.asarray(
                 self.fin_external_heat_source.get_heat_flux(current_time),
                 dtype=float
             )
 
-        # 将面热流密度折算为每个翅片离散单元的吸收功率。
-        # 这里使用重复广播，使每一层翅高单元先均匀分摊这部分吸热。
-        q_fin_abs_segment = np.repeat(
-            (
-                q_fin_abs_density
-                * self.fin_width_array
-                * dx
-                * self.fin_external_area_scale
-            )[:, np.newaxis],
-            Nh,
-            axis=1
+        # 求解翅片准稳态一维导热问题，获取翅片温度场及各热流分量
+        (
+            T,                              # 翅片温度分布，形状为 (n_con, n_fin_height)
+            Q_fin_radiation_array,          # 翅片向空间辐射的总热量 [W]
+            Q_fin_absorption_array,         # 翅片直接吸收的轨道外热流 [W]
+            Q_fin_net_from_root_array,      # 从热管根部抽取的净热量 [W]
+        ) = self._solve_fin_quasi_steady(T_surf, q_fin_abs_density)
+
+        dT = np.maximum(0.1, 1.0e-4 * np.maximum(T_surf, 1.0))
+        _, _, _, Q_fin_net_plus = self._solve_fin_quasi_steady(
+            T_surf + dT,
+            q_fin_abs_density
         )
 
-        # 一维导热离散中的导热系数。
-        G = k_fin_array * Ac / dx
-
-        # 根部是半单元距离，所以是 2G。
-        G_base = 2.0 * G
-
-        # Picard 迭代初值：整片翅片先取根部温度。
-        T = np.repeat(T_surf[:, np.newaxis], Nh, axis=1)
-
-        max_iter = 50
-        tol = 1e-4
-
-        # ===== Picard + TDMA 求解翅片非线性辐射问题 =====
-        for _ in range(max_iter):
-            # 将 T^4 辐射项在线性化后写成 h_rad*(T - T_env) 形式。
-            h_rad = self.effective_emissivity * self.sigma * (T ** 2 + self.T_space ** 2) * (T + self.T_space)
-            rad_term = h_rad * P[:, np.newaxis] * dx
-
-            a = np.zeros((Nc, Nh))
-            b = np.zeros((Nc, Nh))
-            c = np.zeros((Nc, Nh))
-            d = np.zeros((Nc, Nh))
-
-            # 根部节点：既与壁面导热耦合，也与环境辐射换热，还可能直接吸热。
-            b[:, 0] = G_base + G + rad_term[:, 0]
-            c[:, 0] = -G
-            d[:, 0] = G_base * T_surf + rad_term[:, 0] * self.T_space + q_fin_abs_segment[:, 0]
-
-            # 内部节点。
-            a[:, 1:-1] = -G[:, np.newaxis]
-            b[:, 1:-1] = 2.0 * G[:, np.newaxis] + rad_term[:, 1:-1]
-            c[:, 1:-1] = -G[:, np.newaxis]
-            d[:, 1:-1] = rad_term[:, 1:-1] * self.T_space + q_fin_abs_segment[:, 1:-1]
-
-            # 翅尖绝热端。
-            a[:, -1] = -G
-            b[:, -1] = G + rad_term[:, -1]
-            d[:, -1] = rad_term[:, -1] * self.T_space + q_fin_abs_segment[:, -1]
-
-            # Thomas algorithm，按轴向切片并行地解 Nh 阶三对角方程组。
-            c_prime = np.zeros((Nc, Nh))
-            d_prime = np.zeros((Nc, Nh))
-
-            c_prime[:, 0] = c[:, 0] / b[:, 0]
-            d_prime[:, 0] = d[:, 0] / b[:, 0]
-
-            for j in range(1, Nh):
-                denom = b[:, j] - a[:, j] * c_prime[:, j - 1]
-                c_prime[:, j] = c[:, j] / denom
-                d_prime[:, j] = (d[:, j] - a[:, j] * d_prime[:, j - 1]) / denom
-
-            T_new = np.zeros((Nc, Nh))
-            T_new[:, -1] = d_prime[:, -1]
-            for j in range(Nh - 2, -1, -1):
-                T_new[:, j] = d_prime[:, j] - c_prime[:, j] * T_new[:, j + 1]
-
-            if np.max(np.abs(T_new - T)) < tol:
-                T = T_new
-                break
-            T = T_new
-
-        # ===== 由翅片温度场回算热量分配 =====
-        # Q_fin_radiation_array: 翅片向深空辐射掉的总热量
-        Q_fin_radiation_array = np.sum(
-            self.effective_emissivity * self.sigma * P[:, np.newaxis] * dx * (T ** 4 - self.T_space ** 4),
-            axis=1
-        )
-
-        # Q_fin_absorption_array: 翅片直接从轨道外热流中吸收的热量
-        Q_fin_absorption_array = q_fin_abs_density * self.fin_illuminated_area_array * self.fin_external_area_scale
-
-        # 对壁面而言，真正需要通过翅片根部输送出去的净热量
-        # = 翅片向外辐射量 - 翅片自己直接吸收的外热流。
-        Q_fin_net_from_root_array = Q_fin_radiation_array - Q_fin_absorption_array
-
-        # 把净热量反求成等效热阻，重新写入冷凝段翅片支路。
         with np.errstate(divide='ignore', invalid='ignore'):
-            R_rad_eq = (T_surf - self.T_space) / Q_fin_net_from_root_array
-            R_rad_eq = np.nan_to_num(R_rad_eq, posinf=1e15, nan=1e15)
-            R_rad_eq = np.where(R_rad_eq < 0, 1e15, R_rad_eq)
+            lambda_raw = (Q_fin_net_plus - Q_fin_net_from_root_array) / dT
 
-        R_fin_eq_array = self.R_contact_abs + R_rad_eq
-        self.bc_fin_con.update_params(R_ext=R_fin_eq_array)
+        lambda_min = 1.0e-12
+        lambda_max = 1.0e12
 
-        # 缓存给后处理使用，避免重复求解。
+        Nh = self.n_fin_height
+        dx = self.fin_height / Nh
+        P = 2.0 * self.fin_width_array
+        T_space_safe = max(float(self.T_space), 1.0e-3)
+        T_seg_safe = np.maximum(T, 1.0e-3)
+        A_seg = P[:, np.newaxis] * dx
+        lambda_fallback = np.sum(
+            self.effective_emissivity
+            * self.sigma
+            * A_seg
+            * (T_seg_safe + T_space_safe)
+            * (T_seg_safe ** 2 + T_space_safe ** 2),
+            axis=1
+        )
+        lambda_fallback = np.nan_to_num(lambda_fallback, nan=lambda_min, posinf=lambda_max, neginf=lambda_min)
+        lambda_fallback = np.clip(lambda_fallback, lambda_min, lambda_max)
+
+        lambda_valid = np.isfinite(lambda_raw) & (lambda_raw > lambda_min)
+        lambda_fin = np.where(lambda_valid, lambda_raw, lambda_fallback)
+        lambda_fin = np.clip(lambda_fin, lambda_min, lambda_max)
+
+        R_fin_eq_array = self.R_contact_abs + 1.0 / lambda_fin
+        R_fin_eq_array = np.nan_to_num(R_fin_eq_array, nan=1e15, posinf=1e15, neginf=1e15)
+        R_fin_eq_array = np.maximum(R_fin_eq_array, 1.0 / lambda_max)
+
+        T_fin_eff_array = T_surf - Q_fin_net_from_root_array * R_fin_eq_array
+        T_fin_eff_array = np.nan_to_num(
+            T_fin_eff_array,
+            nan=float(self.T_space),
+            posinf=1.0e12,
+            neginf=-1.0e12
+        )
+
+        self.bc_fin_con.update_params(T_ext=T_fin_eff_array, R_ext=R_fin_eq_array)
+
         self.last_fin_temperature = np.array(T, copy=True)
         self.last_fin_radiation_distribution = np.array(Q_fin_radiation_array, copy=True)
         self.last_fin_absorption_distribution = np.array(Q_fin_absorption_array, copy=True)
         self.last_fin_net_from_root_distribution = np.array(Q_fin_net_from_root_array, copy=True)
+        self.last_fin_conductance_distribution = np.array(lambda_fin, copy=True)
+        self.last_fin_effective_temperature_distribution = np.array(T_fin_eff_array, copy=True)
+        self.last_fin_equivalent_resistance_distribution = np.array(R_fin_eq_array, copy=True)
 
     def get_solids(self) -> list:
         """返回系统管理器需要积分的固体对象。"""
@@ -439,11 +567,17 @@ class HPwithFin(BaseComponent):
         q_con_fin_rad_dist = np.array(self.last_fin_radiation_distribution, copy=True)
         q_con_fin_abs_dist = np.array(self.last_fin_absorption_distribution, copy=True)
         q_con_fin_net_dist = np.array(self.last_fin_net_from_root_distribution, copy=True)
+        q_con_fin_conductance_dist = np.array(self.last_fin_conductance_distribution, copy=True)
+        q_con_fin_effective_temp_dist = np.array(self.last_fin_effective_temperature_distribution, copy=True)
+        q_con_fin_equiv_resistance_dist = np.array(self.last_fin_equivalent_resistance_distribution, copy=True)
         return {
             'bare_radiation': q_con_bare_dist,
             'fin_radiation': q_con_fin_rad_dist,
             'fin_absorption': q_con_fin_abs_dist,
             'fin_net_from_root': q_con_fin_net_dist,
+            'fin_conductance': q_con_fin_conductance_dist,
+            'fin_effective_temperature': q_con_fin_effective_temp_dist,
+            'fin_equivalent_resistance': q_con_fin_equiv_resistance_dist,
             'gross_rejection': q_con_bare_dist + q_con_fin_rad_dist,
             'net_rejection': q_con_bare_dist + q_con_fin_net_dist
         }

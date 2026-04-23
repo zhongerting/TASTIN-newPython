@@ -2,6 +2,15 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
+import sys
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.abspath(os.path.join(current_dir, '..'))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+
+from profiler import TEASAProfiler
+
 # --- 导入底层求解器与组件 ---
 from Solvers.SystemManager import SystemManager
 from Solvers.HeatConduction.Mesh import Mesh2D
@@ -23,11 +32,18 @@ from Materials.Fluids.Sodium import Sodium
 
 # --- 导入 TFE 组件与数据结构 ---
 from Components.TFEUnit import TFEUnit, TFEGeometry, TFEMeshParams, GapConfig
-from Components.ReactorCore import ReactorCore
+from Components.ReactorCore import (
+    ReactorCore,
+    GlobalAnnulusStructureConfig,
+    GlobalGapStructureConfig,
+)
 from profiler import TEASAProfiler
 
 
-def run_test_v4():
+def run_test_v4(t_end: float = 3000.0,
+                save_interval: float = 200.0,
+                restart_file: str = "test_core_assemble_v4_restart_t1200.npz",
+                enable_plot: bool = False):
     """
     全堆芯非均匀反射层 + 虚拟代表通道流量归集 瞬态测试
     """
@@ -275,6 +291,10 @@ def run_test_v4():
 
     # --- 4.2 构建全局慢化剂网格 (The Mesh Master 对齐) ---
     tfe_multipliers = {name: mult for name, mult in zip(ring_names, multipliers)}
+    # 功率因子按“单根真实燃料元件的功率份额”定义。
+    # 这里先采用最简单的等功率假设：每根真实燃料元件占全堆总功率的 1 / N_total。
+    total_real_elements = float(sum(multipliers))
+    tfe_power_factors = {name: 1.0 / total_real_elements for name in ring_names}
     ring_mapping = {name: i for i, name in enumerate(ring_names)}
 
     # 【核心对齐】: 累加求出所有网格界面的绝对坐标 (Len=33)
@@ -282,7 +302,11 @@ def run_test_v4():
 
     mod_meshes = []
     r_in = geom_params.r_moderator_outer
-    r_mod_outer_sys = 0.20  # 全局慢化剂最外径 0.2m (继承 v3)
+
+    # 这里按 Fortran 版本“慢化剂 -> 间隙 -> 筒体 -> 间隙 -> 反射层”的思路，
+    # 给出一组可直接运行的外层结构示例参数。
+    # 后续若接 CoreInput 解析器，只需要把这些数值替换成输入文件读入值即可。
+    r_mod_outer_sys = 57.0e-3
     delta_r = (r_mod_outer_sys - r_in) / 4
 
     for i in range(4):
@@ -294,14 +318,56 @@ def run_test_v4():
         mod_meshes.append(mesh)
         r_in += delta_r
 
-    # --- 4.3 组装宏观 ReactorCore ---
+    # --- 4.3 构建堆芯外层结构配置 ---
+    # 第一层间隙：全局慢化剂外表面 -> 筒体内表面
+    moderator_barrel_gap_cfg = GlobalGapStructureConfig(
+        mode='simplified',
+        width=5.0e-3,
+        h_eq=0.0,
+        emissivity_inner=0.8,
+        emissivity_outer=0.8
+    )
+
+    # 筒体：当前先用不锈钢建模，径向控制体数参考旧版输入风格取 3
+    barrel_cfg = GlobalAnnulusStructureConfig(
+        material=materials_dict['StainlessSteel'],
+        outer_radius=65.0e-3,
+        n_radial=3,
+        initial_temp=743.0,
+        outer_surface_emissivity=0.05
+    )
+
+    # 第二层间隙：筒体外表面 -> 反射层内表面
+    barrel_reflector_gap_cfg = GlobalGapStructureConfig(
+        mode='simplified',
+        width=2.0e-3,
+        h_eq=0.0,
+        emissivity_inner=0.8,
+        emissivity_outer=0.8
+    )
+
+    # 外部反射层：按你的要求默认保留 8 个径向控制体
+    reflector_cfg = GlobalAnnulusStructureConfig(
+        material=materials_dict['BerylliumOxide'],
+        outer_radius=102.0e-3,
+        n_radial=8,
+        initial_temp=743.0,
+        outer_surface_emissivity=0.6
+    )
+
+    # --- 4.4 组装宏观 ReactorCore ---
     core = ReactorCore(
         name="TASTIN_Core",
         tfe_dict=tfes,
         tfe_multipliers=tfe_multipliers,
+        tfe_power_factors=tfe_power_factors,
         mod_meshes=mod_meshes,
         mod_material=materials_dict['ZrH'],
         ring_mapping=ring_mapping,
+        barrel_config=barrel_cfg,
+        reflector_config=reflector_cfg,
+        moderator_barrel_gap_config=moderator_barrel_gap_cfg,
+        barrel_reflector_gap_config=barrel_reflector_gap_cfg,
         T_space=250.0,  # 继承自 v3 的太空辐射环境温度
         alpha_tec=0.5,
         enable_tec_coupled=False  # 稳态/热工水力测试验证期，暂关电耦合
@@ -336,13 +402,11 @@ def run_test_v4():
     # Part 7: 瞬态测试循环与重启动逻辑 (Transient Test Loop & Restart Logic)
     # =========================================================================
     # --- 7.1 仿真时间参数 ---
-    t_end = 3000.0  # 仿真结束时间 [s]
-    save_interval = 200.0  # 每 2.0s 保存一次断点
+    t_end = float(t_end)  # 仿真结束时间 [s]
+    save_interval = float(save_interval)  # 自动保存时间间隔 [s]
 
     # --- 7.2 重启动逻辑 (严格使用 v3 的 load_global_state) ---
     # 如果想从头算，设为 None；如果想续算，设为文件路径如 "restart_tXXX.npz"
-    restart_file = "test_core_assemble_v4_restart_t1200.npz"
-
     if restart_file and os.path.exists(restart_file):
         system.load_global_state(restart_file)
         current_time = system.global_time
@@ -355,6 +419,8 @@ def run_test_v4():
     else:
         current_time = 0.0
         system.initialize_system()
+        # 由 ReactorCore 统一持有点堆模块，并在初始化时把稳态总功率同步到 Fuel 内热源。
+        core.initialize_point_reactor(total_power_initial=3100.0)
         print("   => [Init] 系统冷态初始化完成。")
 
     # 设置下一个自动保存的时间节点
@@ -376,19 +442,16 @@ def run_test_v4():
     print("开始执行求解...")
     while current_time <= t_end:
 
-        # A. 施加边界条件 (严格遵循 v3 遍历 tfes 进行功率下发)
-        # 根据当前时间判断功率阶跃 (2.0s 前 150kW，2.0s 后 180kW)
-        current_p_total = 3100
-
-        for name, tfe in tfes.items():
-            # 这里的 p_total 在 TFEUnit 内部会根据 padded_power_profile 进行权重分配
-            tfe.update_neutronic_power(p_total=current_p_total)
+        # A. 设置外加反应性。当前测试先采用零外加反应性，只验证耦合链路本身。
+        current_rho_control = 0.0
 
         # B. 获取自适应步长 (严格调用 v3 方法)
         dt = system.compute_adaptive_dt(min_dt=1e-3, max_dt=0.2, safety_factor=20.0)
 
-        # C. 推进求解 (严格调用 v3 方法)
-        system.step(dt)
+        # C. 推进求解。中子状态更新与功率下发由 ReactorCore 在 SystemManager.step 内部完成。
+        system.step(dt, reactivity_control=current_rho_control)
+
+        current_p_total = 0.0 if core.point_reactor is None else core.point_reactor.total_power
 
         # D. 数据提取与记录
         history_time.append(current_time)
@@ -443,9 +506,26 @@ def run_test_v4():
     # Part 8: 结果绘图 (Result Plotting)
     # =========================================================================
     print("8. Plotting results...")
-    # TODO: 创建 plt.figure()
-    # TODO: 绘制芯块温度、流道出口温度、全局流量等瞬态曲线
-    # TODO: plt.tight_layout(), plt.savefig(), plt.show()
+    if enable_plot:
+        # TODO: 创建 plt.figure()
+        # TODO: 绘制芯块温度、流道出口温度、全局流量等瞬态曲线
+        # TODO: plt.tight_layout(), plt.savefig(), plt.show()
+        pass
+
+    # 返回关键信息，便于自动化验证脚本复用
+    return {
+        'final_time': current_time,
+        'history_time': history_time,
+        'history_I': history_I,
+        'history_U': history_U,
+        'history_T_pellet': history_T_pellet,
+        'history_T_coolant': history_T_coolant,
+        'history_T_mod': history_T_mod,
+        'history_W_flow': history_W_flow,
+        'core': core,
+        'system': system,
+        'tfes': tfes,
+    }
 
 
 if __name__ == "__main__":

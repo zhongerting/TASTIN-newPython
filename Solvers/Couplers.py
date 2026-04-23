@@ -316,7 +316,8 @@ class FluidSolidCouple:
         #   Implicit_Factor = lambda
 
         # 更新一下固体壁面温度
-        # self.solid_bound.compute_net_flux_for_solver()
+        if hasattr(self.solid_bound, "compute_net_flux_for_solver"):
+            self.solid_bound.compute_net_flux_for_solver()
 
         # [关键数据获取] 从 BoundaryRegion 获取当前壁面温度
         T_wall = self.solid_bound.T_surface

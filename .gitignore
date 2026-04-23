@@ -12,3 +12,9 @@ build/
 *.iml
 *.log
 .vscode/
+
+# Simulation result artifacts
+*.npz
+*.csv
+CoolantLoop/*.png
+testModule/*.png

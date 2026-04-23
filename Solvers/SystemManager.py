@@ -175,6 +175,7 @@ class SystemManager:
         # 此时流速 W 已经稳定，我们需要利用这个 W 计算初始的换热系数 h 和 Re
         # 并将流体温度 T_f 推送给固体边界，将固体壁温 T_w 推送给流体源项
         logger.info("  >> [Step 2] Synchronizing Couplers...")
+        self._sync_solid_boundaries_for_coupling()
 
         for coupler in self.couplers:
             if hasattr(coupler, 'execute'):
@@ -217,6 +218,16 @@ class SystemManager:
             if hasattr(vol, 'implicit_coeff'):
                 vol.implicit_coeff = 0.0
 
+    def _sync_solid_boundaries_for_coupling(self):
+        """Push current solid states into BoundaryRegion caches before couplers read them."""
+        for solid in self.solid_components.values():
+            if hasattr(solid, '_update_properties'):
+                solid._update_properties()
+            if hasattr(solid, '_compute_internal_resistance'):
+                solid._compute_internal_resistance()
+            if hasattr(solid, '_update_boundaries_state'):
+                solid._update_boundaries_state(current_time=self.global_time)
+
     @TEASAProfiler.profile
     def step(self, dt: float, inner_iter: int = 1, convergence_tol: float = 1e-3, reactivity_control: float = 0.0):
         """
@@ -246,20 +257,10 @@ class SystemManager:
         # --- 3. 内部迭代循环 ---
         for k in range(inner_iter):
 
-            # [新增 Step 0] 采集系统反应性反馈 (隐式反馈收集)
-            # -------------------------------------------------------
-            # 注意：必须在回滚 (Rollback) 之前执行！
-            # 此时的各组件温度为上次迭代计算出的 t_n+1 预测温度 (对于 k=0，是 t_n 温度)
-            total_feedback = 0.0
-            if self.point_reactor is not None:
-                for name, solid in self.solid_components.items():
-                    # 鸭子类型判断：如果该组件实现了获取反馈的接口，则采集其反馈
-                    if hasattr(solid, 'get_reactivity_feedback'):
-                        total_feedback += solid.get_reactivity_feedback()
-
             # [Step A] 准备源项 (Coupling Phase)
             # -------------------------------------------------------
             self._clear_fluid_sources()
+            self._sync_solid_boundaries_for_coupling()
 
             # 执行耦合，计算当前状态下的 Q_wall (Explicit) 和 implicit_coeff
             # k=0: 基于 t_n
@@ -319,18 +320,31 @@ class SystemManager:
 
             # [新增 Step C.2] 中子动力学积分与功率下发
             # -------------------------------------------------------
-            # 回滚后，在真正的热工水力求解之前，先更新功率源项
-            if self.point_reactor is not None:
-                # 步进反应堆计算（内部是从 t_n 积分到 t_n+1 的试探状态）
+            # 回滚后，在真正的热工水力求解之前，先由宏观组件更新中子状态与功率源项。
+            component_neutronics_handled = False
+            for comp in self.components:
+                if hasattr(comp, 'advance_neutronics'):
+                    comp.advance_neutronics(
+                        dt=dt,
+                        reactivity_control=reactivity_control,
+                        iteration_index=k
+                    )
+                    component_neutronics_handled = True
+
+            # 向后兼容旧链路：若没有组件接管中子学，仍允许使用 SystemManager.point_reactor。
+            if self.point_reactor is not None and not component_neutronics_handled:
+                total_feedback = 0.0
+                for name, solid in self.solid_components.items():
+                    if hasattr(solid, 'get_reactivity_feedback'):
+                        total_feedback += solid.get_reactivity_feedback()
+
                 self.point_reactor.step(dt, reactivity_control, total_feedback)
 
-                # 下发功率给核心组件
                 p_fiss = self.point_reactor.fission_power
                 p_decay = self.point_reactor.decay_power
                 p_total = self.point_reactor.total_power
 
                 for name, solid in self.solid_components.items():
-                    # 鸭子类型判断：如果组件实现了接受核发热的接口，则注入功率
                     if hasattr(solid, 'set_nuclear_power'):
                         solid.set_nuclear_power(p_fiss, p_decay, p_total)
 
@@ -371,7 +385,13 @@ class SystemManager:
                 T_s_prev = T_s_curr
 
         # --- 4. 固化中子先驱核与系统时间推进 ---
-        if self.point_reactor is not None:
+        component_neutronics_committed = False
+        for comp in self.components:
+            if hasattr(comp, 'commit_neutronics'):
+                comp.commit_neutronics()
+                component_neutronics_committed = True
+
+        if self.point_reactor is not None and not component_neutronics_committed:
             # 当 Picard 迭代跳出（收敛）后，固化当前时间步的真实状态
             self.point_reactor.commit()
 

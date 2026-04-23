@@ -83,8 +83,8 @@ def build_ringhp_case(external_heat_config=None):
     n_fin_height = 15
     fin_wrap_ratio = (2 * fin_thickness) / (2.0 * np.pi * r_out_hp)
     emissivity = 0.93
-    up_vf = 1.0
-    down_vf = 0.675
+    up_vf = 0.0
+    down_vf = 0.3
 
     # ---------------------------------------------------------
     # 2. 物性

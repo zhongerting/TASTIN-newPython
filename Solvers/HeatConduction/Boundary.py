@@ -126,7 +126,7 @@ class FluxBC(BaseBoundaryCondition):
         else:
             self.q_flux[:] = q_flux
 
-class DynamicRadiationFluxBC(FluxBC):
+class DynamicRadiationResistanceBC(ResistanceBC):
     """
     动态非线性辐射热流边界条件 (Dynamic Non-linear Radiation Flux BC)
     继承自 FluxBC，利用直线法隐式求解器的实时状态注入，在每个残差评估步动态计算 T^4 辐射热流。
@@ -144,7 +144,12 @@ class DynamicRadiationFluxBC(FluxBC):
         :param shape: 边界形状
         """
         # 初始化父类 FluxBC，初始热流设为 0
-        super().__init__(q_flux=0.0, shape=shape)
+        if np.isscalar(T_env):
+            t_env_arr = np.full(shape, T_env, dtype=float)
+        else:
+            t_env_arr = np.array(T_env, dtype=float)
+
+        super().__init__(T_ext=t_env_arr, R_ext=1.0e15, shape=shape)
 
         # 标量/数组安全处理，兼容性更好
         if np.isscalar(emissivity):
@@ -159,24 +164,52 @@ class DynamicRadiationFluxBC(FluxBC):
         else:
             self.T_env = np.array(T_env, dtype=float)
 
-        self.sigma = 5.670374419e-8  # 斯忒藩-玻尔兹曼常数
+        self.sigma = 5.670374419e-8
+        self.T_ext[:] = self.T_env
+        self.h_rad = np.zeros(shape, dtype=float)
+        self.G_rad = np.zeros(shape, dtype=float)
+        self.T_ref = np.full(shape, 1.0e-3, dtype=float)
+        self.q_flux = np.zeros(shape, dtype=float)
+        self.last_q_flux = self.q_flux
 
-    def update_state(self, T_node: np.ndarray):
+    def update_state(self, T_node: np.ndarray, T_surface: Optional[np.ndarray] = None):
         """
         [关键动态钩子]
         接收最新试探温度，动态更新 self.q_flux。
         由于继承自 FluxBC，BoundaryRegion 在计算时会自动获取更新后的 q_flux。
         """
-        # 防止隐式迭代中极小概率出现的负温
-        T_safe = np.maximum(T_node, 1e-3)
+        if T_surface is None:
+            t_ref_raw = np.asarray(T_node, dtype=float)
+        else:
+            t_surface_arr = np.asarray(T_surface, dtype=float)
+            t_node_arr = np.asarray(T_node, dtype=float)
+            t_ref_raw = np.where(t_surface_arr > 1.0e-3, t_surface_arr, t_node_arr)
 
-        # 核心物理公式: 负号表示热量从节点流失到环境 (符合流入控制体为正的约定)
-        self.q_flux[:] = -self.emissivity * self.sigma * self.area_array * (T_safe ** 4 - self.T_env ** 4)
+        T_safe = np.maximum(t_ref_raw, 1.0e-3)
+        T_env_safe = np.maximum(self.T_env, 1.0e-3)
+
+        self.T_ref[:] = T_safe
+        self.h_rad[:] = (
+            self.emissivity
+            * self.sigma
+            * (T_safe + T_env_safe)
+            * (T_safe ** 2 + T_env_safe ** 2)
+        )
+        self.G_rad[:] = self.h_rad * self.area_array
+        self.G_rad[:] = np.nan_to_num(self.G_rad, nan=0.0, posinf=0.0, neginf=0.0)
+        self.G_rad[:] = np.maximum(self.G_rad, 1.0e-30)
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            self.R_ext[:] = 1.0 / self.G_rad
+        self.R_ext[:] = np.nan_to_num(self.R_ext, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
+        self.T_ext[:] = self.T_env
+
+        self.q_flux[:] = self.G_rad * (self.T_env - T_safe)
 
     def compute_flux_from_node(self, T_node: np.ndarray, R_internal: np.ndarray) -> np.ndarray:
         """重写父类方法以支持未来可能的直接函数式调用"""
         self.update_state(T_node)
-        return self.q_flux
+        return super().compute_flux_from_node(T_node, R_internal)
 
     def update_params(self,
                       T_env: Optional[Union[float, np.ndarray]] = None,
@@ -188,11 +221,16 @@ class DynamicRadiationFluxBC(FluxBC):
                 self.T_env.fill(T_env)
             else:
                 self.T_env[:] = T_env
+            self.T_ext[:] = self.T_env
         if emissivity is not None:
             if np.isscalar(emissivity):
                 self.emissivity.fill(emissivity)
             else:
                 self.emissivity[:] = emissivity
+
+
+# Backward-compatible class name. The implementation is now resistance-based.
+DynamicRadiationFluxBC = DynamicRadiationResistanceBC
 
 
 # ==========================================
@@ -358,7 +396,11 @@ class BoundaryRegion:
             if hasattr(cond, 'update_state'):
                 if current_time is not None and hasattr(cond, 'current_time'):
                     cond.current_time = current_time
-                cond.update_state(T_node)
+                if isinstance(cond, DynamicRadiationResistanceBC):
+                    T_surface_ref = np.where(self.T_surface > 1.0e-3, self.T_surface, self.T_adj_node)
+                    cond.update_state(T_node, T_surface=T_surface_ref)
+                else:
+                    cond.update_state(T_node)
 
     # 已经经过验证
     # 2026.1.27 修改，增加了多边界条件同时存在的处理逻辑；
@@ -452,6 +494,10 @@ class BoundaryRegion:
         # (热从高温流向低温: 如果 Flux>0 (流入), 则 T_surf > T_node)
         self.T_surface = self.T_adj_node + self.current_flux * self.R_internal
 
+        for bc in self.conditions:
+            if isinstance(bc, DynamicRadiationResistanceBC):
+                bc.q_flux[:] = bc.G_rad * (bc.T_env - self.T_surface)
+
         return self.current_flux
 
     # 2026.1.27 修改的方法，同时处理多个边界条件（已禁用）
@@ -514,7 +560,7 @@ class BoundaryRegion:
 
     def add_dynamic_radiation_condition(self, emissivity, bare_area_array, T_env=3.0):
         """挂载动态辐射边界"""
-        bc = DynamicRadiationFluxBC(emissivity, bare_area_array, T_env, self.shape)
+        bc = DynamicRadiationResistanceBC(emissivity, bare_area_array, T_env, self.shape)
         self.conditions.append(bc)
         # 立即叠加一次，防止初始化阶段状态为空
         self._accumulate_bc(bc)

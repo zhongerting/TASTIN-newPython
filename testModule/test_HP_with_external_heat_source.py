@@ -146,7 +146,7 @@ def create_hp_radiator_with_external_heat(case_name: str, external_heat_config: 
     T_init = 800.0
     T_eva_ext = 800.0
     T_env = 3.0
-    up_vf = 1.0
+    up_vf = 0.0
     down_vf = 0.675
     emissivity = 0.93
 
