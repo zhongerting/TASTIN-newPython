@@ -1,8 +1,9 @@
+import math
 import numpy as np
 import logging
 from typing import List, Any, Tuple, Dict, Set
-from scipy.sparse import lil_matrix, csr_matrix
-from scipy.sparse.linalg import spsolve, bicgstab
+from scipy.sparse import lil_matrix, csr_matrix, coo_matrix
+from scipy.sparse.linalg import spsolve
 
 from profiler import TEASAProfiler
 
@@ -11,6 +12,74 @@ from Solvers.Hydrodynamics.BoundaryVolume import IncompressibleBoundaryVolume
 
 # 配置日志
 logger = logging.getLogger(__name__)
+
+
+class _FrozenBoundaryIndexSet(set):
+    """带运行时保护的定压边界索引集合。"""
+
+    def __init__(self, owner: "HydraulicNetwork"):
+        super().__init__()
+        self._owner = owner
+
+    def _raise_if_locked(self):
+        if self._owner._fixed_pressure_indices_locked:
+            raise RuntimeError(
+                "Runtime modification of fixed_pressure_indices is not supported. "
+                "The cached matrix structures assume a fixed pressure-boundary set. "
+                "Please rebuild the HydraulicNetwork if the fixed-pressure boundary membership must change."
+            )
+
+    def add(self, element):
+        self._raise_if_locked()
+        return super().add(element)
+
+    def clear(self):
+        self._raise_if_locked()
+        return super().clear()
+
+    def discard(self, element):
+        self._raise_if_locked()
+        return super().discard(element)
+
+    def difference_update(self, *others):
+        self._raise_if_locked()
+        return super().difference_update(*others)
+
+    def intersection_update(self, *others):
+        self._raise_if_locked()
+        return super().intersection_update(*others)
+
+    def pop(self):
+        self._raise_if_locked()
+        return super().pop()
+
+    def remove(self, element):
+        self._raise_if_locked()
+        return super().remove(element)
+
+    def symmetric_difference_update(self, other):
+        self._raise_if_locked()
+        return super().symmetric_difference_update(other)
+
+    def update(self, *others):
+        self._raise_if_locked()
+        return super().update(*others)
+
+    def __iand__(self, other):
+        self._raise_if_locked()
+        return super().__iand__(other)
+
+    def __ior__(self, other):
+        self._raise_if_locked()
+        return super().__ior__(other)
+
+    def __isub__(self, other):
+        self._raise_if_locked()
+        return super().__isub__(other)
+
+    def __ixor__(self, other):
+        self._raise_if_locked()
+        return super().__ixor__(other)
 
 
 class HydraulicNetwork:
@@ -53,7 +122,13 @@ class HydraulicNetwork:
 
         # 3. 边界条件索引 (Fixed Pressure Boundary Indices)
         # 存储那些被标记为“稳压器”的节点的索引
-        self.fixed_pressure_indices: Set[int] = set()
+        self._fixed_pressure_indices_locked = False
+        self._fixed_pressure_indices = _FrozenBoundaryIndexSet(self)
+        self.fixed_pressure_mask = np.zeros(self.n_vol, dtype=bool)
+        self.normal_pressure_mask = np.ones(self.n_vol, dtype=bool)
+        self.fixed_pressure_idx_arr = np.empty(0, dtype=np.int32)
+        self.normal_pressure_idx_arr = np.empty(0, dtype=np.int32)
+        self.fixed_target_P_vec = np.empty(0)
 
         # --- Phase 1: 几何常数 (Geometric Constants) ---
         # 存储节点几何常数，防止计算过程中反复调用
@@ -66,6 +141,17 @@ class HydraulicNetwork:
         self.A_junc_vec = np.zeros(self.n_junc)  # junc.area
         self.L_junc_vec = np.zeros(self.n_junc)  # junc.length
         self.K_loss_vec = np.zeros(self.n_junc)  # junc.k_loss
+        self.idx_from_vec = np.zeros(self.n_junc, dtype=np.int32)
+        self.idx_to_vec = np.zeros(self.n_junc, dtype=np.int32)
+        self.Dh_from_vec = np.zeros(self.n_junc)
+        self.Dh_to_vec = np.zeros(self.n_junc)
+        self.L_from_half_vec = np.zeros(self.n_junc)
+        self.L_to_half_vec = np.zeros(self.n_junc)
+        self.A_from_node_vec = np.zeros(self.n_junc)
+        self.A_to_node_vec = np.zeros(self.n_junc)
+        self.is_inlet_junction_mask = np.zeros(self.n_junc, dtype=bool)
+        self.target_W_vec = np.zeros(self.n_junc)
+        self.inlet_junction_indices = np.empty(0, dtype=np.int32)
         # --- 乘子向量，用于网络拓扑的非对称质量/能量缩放 ---
         self.M_from_vec = np.ones(self.n_junc)
         self.M_to_vec = np.ones(self.n_junc)
@@ -87,6 +173,7 @@ class HydraulicNetwork:
         # 用于迭代的流量变量
         self.W_old = np.zeros(self.n_junc)
         self.W_iterate = np.zeros(self.n_junc)
+        self.W_residual = np.zeros(self.n_junc)
 
         # --- Phase 4: 物理系数 (Physics Coefficients) ---
         # 动量方程系数: W^{n+1} = a_j * (P_in - P_out) + b_j
@@ -96,9 +183,60 @@ class HydraulicNetwork:
         # 辅助物理场 (用于系数计算)
         self.rho_vec = np.zeros(self.n_vol)  # Density [kg/m^3]
         self.mu_vec = np.zeros(self.n_vol)  # Viscosity [Pa.s]
+        self.inlet_relaxation_gain = 50.0
+        self.zero_source_vec = np.zeros(self.n_vol)
+        self.pressure_rhs_buffer = np.zeros(self.n_vol)
+        self.pressure_matrix = csr_matrix((self.n_vol, self.n_vol), dtype=float)
+        self.pressure_diag_ptrs = np.empty(0, dtype=np.int32)
+        self.pressure_junction_slot_ptrs = np.empty(0, dtype=np.int32)
+        self.pressure_junction_slot_junc_idx = np.empty(0, dtype=np.int32)
+        self.pressure_junction_slot_scale = np.empty(0)
+        self.pressure_rhs_rows = np.empty(0, dtype=np.int32)
+        self.pressure_rhs_junc_idx = np.empty(0, dtype=np.int32)
+        self.pressure_rhs_scale = np.empty(0)
+        self.primary_material = next(
+            (getattr(vol, 'material', None) for vol in self.volumes_obj if getattr(vol, 'material', None) is not None),
+            None
+        )
+        self.material_has_drho_dp = hasattr(self.primary_material, 'liquid_density_derivative_P')
+        self.material_has_drho_dt = hasattr(self.primary_material, 'liquid_density_derivative_T')
+        self.material_has_temp_from_h = hasattr(self.primary_material, 'temperature_from_enthalpy')
+
+        self.energy_matrix = csr_matrix((self.n_vol, self.n_vol), dtype=float)
+        self.energy_diag_ptrs = np.empty(0, dtype=np.int32)
+        self.energy_from_diag_ptrs = np.empty(0, dtype=np.int32)
+        self.energy_from_offdiag_ptrs = np.empty(0, dtype=np.int32)
+        self.energy_to_diag_ptrs = np.empty(0, dtype=np.int32)
+        self.energy_to_offdiag_ptrs = np.empty(0, dtype=np.int32)
+        self.energy_from_junc_idx = np.empty(0, dtype=np.int32)
+        self.energy_to_junc_idx = np.empty(0, dtype=np.int32)
+        self.energy_from_multiplier = np.empty(0)
+        self.energy_to_multiplier = np.empty(0)
+        self.energy_mass_buffer = np.zeros(self.n_vol)
+        self.energy_cp_buffer = np.ones(self.n_vol)
+        self.energy_lam_h_buffer = np.zeros(self.n_vol)
+        self.energy_q_mod_buffer = np.zeros(self.n_vol)
+        self.energy_inertia_buffer = np.zeros(self.n_vol)
+        self.energy_diag_buffer = np.zeros(self.n_vol)
+        self.energy_rhs_buffer = np.zeros(self.n_vol)
+        self.energy_aux_buffer = np.zeros(self.n_vol)
+        self.energy_T_old_buffer = np.zeros(self.n_vol)
+        self.energy_h_old_buffer = np.zeros(self.n_vol)
+        self.enthalpy_derivative_buffer = np.zeros(self.n_vol)
+        self.thermal_source_buffer = np.zeros(self.n_vol)
+        self.enthalpy_mass_buffer = np.zeros(self.n_vol)
+        self.enthalpy_q_total_buffer = np.zeros(self.n_vol)
+        self.enthalpy_flux_buffer = np.zeros(self.n_junc)
+        self.enthalpy_from_flux_buffer = np.zeros(self.n_junc)
+        self.enthalpy_to_flux_buffer = np.zeros(self.n_junc)
+        self.enthalpy_donor_idx_buffer = np.zeros(self.n_junc, dtype=np.int32)
+        self.drho_dh_buffer = np.zeros(self.n_vol)
 
         # --- 执行构建 ---
         self._build_topology()
+        self._build_pressure_system_cache()
+        self._build_energy_system_cache()
+        self._fixed_pressure_indices_locked = True
         self._initialize_state_from_objects()
 
         # 初始化物性 (防止后续计算系数时 rho=0 导致除零)
@@ -107,6 +245,11 @@ class HydraulicNetwork:
         self._update_fluid_properties()
 
         logger.info(f"HydraulicNetwork initialized: {self.n_vol} Nodes, {self.n_junc} Links. Gravity={self.g}")
+
+    @property
+    def fixed_pressure_indices(self) -> Set[int]:
+        """定压边界索引集合。初始化完成后禁止修改成员关系。"""
+        return self._fixed_pressure_indices
 
     def _build_topology(self):
         """
@@ -150,20 +293,32 @@ class HydraulicNetwork:
 
             idx_from = self.vol_to_idx[vol_from]
             idx_to = self.vol_to_idx[vol_to]
+            self.idx_from_vec[j_idx] = idx_from
+            self.idx_to_vec[j_idx] = idx_to
 
             # --- [性能优化] 提取连接恒定几何参数 ---
             # FlowJunction 类已明确定义了这些属性
             self.A_junc_vec[j_idx] = junc.area
             self.L_junc_vec[j_idx] = junc.length
             self.K_loss_vec[j_idx] = junc.k_loss
+            self.Dh_from_vec[j_idx] = vol_from.d_h
+            self.Dh_to_vec[j_idx] = vol_to.d_h
+            self.L_from_half_vec[j_idx] = 0.5 * vol_from.len
+            self.L_to_half_vec[j_idx] = 0.5 * vol_to.len
+            self.A_from_node_vec[j_idx] = vol_from.area
+            self.A_to_node_vec[j_idx] = vol_to.area
 
             # --- 提取宏观/微观乘子 (普通接管默认返回 1.0) ---
             self.M_from_vec[j_idx] = getattr(junc, 'multiplier_from', 1.0)
             self.M_to_vec[j_idx] = getattr(junc, 'multiplier_to', 1.0)
+            self.is_inlet_junction_mask[j_idx] = hasattr(junc, 'target_W')
+            if self.is_inlet_junction_mask[j_idx]:
+                self.target_W_vec[j_idx] = junc.target_W
 
             # 存储描述符
             self.junction_descriptors.append((junc, idx_from, idx_to))
 
+        self.inlet_junction_indices = np.flatnonzero(self.is_inlet_junction_mask).astype(np.int32, copy=False)
         logger.debug("Topology mapping built successfully.")
 
     def _initialize_state_from_objects(self):
@@ -182,6 +337,225 @@ class HydraulicNetwork:
 
         for idx, junc in enumerate(self.junctions_obj):
             self.W_vec[idx] = junc.W
+
+    def _refresh_cached_boundary_targets(self):
+        """刷新入口边界的目标流量缓存。"""
+        for j_idx in self.inlet_junction_indices:
+            self.target_W_vec[j_idx] = self.junctions_obj[j_idx].target_W
+
+    @staticmethod
+    def _locate_csr_entries(indptr: np.ndarray, indices: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+        """定位给定坐标在 CSR 数据区中的位置。"""
+        ptrs = np.empty(len(rows), dtype=np.int32)
+        for i, (row, col) in enumerate(zip(rows, cols)):
+            start = indptr[row]
+            end = indptr[row + 1]
+            local = np.searchsorted(indices[start:end], col)
+            ptr = start + local
+            if ptr >= end or indices[ptr] != col:
+                raise KeyError(f"CSR entry ({row}, {col}) not found in pressure matrix cache.")
+            ptrs[i] = ptr
+        return ptrs
+
+    def _refresh_cached_pressure_targets(self):
+        """刷新定压边界的目标压力缓存。"""
+        for local_idx, vol_idx in enumerate(self.fixed_pressure_idx_arr):
+            vol = self.volumes_obj[vol_idx]
+            self.fixed_target_P_vec[local_idx] = getattr(vol, 'target_P', self.P_vec[vol_idx])
+
+    def _build_pressure_system_cache(self):
+        """预构建固定拓扑下的压力矩阵结构和 RHS 映射。"""
+        self.fixed_pressure_mask.fill(False)
+        if self.fixed_pressure_indices:
+            self.fixed_pressure_mask[list(self.fixed_pressure_indices)] = True
+
+        np.logical_not(self.fixed_pressure_mask, out=self.normal_pressure_mask)
+        self.fixed_pressure_idx_arr = np.flatnonzero(self.fixed_pressure_mask).astype(np.int32, copy=False)
+        self.normal_pressure_idx_arr = np.flatnonzero(self.normal_pressure_mask).astype(np.int32, copy=False)
+        self.fixed_target_P_vec = np.zeros(self.fixed_pressure_idx_arr.size)
+        self._refresh_cached_pressure_targets()
+
+        diag_rows = np.arange(self.n_vol, dtype=np.int32)
+        diag_cols = diag_rows.copy()
+
+        from_active = ~self.fixed_pressure_mask[self.idx_from_vec]
+        to_active = ~self.fixed_pressure_mask[self.idx_to_vec]
+        from_junc_idx = np.flatnonzero(from_active).astype(np.int32, copy=False)
+        to_junc_idx = np.flatnonzero(to_active).astype(np.int32, copy=False)
+
+        slot_rows_parts = []
+        slot_cols_parts = []
+        slot_junc_idx_parts = []
+        slot_scale_parts = []
+
+        if from_junc_idx.size > 0:
+            slot_rows_parts.extend([
+                self.idx_from_vec[from_junc_idx],
+                self.idx_from_vec[from_junc_idx]
+            ])
+            slot_cols_parts.extend([
+                self.idx_from_vec[from_junc_idx],
+                self.idx_to_vec[from_junc_idx]
+            ])
+            slot_junc_idx_parts.extend([from_junc_idx, from_junc_idx])
+            slot_scale_parts.extend([
+                self.M_from_vec[from_junc_idx],
+                -self.M_from_vec[from_junc_idx]
+            ])
+
+        if to_junc_idx.size > 0:
+            slot_rows_parts.extend([
+                self.idx_to_vec[to_junc_idx],
+                self.idx_to_vec[to_junc_idx]
+            ])
+            slot_cols_parts.extend([
+                self.idx_to_vec[to_junc_idx],
+                self.idx_from_vec[to_junc_idx]
+            ])
+            slot_junc_idx_parts.extend([to_junc_idx, to_junc_idx])
+            slot_scale_parts.extend([
+                self.M_to_vec[to_junc_idx],
+                -self.M_to_vec[to_junc_idx]
+            ])
+
+        if slot_rows_parts:
+            slot_rows = np.concatenate(slot_rows_parts).astype(np.int32, copy=False)
+            slot_cols = np.concatenate(slot_cols_parts).astype(np.int32, copy=False)
+            slot_junc_idx = np.concatenate(slot_junc_idx_parts).astype(np.int32, copy=False)
+            slot_scale = np.concatenate(slot_scale_parts)
+        else:
+            slot_rows = np.empty(0, dtype=np.int32)
+            slot_cols = np.empty(0, dtype=np.int32)
+            slot_junc_idx = np.empty(0, dtype=np.int32)
+            slot_scale = np.empty(0)
+
+        struct_rows = np.concatenate([diag_rows, slot_rows])
+        struct_cols = np.concatenate([diag_cols, slot_cols])
+        struct_data = np.ones(struct_rows.size)
+        self.pressure_matrix = coo_matrix((struct_data, (struct_rows, struct_cols)), shape=(self.n_vol, self.n_vol)).tocsr()
+        self.pressure_matrix.data[:] = 0.0
+
+        self.pressure_diag_ptrs = self._locate_csr_entries(
+            self.pressure_matrix.indptr,
+            self.pressure_matrix.indices,
+            diag_rows,
+            diag_cols
+        )
+
+        if slot_rows.size > 0:
+            self.pressure_junction_slot_ptrs = self._locate_csr_entries(
+                self.pressure_matrix.indptr,
+                self.pressure_matrix.indices,
+                slot_rows,
+                slot_cols
+            )
+            self.pressure_junction_slot_junc_idx = slot_junc_idx
+            self.pressure_junction_slot_scale = slot_scale
+        else:
+            self.pressure_junction_slot_ptrs = np.empty(0, dtype=np.int32)
+            self.pressure_junction_slot_junc_idx = np.empty(0, dtype=np.int32)
+            self.pressure_junction_slot_scale = np.empty(0)
+
+        rhs_rows_parts = []
+        rhs_junc_idx_parts = []
+        rhs_scale_parts = []
+
+        if from_junc_idx.size > 0:
+            rhs_rows_parts.append(self.idx_from_vec[from_junc_idx])
+            rhs_junc_idx_parts.append(from_junc_idx)
+            rhs_scale_parts.append(-self.M_from_vec[from_junc_idx])
+
+        if to_junc_idx.size > 0:
+            rhs_rows_parts.append(self.idx_to_vec[to_junc_idx])
+            rhs_junc_idx_parts.append(to_junc_idx)
+            rhs_scale_parts.append(self.M_to_vec[to_junc_idx])
+
+        if rhs_rows_parts:
+            self.pressure_rhs_rows = np.concatenate(rhs_rows_parts).astype(np.int32, copy=False)
+            self.pressure_rhs_junc_idx = np.concatenate(rhs_junc_idx_parts).astype(np.int32, copy=False)
+            self.pressure_rhs_scale = np.concatenate(rhs_scale_parts)
+        else:
+            self.pressure_rhs_rows = np.empty(0, dtype=np.int32)
+            self.pressure_rhs_junc_idx = np.empty(0, dtype=np.int32)
+            self.pressure_rhs_scale = np.empty(0)
+
+    def _build_energy_system_cache(self):
+        """预构建固定拓扑下的能量矩阵结构。"""
+        diag_rows = np.arange(self.n_vol, dtype=np.int32)
+        diag_cols = diag_rows.copy()
+
+        self.energy_from_junc_idx = np.flatnonzero(~self.fixed_pressure_mask[self.idx_from_vec]).astype(np.int32, copy=False)
+        self.energy_to_junc_idx = np.flatnonzero(~self.fixed_pressure_mask[self.idx_to_vec]).astype(np.int32, copy=False)
+        self.energy_from_multiplier = self.M_from_vec[self.energy_from_junc_idx].copy()
+        self.energy_to_multiplier = self.M_to_vec[self.energy_to_junc_idx].copy()
+
+        rows_parts = [diag_rows]
+        cols_parts = [diag_cols]
+
+        if self.energy_from_junc_idx.size > 0:
+            from_rows = self.idx_from_vec[self.energy_from_junc_idx]
+            rows_parts.extend([from_rows, from_rows])
+            cols_parts.extend([
+                self.idx_from_vec[self.energy_from_junc_idx],
+                self.idx_to_vec[self.energy_from_junc_idx]
+            ])
+
+        if self.energy_to_junc_idx.size > 0:
+            to_rows = self.idx_to_vec[self.energy_to_junc_idx]
+            rows_parts.extend([to_rows, to_rows])
+            cols_parts.extend([
+                self.idx_to_vec[self.energy_to_junc_idx],
+                self.idx_from_vec[self.energy_to_junc_idx]
+            ])
+
+        struct_rows = np.concatenate(rows_parts).astype(np.int32, copy=False)
+        struct_cols = np.concatenate(cols_parts).astype(np.int32, copy=False)
+        struct_data = np.ones(struct_rows.size)
+        self.energy_matrix = coo_matrix((struct_data, (struct_rows, struct_cols)), shape=(self.n_vol, self.n_vol)).tocsr()
+        self.energy_matrix.data[:] = 0.0
+
+        self.energy_diag_ptrs = self._locate_csr_entries(
+            self.energy_matrix.indptr,
+            self.energy_matrix.indices,
+            diag_rows,
+            diag_cols
+        )
+
+        if self.energy_from_junc_idx.size > 0:
+            from_rows = self.idx_from_vec[self.energy_from_junc_idx]
+            self.energy_from_diag_ptrs = self._locate_csr_entries(
+                self.energy_matrix.indptr,
+                self.energy_matrix.indices,
+                from_rows,
+                self.idx_from_vec[self.energy_from_junc_idx]
+            )
+            self.energy_from_offdiag_ptrs = self._locate_csr_entries(
+                self.energy_matrix.indptr,
+                self.energy_matrix.indices,
+                from_rows,
+                self.idx_to_vec[self.energy_from_junc_idx]
+            )
+        else:
+            self.energy_from_diag_ptrs = np.empty(0, dtype=np.int32)
+            self.energy_from_offdiag_ptrs = np.empty(0, dtype=np.int32)
+
+        if self.energy_to_junc_idx.size > 0:
+            to_rows = self.idx_to_vec[self.energy_to_junc_idx]
+            self.energy_to_diag_ptrs = self._locate_csr_entries(
+                self.energy_matrix.indptr,
+                self.energy_matrix.indices,
+                to_rows,
+                self.idx_to_vec[self.energy_to_junc_idx]
+            )
+            self.energy_to_offdiag_ptrs = self._locate_csr_entries(
+                self.energy_matrix.indptr,
+                self.energy_matrix.indices,
+                to_rows,
+                self.idx_from_vec[self.energy_to_junc_idx]
+            )
+        else:
+            self.energy_to_diag_ptrs = np.empty(0, dtype=np.int32)
+            self.energy_to_offdiag_ptrs = np.empty(0, dtype=np.int32)
 
     def debug_topology(self):
         """
@@ -218,30 +592,31 @@ class HydraulicNetwork:
         # 1. 向量化物性计算 (核心性能提升区)
         #    系统使用单一流体回路，统一流网采用相同流体
         # =========================================================================
-        mat = self.volumes_obj[0].material
+        mat = self.primary_material
 
         if mat is not None:
             # 直接传入整个系统的温度向量 T_vec 和压力向量 P_vec
             # 单次 C/NumPy 级别调用，取代 N 次 Python 级别调用
-            self.cp_vec = mat.heat_capacity(self.T_vec, self.P_vec)
+            self.cp_vec[:] = mat.heat_capacity(self.T_vec, self.P_vec)
             raw_rho = mat.density(self.T_vec, self.P_vec)
             raw_mu = mat.viscosity(self.T_vec, self.P_vec)
 
             # 偏导数计算 (用于 Jacobian 和压缩性矩阵构建)
-            if hasattr(mat, 'liquid_density_derivative_P'):
+            if self.material_has_drho_dp:
                 raw_drho_dp = mat.liquid_density_derivative_P(self.P_vec)
             else:
-                raw_drho_dp = np.full(self.n_vol, 1e-9)
+                self.drho_dp_vec.fill(1e-9)
+                raw_drho_dp = self.drho_dp_vec
 
-            if hasattr(mat, 'liquid_density_derivative_T'):
-                self.drho_dt_vec = mat.liquid_density_derivative_T(self.T_vec)
+            if self.material_has_drho_dt:
+                self.drho_dt_vec[:] = mat.liquid_density_derivative_T(self.T_vec)
             else:
                 self.drho_dt_vec.fill(0.0)
 
             # --- 数值安全与物理边界保护 (全数组并行处理) ---
-            self.rho_vec = np.maximum(raw_rho, 1e-1)  # 避免除零
-            self.mu_vec = np.maximum(raw_mu, 1e-10)  # 避免极小粘度导致雷诺数溢出
-            self.drho_dp_vec = np.maximum(raw_drho_dp, 1e-11)  # 提供微弱的人工可压缩性兜底
+            np.maximum(raw_rho, 1e-1, out=self.rho_vec)  # 避免除零
+            np.maximum(raw_mu, 1e-10, out=self.mu_vec)  # 避免极小粘度导致雷诺数溢出
+            np.maximum(raw_drho_dp, 1e-11, out=self.drho_dp_vec)  # 提供微弱的人工可压缩性兜底
 
         else:
             # 兜底：如果未指定物性库，赋予安全的恒定默认值
@@ -249,83 +624,16 @@ class HydraulicNetwork:
             self.drho_dp_vec.fill(1e-9)
             self.drho_dt_vec.fill(0.0)
             # rho 和 mu 保持初始/当前值，但施加最小限制
-            self.rho_vec = np.maximum(self.rho_vec, 1e-1)
-            self.mu_vec = np.maximum(self.mu_vec, 1e-10)
+            np.maximum(self.rho_vec, 1e-1, out=self.rho_vec)
+            np.maximum(self.mu_vec, 1e-10, out=self.mu_vec)
 
-        # =========================================================================
-        # 2. 轻量级状态同步与边界源项提取 (Lightweight Object Sync)
-        # =========================================================================
+        q_expl = self.Q_expl_vec
+        lam_imp = self.lam_imp_vec
         for i, vol in enumerate(self.volumes_obj):
-            # 状态同步：确保物理对象 (FluidVolume) 与求解器的当前场对齐
-            vol.P = self.P_vec[i]
-            vol.T = self.T_vec[i]
-
-            # 替代原本缓慢的 vol.update_properties(mat)
-            # 直接将向量化算好的结果回填给对象缓存，供后处理或其他模块读取
             vol.rho = self.rho_vec[i]
             vol.mu = self.mu_vec[i]
-
-            # 提取组件动态源项 (这些属性在导热/壁面换热模块中被更新)
-            # 避免使用 getattr，直接访问以追求极限性能
-            self.Q_expl_vec[i] = vol.Q_wall + vol.Q_vol
-            self.lam_imp_vec[i] = vol.implicit_coeff
-
-        # for i, vol in enumerate(self.volumes_obj):
-        #     # 1. 如果有物性库，先将求解器的当前状态同步给对象，并更新基础物性
-        #     if vol.material is not None:
-        #         # 状态同步：确保对象与求解器向量在当前时间步对齐
-        #         vol.P = self.P_vec[i]
-        #         vol.T = self.T_vec[i]
-        #
-        #         # 调用对象自身的更新方法 (会更新 vol.rho, vol.mu 等)
-        #         vol.update_properties(vol.material)
-        #
-        #         # --- [性能优化核心：预计算物性微商与比热] ---
-        #         # 感谢你采用了多项式拟合，这里的调用极快，彻底消除了深层循环中的重复计算
-        #         self.cp_vec[i] = vol.material.heat_capacity(vol.T, vol.P)
-        #
-        #         try:
-        #             self.drho_dp_vec[i] = vol.material.liquid_density_derivative_P(vol.P)
-        #         except AttributeError:
-        #             self.drho_dp_vec[i] = 1e-9  # 兜底：微弱人工可压缩性
-        #
-        #         try:
-        #             self.drho_dt_vec[i] = vol.material.liquid_density_derivative_T(vol.T)
-        #         except AttributeError:
-        #             self.drho_dt_vec[i] = 0.0  # 兜底：无热膨胀
-        #
-        #     else:
-        #         # 如果没有物性库，给予数值安全的默认值
-        #         self.cp_vec[i] = 1000.0
-        #         self.drho_dp_vec[i] = 1e-9
-        #         self.drho_dt_vec[i] = 0.0
-        #
-        #     # 2. 从对象回读基础物性到向量 (用于后续的纯数学矩阵计算)
-        #     # 必须确保 rho > 0, mu > 0，避免除零异常
-        #     self.rho_vec[i] = max(vol.rho, 1e-1)
-        #     self.mu_vec[i] = max(vol.mu, 1e-10)
-        #
-        #     # 3. --- [性能优化核心：提取动态源项] ---
-        #     # 直接访问明确存在的属性，彻底抛弃 getattr 和 hasattr
-        #     # FluidVolume 基类已明确定义了这些属性
-        #     self.Q_expl_vec[i] = vol.Q_wall + vol.Q_vol
-        #     self.lam_imp_vec[i] = vol.implicit_coeff
-
-        # for idx, vol in enumerate(self.volumes_obj):
-        #     # 假设 Volume 有 material 属性和 update_properties 方法
-        #     # 如果没有，直接使用当前属性
-        #     if hasattr(vol, 'material') and vol.material is not None:
-        #         # 确保 Volume 内部状态与向量同步 (虽然通常是一致的)
-        #         vol.P = self.P_vec[idx]
-        #         vol.T = self.T_vec[idx]
-        #         # 调用组件自身的更新方法 (如果存在)
-        #         if hasattr(vol, 'update_properties'):
-        #             vol.update_properties(vol.material)
-        #
-        #     # 从对象回读到向量 (用于矩阵计算)
-        #     # 必须确保 rho > 0
-        #     self.rho_vec[idx] = max(getattr(vol, 'rho', 800.0), 1e-1)
-        #     self.mu_vec[idx] = max(getattr(vol, 'mu', 1e-4), 1e-10)
+            q_expl[i] = vol.Q_wall + vol.Q_vol
+            lam_imp[i] = vol.implicit_coeff
 
     @staticmethod
     def _calc_friction_factor_static(Re: float) -> float:
@@ -343,14 +651,45 @@ class HydraulicNetwork:
             f = 0.3164 / (Re_calc ** 0.25)
             max_iter = 50
             for _ in range(max_iter):
-                sqrt_f = np.sqrt(f)
+                sqrt_f = math.sqrt(f)
                 argument = 2.51 / (Re_calc * sqrt_f)
-                denom = -2.0 * np.log10(argument)
+                denom = -2.0 * math.log10(argument)
                 f_new = (1.0 / denom) ** 2.0
                 if abs(f_new - f) <= 1.0e-8:
                     return f_new
                 f = f_new
             return f
+
+    @staticmethod
+    def _calc_friction_factor_static_vec(Re: np.ndarray) -> np.ndarray:
+        """Vectorized equivalent of `_calc_friction_factor_static`."""
+        Re_calc = np.maximum(np.asarray(Re, dtype=float), 1e-5)
+        f = np.empty_like(Re_calc)
+
+        laminar_mask = Re_calc <= 1000.0
+        blasius_mask = (Re_calc > 2300.0) & (Re_calc < 100000.0)
+        turbulent_mask = ~(laminar_mask | blasius_mask)
+
+        f[laminar_mask] = 64.0 / Re_calc[laminar_mask]
+        f[blasius_mask] = 0.3164 / np.power(Re_calc[blasius_mask], 0.25)
+
+        if np.any(turbulent_mask):
+            re_turb = Re_calc[turbulent_mask]
+            f_turb = 0.3164 / np.power(re_turb, 0.25)
+
+            for _ in range(50):
+                sqrt_f = np.sqrt(f_turb)
+                argument = 2.51 / (re_turb * sqrt_f)
+                denom = -2.0 * np.log10(argument)
+                f_new = np.power(1.0 / denom, 2.0)
+                if np.max(np.abs(f_new - f_turb)) <= 1.0e-8:
+                    f_turb = f_new
+                    break
+                f_turb = f_new
+
+            f[turbulent_mask] = f_turb
+
+        return f
 
     def _get_upwind_properties(self, idx_in: int, idx_out: int, W_flow: float) -> tuple[np.ndarray[tuple[Any, ...], Any], np.ndarray[tuple[Any, ...], Any]]:
         """
@@ -411,6 +750,7 @@ class HydraulicNetwork:
         4. 重力项: rho * g * dz (Source)
         5. 空间加速: Bernoulli 效应 (Source)
         """
+        return self._calc_momentum_coeffs_fast(dt, W_old_frozen=W_old_frozen)
 
         # 作为系数，需要考虑 3 种流量变量：
         # 1. 此次迭代中的流量变量，即本次迭代待求出的变量：W_vec
@@ -543,6 +883,94 @@ class HydraulicNetwork:
             source_total = (I_term * W_old) + dP_grav + dP_acc + dP_pump
             self.B_coeffs[j_idx] = self.A_coeffs[j_idx] * source_total
 
+    def _calc_momentum_coeffs_fast(self, dt: float, W_old_frozen: np.ndarray = None):
+        """基于缓存数组的动量系数快速路径。"""
+        if self.n_junc == 0:
+            return
+
+        eps = 1.0e-10
+        dt_safe = max(dt, eps)
+
+        self._refresh_cached_boundary_targets()
+
+        if W_old_frozen is None:
+            W_old_frozen = self.W_vec
+
+        idx_from = self.idx_from_vec
+        idx_to = self.idx_to_vec
+        inlet_mask = self.is_inlet_junction_mask
+        normal_mask = ~inlet_mask
+
+        self.A_coeffs.fill(0.0)
+        self.B_coeffs.fill(0.0)
+
+        if np.any(inlet_mask):
+            W_old_inlet = np.asarray(W_old_frozen[inlet_mask], dtype=float)
+            target_W = self.target_W_vec[inlet_mask]
+            self.B_coeffs[inlet_mask] = (
+                W_old_inlet
+                + dt_safe * self.inlet_relaxation_gain * (target_W - W_old_inlet)
+            )
+
+        if not np.any(normal_mask):
+            return
+
+        W_iterate = self.W_vec[normal_mask]
+        W_old = np.asarray(W_old_frozen[normal_mask], dtype=float)
+
+        idx_from_n = idx_from[normal_mask]
+        idx_to_n = idx_to[normal_mask]
+
+        A_flow = np.maximum(self.A_junc_vec[normal_mask], eps)
+        D_h_upwind = np.maximum(self.Dh_from_vec[normal_mask], eps)
+        D_h_downwind = np.maximum(self.Dh_to_vec[normal_mask], eps)
+        L_upwind = self.L_from_half_vec[normal_mask]
+        L_downwind = self.L_to_half_vec[normal_mask]
+        L_inertial = np.maximum(L_upwind + L_downwind, eps)
+
+        rho_in = np.maximum(self.rho_vec[idx_from_n], eps)
+        rho_out = np.maximum(self.rho_vec[idx_to_n], eps)
+        mu_in = np.maximum(self.mu_vec[idx_from_n], eps)
+        mu_out = np.maximum(self.mu_vec[idx_to_n], eps)
+
+        alpha = 0.5 * (1.0 + np.tanh(W_iterate / 1.0e-6))
+        rho_j = np.maximum(alpha * rho_in + (1.0 - alpha) * rho_out, eps)
+        mu_j = np.maximum(alpha * mu_in + (1.0 - alpha) * mu_out, eps)
+
+        W_iterate_abs = np.abs(W_iterate)
+        vel = W_iterate_abs / (rho_j * A_flow)
+        Re_upwind = (rho_j * vel * D_h_upwind) / mu_j
+        Re_downwind = (rho_j * vel * D_h_downwind) / mu_j
+
+        f_upwind = self._calc_friction_factor_static_vec(Re_upwind)
+        f_downwind = self._calc_friction_factor_static_vec(Re_downwind)
+
+        term_geom = (
+            f_upwind * L_upwind / D_h_upwind
+            + f_downwind * L_downwind / D_h_downwind
+            + self.K_loss_vec[normal_mask]
+        )
+        K_linear = (term_geom * W_iterate_abs) / (2.0 * rho_j * A_flow ** 2)
+        I_term = L_inertial / (A_flow * dt_safe)
+
+        dz = self.z_vec[idx_from_n] - self.z_vec[idx_to_n]
+        dP_grav = rho_j * self.g * dz
+
+        A_in_node = np.maximum(self.A_from_node_vec[normal_mask], eps)
+        A_out_node = np.maximum(self.A_to_node_vec[normal_mask], eps)
+        M_in = self.M_from_vec[normal_mask]
+        M_out = self.M_to_vec[normal_mask]
+        term_acc_in = (M_in * M_in) / (rho_in * A_in_node ** 2)
+        term_acc_out = (M_out * M_out) / (rho_out * A_out_node ** 2)
+        dP_acc = 0.5 * (W_old ** 2) * (term_acc_in - term_acc_out)
+
+        denom = np.maximum(I_term + K_linear, eps)
+        A_normal = 1.0 / denom
+        source_total = (I_term * W_old) + dP_grav + dP_acc
+
+        self.A_coeffs[normal_mask] = A_normal
+        self.B_coeffs[normal_mask] = A_normal * source_total
+
     def debug_coefficients(self):
         """[调试工具] 打印计算出的系数"""
         print("\n=== Momentum Coefficients (Phase 2) ===")
@@ -572,85 +1000,64 @@ class HydraulicNetwork:
     # =========================================================================
 
     @TEASAProfiler.profile
-    def _assemble_pressure_system(self, dt: float, include_thermal_expansion: bool = True) -> Tuple[csr_matrix, np.ndarray]:
+    def _assemble_pressure_system(
+        self,
+        dt: float,
+        include_thermal_expansion: bool = True,
+        S_thermal_vec: np.ndarray = None
+    ) -> Tuple[csr_matrix, np.ndarray]:
         """
-        [Phase 3 ] 组装压力矩阵，采用系数矩阵的形式
-        :param dt: 时间步长
-        :param include_thermal_expansion: 是否包含热膨胀源项 (S_thermal)。
-                                          瞬态计算应为 True，稳态初始化应为 False。
-        :return: (A_csr, B) 其中 A_csr 为压缩稀疏行格式矩阵，B 为右端项一维数组
+        [Phase 3] 组装压力矩阵。
+
+        在固定拓扑下，矩阵非零结构预构建并复用，这里只更新 data 和 RHS。
         """
-        # 1. 计算热膨胀源项 (仅当需要时)
-        if include_thermal_expansion:
-            S_thermal_vec = self._calc_thermal_expansion_source(dt)
-        else:
-            S_thermal_vec = np.zeros(self.n_vol)
-
-        # --- [新增优化]: 在循环外一次性截断所有极小的压缩性 ---
-        # np.maximum 会对整个数组进行逐元素比较，返回一个全是安全值的新数组
-        # 这比在循环里一个个调用内置 max() 快得多，而且完美消除了类型警告！
-        safe_drho_dp_vec = np.maximum(self.drho_dp_vec, 1e-9)
-
-        # 2. 准备 COO 格式的三个普通列表，比直接操作 lil_matrix 快百倍
-        rows = []
-        cols = []
-        data = []
-        B = np.zeros(self.n_vol)
-
-        # --- 3. 流量项填充 ---
-        for j_idx, (_, idx_in, idx_out) in enumerate(self.junction_descriptors):
-            a_j = self.A_coeffs[j_idx]
-            b_j = self.B_coeffs[j_idx]
-
-            # 获取当前连接对两端放大倍数
-            M_in = self.M_from_vec[j_idx]
-            M_out = self.M_to_vec[j_idx]
-
-            # [数学验证]: 与其先写满整行再清零，不如直接跳过稳压器节点的方程组装
-            # 上游 (Out)
-            if idx_in not in self.fixed_pressure_indices:
-                rows.extend([idx_in, idx_in])
-                cols.extend([idx_in, idx_out])
-                # 导纳和源项被放大了 M_in 倍
-                data.extend([M_in * a_j, M_in * -a_j])
-                B[idx_in] -= M_in * b_j
-
-            # 下游 (In)
-            if idx_out not in self.fixed_pressure_indices:
-                rows.extend([idx_out, idx_out])
-                cols.extend([idx_out, idx_in])
-                # 导纳和源项被放大了 M_out 倍
-                data.extend([M_out * a_j, M_out * -a_j])
-                B[idx_out] += M_out * b_j
-
-        # --- 4. 压缩性与源项填充 & 边界条件强制处理 ---
-        for i in range(self.n_vol):
-            if i in self.fixed_pressure_indices:
-                # 针对稳压器节点：该行只有对角线元素为 1，右端项为 target_P
-                vol = self.volumes_obj[i]
-                p_target = getattr(vol, 'target_P', self.P_vec[i])  # 这里只对几个边界节点调用 getattr，性能损耗为0
-
-                rows.append(i)
-                cols.append(i)
-                data.append(1.0)
-                B[i] = p_target
+        if S_thermal_vec is None:
+            if include_thermal_expansion:
+                S_thermal_vec = self._calc_thermal_expansion_source(dt)
             else:
-                # 针对普通节点：计算压缩性
-                V_cell = self.V_vec[i]
-                drho_dP = safe_drho_dp_vec[i]
-                compressibility = (V_cell / dt) * drho_dP
+                S_thermal_vec = self.zero_source_vec
 
-                rows.append(i)
-                cols.append(i)
-                data.append(compressibility)
-                B[i] += compressibility * self.P_vec[i] + S_thermal_vec[i]
+        dt_safe = max(dt, 1.0e-10)
+        normal_idx = self.normal_pressure_idx_arr
+        fixed_idx = self.fixed_pressure_idx_arr
 
-        # 5. 一键构建 COO 稀疏矩阵并直接转换为 CSR 格式返回
-        # 注: scipy 的 coo_matrix 会自动累加 (rows, cols) 重复位置的值，天然契合我们的物理组装逻辑！
-        from scipy.sparse import coo_matrix
-        A_sparse = coo_matrix((data, (rows, cols)), shape=(self.n_vol, self.n_vol)).tocsr()
+        data = self.pressure_matrix.data
+        data.fill(0.0)
 
-        return A_sparse, B
+        if self.pressure_junction_slot_ptrs.size > 0:
+            np.add.at(
+                data,
+                self.pressure_junction_slot_ptrs,
+                self.pressure_junction_slot_scale * self.A_coeffs[self.pressure_junction_slot_junc_idx]
+            )
+
+        if normal_idx.size > 0:
+            compressibility = (self.V_vec[normal_idx] / dt_safe) * np.maximum(self.drho_dp_vec[normal_idx], 1e-9)
+            data[self.pressure_diag_ptrs[normal_idx]] += compressibility
+        else:
+            compressibility = self.zero_source_vec[:0]
+
+        if fixed_idx.size > 0:
+            self._refresh_cached_pressure_targets()
+            data[self.pressure_diag_ptrs[fixed_idx]] = 1.0
+
+        B = self.pressure_rhs_buffer
+        B.fill(0.0)
+
+        if normal_idx.size > 0:
+            B[normal_idx] = compressibility * self.P_vec[normal_idx] + S_thermal_vec[normal_idx]
+
+        if fixed_idx.size > 0:
+            B[fixed_idx] = self.fixed_target_P_vec
+
+        if self.pressure_rhs_rows.size > 0:
+            np.add.at(
+                B,
+                self.pressure_rhs_rows,
+                self.pressure_rhs_scale * self.B_coeffs[self.pressure_rhs_junc_idx]
+            )
+
+        return self.pressure_matrix, B
 
         # # 初始化矩阵
         # # 采用 LIL 格式的稀疏矩阵
@@ -775,42 +1182,16 @@ class HydraulicNetwork:
     def _solve_linear_system(self, A_sparse, B: np.ndarray):
         """
         [Phase 3 稀疏更新版] 求解压力线性方程组 A * P = B
-        采用 "迭代求解器为主 (BiCGSTAB) + 直接求解器兜底 (spsolve)" 的高健壮性架构
+        Group E 评估后保留 `spsolve` 直解路径：在当前固定拓扑、约 300 节点 benchmark 下，
+        `spsolve` 比 `splu`、`bicgstab`、`gmres` 和 dense solve 更快且更稳定。
         """
 
-        # 选用直接 SuperLU 直接求解器进行修改
         try:
             self.P_vec = spsolve(A_sparse, B)
         except Exception as e:
             logger.error(f"Sparse Direct Solver failed! Matrix is likely singular. "
                          f"Check for missing pressure boundaries or disconnected nodes. Error: {e}")
             raise RuntimeError(f"Pressure system solver failed: {e}")
-
-        # 采用bicgstab求解，经测试不适用本系统。
-        # try:
-        #     # 1. 尝试使用 BiCGSTAB 迭代求解
-        #     # 传入上一时刻的压力场 self.P_vec 作为初始猜测 (x0)，极大加速瞬态收敛
-        #     # tol=1e-6 对于压力泊松方程通常是足够的工程精度
-        #     P_new, info = bicgstab(A_sparse, B, x0=self.P_vec, rtol=1e-6, atol=1e-8, maxiter=500)
-        #
-        #     if info == 0:
-        #         # 完美收敛：更新压力场
-        #         self.P_vec = P_new
-        #     else:
-        #         # 触发降级保护机制 (Fallback)
-        #         # info > 0: 达到最大迭代次数仍未收敛
-        #         # info < 0: 算法崩溃 (遇到强非对称或奇异特征)
-        #         logger.warning(
-        #             f"Iterative pressure solver struggled (info={info}). Falling back to sparse direct solver (spsolve).")
-        #
-        #         # 2. 瞬间切回稀疏直接求解器
-        #         # spsolve 底层调用 SuperLU，极其稳定，对于 N < 3500 的系统耗时仅在毫秒级
-        #         self.P_vec = spsolve(A_sparse, B)
-        #
-        # except Exception as e:
-        #     # 捕获拓扑错误导致的奇异矩阵异常 (Singular Matrix)
-        #     logger.error(f"Pressure Solver completely failed. Matrix might be singular. Error: {e}")
-        #     raise RuntimeError(f"Linear system solver failed: {e}")
 
     # 旧版：采用直接 LU 分解求解压力方程
     # def _solve_linear_system(self, A: np.ndarray, B: np.ndarray):
@@ -829,30 +1210,12 @@ class HydraulicNetwork:
         """
         回代计算流量 W_new
         W_j = a_j * (P_in - P_out) + b_j
-        同时同步到物理对象
         """
-        for j_idx, (junc, idx_in, idx_out) in enumerate(self.junction_descriptors):
-            a_j = self.A_coeffs[j_idx]
-            b_j = self.B_coeffs[j_idx]
+        if self.n_junc == 0:
+            return
 
-            P_in = self.P_vec[idx_in]
-            P_out = self.P_vec[idx_out]
-
-            # 计算新流量
-            W_new = a_j * (P_in - P_out) + b_j
-
-            # 更新向量
-            self.W_vec[j_idx] = W_new
-
-            # 同步到对象 (以便外部访问)
-            junc.W = W_new
-            # 同时更新流速 (Junction 类的方法)
-            if hasattr(junc, 'update_velocity'):
-                junc.update_velocity()
-
-        # 同步压力到 Volume 对象
-        for i, vol in enumerate(self.volumes_obj):
-            vol.P = self.P_vec[i]
+        pressure_drop = self.P_vec[self.idx_from_vec] - self.P_vec[self.idx_to_vec]
+        self.W_vec[:] = self.A_coeffs * pressure_drop + self.B_coeffs
 
     def step_hydraulic(self, dt: float):
         """
@@ -879,6 +1242,12 @@ class HydraulicNetwork:
 
         # 5. 更新状态
         self._update_flow_rates()
+        self._sync_vectors_to_objects(
+            sync_pressure=True,
+            sync_flow=True,
+            sync_energy=False,
+            sync_properties=False
+        )
 
     # =========================================================================
     # Phase 4: Energy Coupling & Main Stepping (Thermal Engine)
@@ -891,56 +1260,39 @@ class HydraulicNetwork:
 
         方程: M * dh/dt = Sum(W*h)_in - Sum(W*h)_out + Q_total
         """
-        dh_dt_vec = np.zeros(self.n_vol)
+        dh_dt_vec = self.enthalpy_derivative_buffer
+        dh_dt_vec.fill(0.0)
 
-        # 1. 计算净焓通量 (Net Enthalpy Flux)
-        # 遍历所有连接，累加 flux 到相连节点
-        for j_idx, (_, idx_in, idx_out) in enumerate(self.junction_descriptors):
-            W = self.W_vec[j_idx]
+        if self.n_junc > 0:
+            donor_idx = self.enthalpy_donor_idx_buffer
+            np.copyto(donor_idx, self.idx_from_vec)
+            reverse_mask = self.W_vec < 0.0
+            donor_idx[reverse_mask] = self.idx_to_vec[reverse_mask]
 
-            # 施主元胞判定 (Donor Cell)
-            if W >= 0:
-                h_flux = W * self.h_vec[idx_in]
-            else:
-                h_flux = W * self.h_vec[idx_out]
-
-            # ====== [新增] 提取乘子 ======
-            M_in = self.M_from_vec[j_idx]
-            M_out = self.M_to_vec[j_idx]
-
-            # 对上游是流出 (-)，对下游是流入 (+)
-            # M * dh/dt = ... - Flux_out + Flux_in ...
-            # 注意: W 的正方向定义为 in -> out
-            # idx_in 节点流出 W，带走 h_flux -> 贡献 -h_flux
-            # idx_out 节点流入 W，带来 h_flux -> 贡献 +h_flux
-
-            # 修正逻辑：上述 h_flux 包含了符号 W。
-            # 如果 W>0: h_flux > 0. in 减少，out 增加. Correct.
-            # 如果 W<0: h_flux < 0. in 增加 ( -(-val) ), out 减少 ( +(-val) ). Correct.
-
-            # 但需注意质量项的影响，这里简化为纯能量通量散度
-            # 实际上我们计算的是 RHS_energy
-
-            # 累加到节点导数缓存 (暂时存储净通量)
-            # 累加到节点导数缓存 (暂时存储净通量)
-            # [核心修正] 进出能量按各自的乘子放大
-            dh_dt_vec[idx_in] -= M_in * h_flux
-            dh_dt_vec[idx_out] += M_out * h_flux
+            h_flux_vec = self.enthalpy_flux_buffer
+            np.multiply(self.W_vec, self.h_vec[donor_idx], out=h_flux_vec)
+            np.multiply(-self.M_from_vec, h_flux_vec, out=self.enthalpy_from_flux_buffer)
+            np.multiply(self.M_to_vec, h_flux_vec, out=self.enthalpy_to_flux_buffer)
+            np.add.at(dh_dt_vec, self.idx_from_vec, self.enthalpy_from_flux_buffer)
+            np.add.at(dh_dt_vec, self.idx_to_vec, self.enthalpy_to_flux_buffer)
 
         # 2. 加上源项并除以质量
         # 获取质量 M = rho * V (直接读取缓存数组)
-        mass_vec = self.rho_vec * self.V_vec
+        mass_vec = self.enthalpy_mass_buffer
+        np.multiply(self.rho_vec, self.V_vec, out=mass_vec)
 
         # 合成净热源: Q_total = Q_explicit - imp_coeff * T_curr
-        Q_total_vec = self.Q_expl_vec - self.lam_imp_vec * self.T_vec
+        Q_total_vec = self.enthalpy_q_total_buffer
+        np.multiply(self.lam_imp_vec, self.T_vec, out=Q_total_vec)
+        np.subtract(self.Q_expl_vec, Q_total_vec, out=Q_total_vec)
 
         # 将热源累加到导数上
         dh_dt_vec += Q_total_vec
 
         # 防护除零，进行向量化安全相除
         # 相当于: if mass > 1e-6: dh_dt = val / mass else: dh_dt = 0.0
-        safe_mass = np.where(mass_vec > 1e-6, mass_vec, 1.0)
-        dh_dt_vec = np.where(mass_vec > 1e-6, dh_dt_vec / safe_mass, 0.0)
+        np.divide(dh_dt_vec, mass_vec, out=dh_dt_vec, where=mass_vec > 1e-6)
+        dh_dt_vec[mass_vec <= 1e-6] = 0.0
 
         return dh_dt_vec
 
@@ -992,14 +1344,18 @@ class HydraulicNetwork:
 
         # 2. 纯数组计算 d_rho/dh = (d_rho/dT) / Cp
         # 保护 cp 防止除零
-        safe_cp = np.where(self.cp_vec > 1e-3, self.cp_vec, 1000.0)
-        drho_dh_vec = self.drho_dt_vec / safe_cp
+        safe_cp = self.energy_cp_buffer
+        np.maximum(self.cp_vec, 1.0e-3, out=safe_cp)
+        np.divide(self.drho_dt_vec, safe_cp, out=self.drho_dh_buffer)
+        drho_dh_vec = self.drho_dh_buffer
 
         # 3. 计算 drho/dt
-        drho_dt_vec = drho_dh_vec * dh_dt_vec
+        drho_dt_vec = self.energy_aux_buffer
+        np.multiply(drho_dh_vec, dh_dt_vec, out=drho_dt_vec)
 
         # 4. 计算最终源项 S = - V * drho_dt
-        S_vec = -self.V_vec * drho_dt_vec
+        S_vec = self.thermal_source_buffer
+        np.multiply(-self.V_vec, drho_dt_vec, out=S_vec)
 
         return S_vec
 
@@ -1056,95 +1412,80 @@ class HydraulicNetwork:
         # 1. 向量化预计算对角线和右端项系数 (纯 NumPy 数组运算)
         # ==========================================
         # 质量保护: M = max(rho * V, 1e-9)
-        mass_vec = np.maximum(self.rho_vec * self.V_vec, 1e-9)
+        mass_vec = self.energy_mass_buffer
+        np.multiply(self.rho_vec, self.V_vec, out=mass_vec)
+        np.maximum(mass_vec, 1e-9, out=mass_vec)
 
         # Cp 保护: 从预计算缓存中读取
-        cp_vec = np.maximum(self.cp_vec, 1.0)
+        cp_vec = self.energy_cp_buffer
+        np.maximum(self.cp_vec, 1.0, out=cp_vec)
 
         # 隐式抗震荡系数: lam_h = lam / cp
-        lam_h_vec = self.lam_imp_vec / cp_vec
+        lam_h_vec = self.energy_lam_h_buffer
+        np.divide(self.lam_imp_vec, cp_vec, out=lam_h_vec)
 
         # 修正后的显式源项: Q_mod = Q_expl - lam * T_old + lam_h * h_old
-        Q_expl_mod_vec = self.Q_expl_vec - self.lam_imp_vec * self.T_vec + lam_h_vec * self.h_vec
+        Q_expl_mod_vec = self.energy_q_mod_buffer
+        np.multiply(self.lam_imp_vec, self.T_vec, out=Q_expl_mod_vec)
+        np.subtract(self.Q_expl_vec, Q_expl_mod_vec, out=Q_expl_mod_vec)
+        np.multiply(lam_h_vec, self.h_vec, out=self.energy_aux_buffer)
+        Q_expl_mod_vec += self.energy_aux_buffer
 
         # 惯性项系数: inertia = M / dt
-        inertia_vec = mass_vec / dt
+        inertia_vec = self.energy_inertia_buffer
+        np.divide(mass_vec, max(dt, 1.0e-12), out=inertia_vec)
 
-        # 初始化 COO 格式列表
-        rows = []
-        cols = []
-        data = []
+        diag_data = self.energy_diag_buffer
+        np.add(inertia_vec, lam_h_vec, out=diag_data)
+        if self.fixed_pressure_idx_arr.size > 0:
+            diag_data[self.fixed_pressure_idx_arr] = 1.0
 
-        # ==========================================
-        # 2. 向量化组装控制体惯性项与固液换热项 (主对角线)
-        # [优化]: 利用掩码彻底消除 Python for 循环
-        # ==========================================
-        all_indices = np.arange(self.n_vol)
+        B_enth = self.energy_rhs_buffer
+        np.multiply(inertia_vec, self.h_vec, out=B_enth)
+        B_enth += Q_expl_mod_vec
+        if self.fixed_pressure_idx_arr.size > 0:
+            B_enth[self.fixed_pressure_idx_arr] = self.h_vec[self.fixed_pressure_idx_arr]
 
-        # 使用掩码区分稳压器节点与普通节点
-        is_fixed = np.zeros(self.n_vol, dtype=bool)
-        if self.fixed_pressure_indices:
-            is_fixed[list(self.fixed_pressure_indices)] = True
-        is_normal = ~is_fixed
+        data = self.energy_matrix.data
+        data.fill(0.0)
+        data[self.energy_diag_ptrs] = diag_data
 
-        # 预先分配对角线数据与右端项
-        diag_data = np.zeros(self.n_vol)
-        diag_data[is_fixed] = 1.0
-        diag_data[is_normal] = inertia_vec[is_normal] + lam_h_vec[is_normal]
+        if self.energy_from_junc_idx.size > 0:
+            W_from = self.W_vec[self.energy_from_junc_idx]
+            from_pos = W_from > 0.0
+            from_neg = W_from < 0.0
+            if np.any(from_pos):
+                np.add.at(
+                    data,
+                    self.energy_from_diag_ptrs[from_pos],
+                    self.energy_from_multiplier[from_pos] * W_from[from_pos]
+                )
+            if np.any(from_neg):
+                np.add.at(
+                    data,
+                    self.energy_from_offdiag_ptrs[from_neg],
+                    self.energy_from_multiplier[from_neg] * W_from[from_neg]
+                )
 
-        B_enth = np.zeros(self.n_vol)
-        B_enth[is_fixed] = self.h_vec[is_fixed]
-        B_enth[is_normal] = inertia_vec[is_normal] * self.h_vec[is_normal] + Q_expl_mod_vec[is_normal]
-
-        # 批量展开并追加到 COO 坐标中 (内部为高效 C 实现)
-        rows.extend(all_indices.tolist())
-        cols.extend(all_indices.tolist())
-        data.extend(diag_data.tolist())
-
-        # ==========================================
-        # 3. 组装迎风对流项 (Implicit Advection)
-        # [优化]: 变量局部化以消除循环内属性寻址时间
-        # ==========================================
-        fixed_set = self.fixed_pressure_indices  # O(1) 查询的哈希集合
-        W_array = self.W_vec  # 局部化数组引用
-
-        for j_idx, (_, idx_in, idx_out) in enumerate(self.junction_descriptors):
-            W = W_array[j_idx]
-
-            # ====== [新增] 提取乘子 ======
-            M_in = self.M_from_vec[j_idx]
-            M_out = self.M_to_vec[j_idx]
-
-            if W >= 0:
-                # 供体 idx_in 失去能量
-                if idx_in not in fixed_set:
-                    rows.append(idx_in)
-                    cols.append(idx_in)
-                    data.append(M_in * W)
-                # 受体 idx_out 获得能量
-                if idx_out not in fixed_set:
-                    rows.append(idx_out)
-                    cols.append(idx_in)
-                    data.append(M_out * -W)
-            else:
-                # W < 0 (倒流)
-                if idx_out not in fixed_set:
-                    rows.append(idx_out)
-                    cols.append(idx_out)
-                    data.append(M_out * -W)
-                if idx_in not in fixed_set:
-                    rows.append(idx_in)
-                    cols.append(idx_out)
-                    data.append(M_in * W)
-
-        # ==========================================
-        # 4. 求解全局焓矩阵
-        # ==========================================
-        from scipy.sparse import coo_matrix
-        A_enth_csr = coo_matrix((data, (rows, cols)), shape=(self.n_vol, self.n_vol)).tocsr()
+        if self.energy_to_junc_idx.size > 0:
+            W_to = self.W_vec[self.energy_to_junc_idx]
+            to_pos = W_to > 0.0
+            to_neg = W_to < 0.0
+            if np.any(to_pos):
+                np.add.at(
+                    data,
+                    self.energy_to_offdiag_ptrs[to_pos],
+                    -self.energy_to_multiplier[to_pos] * W_to[to_pos]
+                )
+            if np.any(to_neg):
+                np.add.at(
+                    data,
+                    self.energy_to_diag_ptrs[to_neg],
+                    -self.energy_to_multiplier[to_neg] * W_to[to_neg]
+                )
 
         try:
-            h_new_vec = spsolve(A_enth_csr, B_enth)
+            h_new_vec = spsolve(self.energy_matrix, B_enth)
         except Exception as e:
             logger.error(f"Enthalpy Matrix Solve Failed (Singular Matrix). Error: {e}")
             raise RuntimeError(f"Energy system solver failed: {e}")
@@ -1153,390 +1494,25 @@ class HydraulicNetwork:
         # 5. 更新状态并反算真实温度 (绝对核心提速点)
         # [优化]: 利用物性库的向量化接口，单次底层调用反算全部温度
         # ==========================================
-        T_old_vec = self.T_vec.copy()
-        h_old_vec = self.h_vec.copy()
+        np.copyto(self.energy_T_old_buffer, self.T_vec)
+        np.copyto(self.energy_h_old_buffer, self.h_vec)
 
         # 1. 直接全量更新缓存向量
         self.h_vec[:] = h_new_vec
 
         # 2. 批量调用 EoS 反算温度，如果调用失败才使用备用的 Cp 降级计算
-        mat = self.volumes_obj[0].material if self.n_vol > 0 else None
+        mat = self.primary_material
 
-        if mat is not None and hasattr(mat, 'temperature_from_enthalpy'):
+        if mat is not None and self.material_has_temp_from_h:
             try:
                 # 单次 NumPy 向量调用，无需 for 循环和 try-except 损耗
                 self.T_vec[:] = mat.temperature_from_enthalpy(h_new_vec, self.P_vec)
             except Exception as e:
                 logger.warning(
                     f"Vectorized EoS temperature back-calculation failed: {e}. Falling back to Cp method.")
-                self.T_vec[:] = T_old_vec + (h_new_vec - h_old_vec) / cp_vec
+                self.T_vec[:] = self.energy_T_old_buffer + (h_new_vec - self.energy_h_old_buffer) / cp_vec
         else:
-            self.T_vec[:] = T_old_vec + (h_new_vec - h_old_vec) / cp_vec
-
-        # 3. 极简轻量级同步：仅执行对象写操作，不含任何计算
-        for i, vol in enumerate(self.volumes_obj):
-            vol.h = self.h_vec[i]
-            vol.T = self.T_vec[i]
-
-        # # ==========================================
-        # # 1. 向量化预计算对角线和右端项系数 (纯 NumPy 数组运算)
-        # # ==========================================
-        # # 质量保护: M = max(rho * V, 1e-9)
-        # mass_vec = np.maximum(self.rho_vec * self.V_vec, 1e-9)
-        #
-        # # Cp 保护: 从预计算缓存中读取
-        # cp_vec = np.maximum(self.cp_vec, 1.0)
-        #
-        # # 隐式抗震荡系数: lam_h = lam / cp
-        # lam_h_vec = self.lam_imp_vec / cp_vec
-        #
-        # # 修正后的显式源项: Q_mod = Q_expl - lam * T_old + lam_h * h_old
-        # Q_expl_mod_vec = self.Q_expl_vec - self.lam_imp_vec * self.T_vec + lam_h_vec * self.h_vec
-        #
-        # # 惯性项系数: inertia = M / dt
-        # inertia_vec = mass_vec / dt
-        #
-        # # 初始化 COO 格式列表和右端项
-        # rows = []
-        # cols = []
-        # data = []
-        # B_enth = np.zeros(self.n_vol)
-        #
-        # # ==========================================
-        # # 2. 组装控制体惯性项与固液换热项 (主对角线)
-        # # ==========================================
-        # for i in range(self.n_vol):
-        #     if i in self.fixed_pressure_indices:
-        #         # 边界条件处理：稳压器/恒温边界退化为 h = const
-        #         rows.append(i)
-        #         cols.append(i)
-        #         data.append(1.0)
-        #         B_enth[i] = self.h_vec[i]
-        #     else:
-        #         # 普通节点对角线与 RHS
-        #         rows.append(i)
-        #         cols.append(i)
-        #         data.append(inertia_vec[i] + lam_h_vec[i])
-        #         B_enth[i] = inertia_vec[i] * self.h_vec[i] + Q_expl_mod_vec[i]
-        #
-        # # ==========================================
-        # # 3. 组装迎风对流项 (Implicit Advection)
-        # # ==========================================
-        # for j_idx, (_, idx_in, idx_out) in enumerate(self.junction_descriptors):
-        #     W = self.W_vec[j_idx]
-        #
-        #     # 迎风格式逻辑：流动将供体(Donor)的未知数 h^{n+1} 带入受体(Receiver)
-        #     # 只有受体和供体不是边界节点时，才添加方程系数（边界节点的行在前面已被锁定）
-        #     if W >= 0:
-        #         # 供体 idx_in 失去能量
-        #         if idx_in not in self.fixed_pressure_indices:
-        #             rows.extend([idx_in])
-        #             cols.extend([idx_in])
-        #             data.extend([W])
-        #         # 受体 idx_out 获得能量
-        #         if idx_out not in self.fixed_pressure_indices:
-        #             rows.extend([idx_out])
-        #             cols.extend([idx_in])
-        #             data.extend([-W])
-        #     else:
-        #         # W < 0 (倒流)
-        #         # 供体 idx_out 失去能量 (|W| = -W)
-        #         if idx_out not in self.fixed_pressure_indices:
-        #             rows.extend([idx_out])
-        #             cols.extend([idx_out])
-        #             data.extend([-W])
-        #         # 受体 idx_in 获得能量
-        #         if idx_in not in self.fixed_pressure_indices:
-        #             rows.extend([idx_in])
-        #             cols.extend([idx_out])
-        #             data.extend([W])
-        #
-        # # ==========================================
-        # # 4. 求解全局焓矩阵
-        # # ==========================================
-        # from scipy.sparse import coo_matrix
-        # A_enth_csr = coo_matrix((data, (rows, cols)), shape=(self.n_vol, self.n_vol)).tocsr()
-        #
-        # try:
-        #     h_new_vec = spsolve(A_enth_csr, B_enth)
-        # except Exception as e:
-        #     logger.error(f"Enthalpy Matrix Solve Failed (Singular Matrix). Error: {e}")
-        #     raise RuntimeError(f"Energy system solver failed: {e}")
-        #
-        # # ==========================================
-        # # 5. 更新状态并反算真实温度
-        # # ==========================================
-        # # 备份旧温度/焓用于降级计算
-        # T_old_vec = self.T_vec.copy()
-        # h_old_vec = self.h_vec.copy()
-        #
-        # self.h_vec[:] = h_new_vec
-        #
-        # # 注意：由于状态方程(EoS)的反算可能高度非线性，这里仍使用对象循环处理
-        # # 但完全移除了不必要的 try-except 层级和字典查询
-        # for i, vol in enumerate(self.volumes_obj):
-        #     vol.h = h_new_vec[i]
-        #
-        #     # 尝试依靠严谨的状态方程(EoS)反算温度
-        #     if hasattr(vol, 'material') and hasattr(vol.material, 'temperature_from_enthalpy'):
-        #         try:
-        #             T_new = float(vol.material.temperature_from_enthalpy(h_new_vec[i], self.P_vec[i]))
-        #             self.T_vec[i] = T_new
-        #             vol.T = T_new
-        #             continue  # 反算成功，直接跳过后续降级方案
-        #         except Exception:
-        #             pass
-        #
-        #     # 降级方案：如果没有高精度反算接口，或者调用失败，依靠缓存的 Cp 直接算温升
-        #     T_new = T_old_vec[i] + (h_new_vec[i] - h_old_vec[i]) / cp_vec[i]
-        #     self.T_vec[i] = T_new
-        #     vol.T = T_new
-
-        # # 使用 LIL 稀疏矩阵初始化能量矩阵
-        # A_enth = lil_matrix((self.n_vol, self.n_vol), dtype=float)
-        # B_enth = np.zeros(self.n_vol)
-        #
-        # # ==========================================
-        # # 1. 组装控制体惯性项与固液换热项 (对角线)
-        # # ==========================================
-        # for i, vol in enumerate(self.volumes_obj):
-        #     # 获取质量并给予极小值保护，避免极小网格导致矩阵奇异
-        #     mass = self.rho_vec[i] * getattr(vol, 'vol', 1.0)
-        #     mass = max(mass, 1e-9)
-        #
-        #     # 获取定压比热 Cp 以进行 T -> h 的隐式域转换
-        #     cp = 1000.0
-        #     if hasattr(vol, 'material') and vol.material is not None:
-        #         try:
-        #             cp = vol.material.heat_capacity(self.T_vec[i], self.P_vec[i])
-        #         except:
-        #             pass
-        #     cp = max(cp, 1.0)
-        #
-        #     # 获取热源与原始温度换热系数
-        #     Q_expl = getattr(vol, 'Q_wall', 0.0) + getattr(vol, 'Q_vol', 0.0)
-        #     lam = getattr(vol, 'implicit_coeff', 0.0)
-        #
-        #     # --- 核心转换：将 T 隐式转为 h 隐式 ---
-        #     T_old = self.T_vec[i]
-        #     h_old = self.h_vec[i]
-        #     lam_h = lam / cp  # 焓方程下的隐式抗震荡系数
-        #
-        #     # 修正后的显式源项
-        #     Q_expl_mod = Q_expl - lam * T_old + lam_h * h_old
-        #
-        #     # 填充对角线 A[i, i] 和 右端项 B[i]
-        #     inertia = mass / dt
-        #     A_enth[i, i] += inertia + lam_h
-        #     B_enth[i] += inertia * h_old + Q_expl_mod
-        #
-        # # ==========================================
-        # # 2. 组装迎风对流项 (Implicit Advection)
-        # # ==========================================
-        # for j_idx, (_, idx_in, idx_out) in enumerate(self.junction_descriptors):
-        #     W = self.W_vec[j_idx]
-        #
-        #     # 迎风格式逻辑：流动将供体(Donor)的未知数 h^{n+1} 带入受体(Receiver)
-        #     if W >= 0:
-        #         # 流向: idx_in -> idx_out
-        #         # 供体 idx_in: 失去能量，方程左侧增加 +W*h_in^{n+1}
-        #         A_enth[idx_in, idx_in] += W
-        #         # 受体 idx_out: 获得能量，方程左侧增加 -W*h_in^{n+1}
-        #         A_enth[idx_out, idx_in] -= W
-        #     else:
-        #         # 流向: idx_out -> idx_in (W 为负值)
-        #         # 供体 idx_out: 失去能量，流率大小为 |W| = -W，方程左侧增加 -W*h_out^{n+1}
-        #         A_enth[idx_out, idx_out] -= W
-        #         # 受体 idx_in: 获得能量，方程左侧增加 +W*h_out^{n+1}
-        #         A_enth[idx_in, idx_out] += W
-        #
-        # # ==========================================
-        # # 3. 处理边界条件 (稳压器 / 恒温边界)
-        # # ==========================================
-        # for idx in self.fixed_pressure_indices:
-        #     # 将边界节点退化为 h = const，防止其温度随系统波动
-        #     # lil_matrix 完美支持切片赋值
-        #     A_enth[idx, :] = 0.0
-        #     A_enth[idx, idx] = 1.0
-        #     B_enth[idx] = self.h_vec[idx]
-        #
-        # # 转换为 CSR 格式，准备求解
-        # A_enth_csr = A_enth.tocsr()
-        # A_enth_csr.eliminate_zeros()  # 清理显式赋值产生的零，提升求解效率
-        #
-        # # ==========================================
-        # # 4. 求解全局焓矩阵 (迭代/直接混合求解)
-        # # ==========================================
-        # try:
-        #     # 能量矩阵存在强烈不对称性(迎风格式)，直接求解器是最稳定、最安全的选择
-        #     h_new_vec = spsolve(A_enth_csr, B_enth)
-        # except Exception as e:
-        #     logger.error(f"Enthalpy Matrix Solve Failed (Singular Matrix). Error: {e}")
-        #     raise RuntimeError(f"Energy system solver failed: {e}")
-        # # try:
-        # #     # 能量方程对流特征强，给予 rtol=1e-5 宽松容差。使用 x0 加速。
-        # #     h_new_vec, info = bicgstab(
-        # #         A_enth_csr, B_enth,
-        # #         x0=self.h_vec,
-        # #         rtol=1e-5,
-        # #         atol=1e-8,
-        # #         maxiter=500
-        # #     )
-        # #
-        # #     if info != 0:
-        # #         logger.debug(f"Iterative energy solver struggled (info={info}). Falling back to spsolve.")
-        # #         # 瞬间降级到安全的直接求解器
-        # #         h_new_vec = spsolve(A_enth_csr, B_enth)
-        # #
-        # # except Exception as e:
-        # #     logger.error(f"Enthalpy Matrix Solve Failed: {e}")
-        # #     raise RuntimeError(f"Energy system solver failed: {e}")
-        #
-        # # ==========================================
-        # # 5. 更新状态并反算真实温度
-        # # ==========================================
-        # for i, vol in enumerate(self.volumes_obj):
-        #     h_new = h_new_vec[i]
-        #     h_old = self.h_vec[i]
-        #     T_old = self.T_vec[i]
-        #
-        #     self.h_vec[i] = h_new
-        #     vol.h = h_new
-        #
-        #     # 依靠严谨的状态方程(EOS)反算温度，消除误差
-        #     if hasattr(vol, 'material') and hasattr(vol.material, 'temperature_from_enthalpy'):
-        #         try:
-        #             T_new = float(vol.material.temperature_from_enthalpy(h_new, self.P_vec[i]))
-        #             self.T_vec[i] = T_new
-        #             vol.T = T_new
-        #         except Exception:
-        #             pass
-        #     else:
-        #         # 降级方案：如果没有高精度反算接口，依靠 Cp 算温升
-        #         cp = 1000.0
-        #         if hasattr(vol, 'material'):
-        #             try:
-        #                 cp = vol.material.heat_capacity(T_old, self.P_vec[i])
-        #             except:
-        #                 pass
-        #         cp = max(cp, 1.0)
-        #         T_new = T_old + (h_new - h_old) / cp
-        #         self.T_vec[i] = T_new
-        #         vol.T = T_new
-
-    # 旧版，采用完整的焓系数矩阵计算能量方程
-    # def _step_energy_implicit(self, dt: float):
-    #     """
-    #     [Phase 4 隐式版本] 全隐式能量方程 (Enthalpy-Based Fully Implicit Solver)
-    #     采用纯焓构建雅可比矩阵，彻底打破对流 CFL 限制，严格保证能量守恒。
-    #     """
-    #     # 初始化能量矩阵和右端项向量
-    #     A_enth = np.zeros((self.n_vol, self.n_vol))
-    #     B_enth = np.zeros(self.n_vol)
-    #
-    #     # ==========================================
-    #     # 1. 组装控制体惯性项与固液换热项 (对角线)
-    #     # ==========================================
-    #     for i, vol in enumerate(self.volumes_obj):
-    #         # 获取质量并给予极小值保护，避免极小网格导致矩阵奇异
-    #         mass = self.rho_vec[i] * getattr(vol, 'vol', 1.0)
-    #         mass = max(mass, 1e-9)
-    #
-    #         # 获取定压比热 Cp 以进行 T -> h 的隐式域转换
-    #         cp = 1000.0
-    #         if hasattr(vol, 'material') and vol.material is not None:
-    #             try:
-    #                 cp = vol.material.heat_capacity(self.T_vec[i], self.P_vec[i])
-    #             except:
-    #                 pass
-    #         cp = max(cp, 1.0)
-    #
-    #         # 获取热源与原始温度换热系数
-    #         Q_expl = getattr(vol, 'Q_wall', 0.0) + getattr(vol, 'Q_vol', 0.0)
-    #         lam = getattr(vol, 'implicit_coeff', 0.0)
-    #
-    #         # --- 核心转换：将 T 隐式转为 h 隐式 ---
-    #         T_old = self.T_vec[i]
-    #         h_old = self.h_vec[i]
-    #         lam_h = lam / cp  # 焓方程下的隐式抗震荡系数
-    #
-    #         # 修正后的显式源项
-    #         Q_expl_mod = Q_expl - lam * T_old + lam_h * h_old
-    #
-    #         # 填充对角线 A[i, i] 和 右端项 B[i]
-    #         inertia = mass / dt
-    #         A_enth[i, i] += inertia + lam_h
-    #         B_enth[i] += inertia * h_old + Q_expl_mod
-    #
-    #     # ==========================================
-    #     # 2. 组装迎风对流项 (Implicit Advection)
-    #     # ==========================================
-    #     for j_idx, (_, idx_in, idx_out) in enumerate(self.junction_descriptors):
-    #         W = self.W_vec[j_idx]
-    #
-    #         # 迎风格式逻辑：流动将供体(Donor)的未知数 h^{n+1} 带入受体(Receiver)
-    #         if W >= 0:
-    #             # 流向: idx_in -> idx_out
-    #             # 供体 idx_in: 失去能量，方程左侧增加 +W*h_in^{n+1}
-    #             A_enth[idx_in, idx_in] += W
-    #             # 受体 idx_out: 获得能量，方程左侧增加 -W*h_in^{n+1}
-    #             A_enth[idx_out, idx_in] -= W
-    #         else:
-    #             # 流向: idx_out -> idx_in (W 为负值)
-    #             # 供体 idx_out: 失去能量，流率大小为 |W| = -W，方程左侧增加 -W*h_out^{n+1}
-    #             A_enth[idx_out, idx_out] -= W
-    #             # 受体 idx_in: 获得能量，方程左侧增加 +W*h_out^{n+1}
-    #             A_enth[idx_in, idx_out] += W
-    #
-    #     # ==========================================
-    #     # 3. 处理边界条件 (稳压器 / 恒温边界)
-    #     # ==========================================
-    #     for idx in self.fixed_pressure_indices:
-    #         # 将边界节点退化为 h = const，防止其温度随系统波动
-    #         A_enth[idx, :] = 0.0
-    #         A_enth[idx, idx] = 1.0
-    #         B_enth[idx] = self.h_vec[idx]
-    #
-    #     # ==========================================
-    #     # 4. 求解全局焓矩阵
-    #     # ==========================================
-    #     try:
-    #         h_new_vec = np.linalg.solve(A_enth, B_enth)
-    #     except np.linalg.LinAlgError:
-    #         logger.error("Enthalpy Matrix Singularity Detected! Check boundary conditions or zero masses.")
-    #         raise
-    #
-    #     # ==========================================
-    #     # 5. 更新状态并反算真实温度
-    #     # ==========================================
-    #     for i, vol in enumerate(self.volumes_obj):
-    #         h_new = h_new_vec[i]
-    #         h_old = self.h_vec[i]
-    #         T_old = self.T_vec[i]
-    #
-    #         self.h_vec[i] = h_new
-    #         vol.h = h_new
-    #
-    #         # 依靠严谨的状态方程(EOS)反算温度，消除误差
-    #         if hasattr(vol, 'material') and hasattr(vol.material, 'temperature_from_enthalpy'):
-    #             try:
-    #                 T_new = float(vol.material.temperature_from_enthalpy(h_new, self.P_vec[i]))
-    #                 self.T_vec[i] = T_new
-    #                 vol.T = T_new
-    #             except Exception:
-    #                 pass
-    #         else:
-    #             # 降级方案：如果没有高精度反算接口，依靠 Cp 算温升
-    #             cp = 1000.0
-    #             if hasattr(vol, 'material'):
-    #                 try:
-    #                     cp = vol.material.heat_capacity(T_old, self.P_vec[i])
-    #                 except:
-    #                     pass
-    #             cp = max(cp, 1.0)
-    #             T_new = T_old + (h_new - h_old) / cp
-    #             self.T_vec[i] = T_new
-    #             vol.T = T_new
+            self.T_vec[:] = self.energy_T_old_buffer + (h_new_vec - self.energy_h_old_buffer) / cp_vec
 
     def _step_energy(self, dt: float):
         """
@@ -1667,9 +1643,21 @@ class HydraulicNetwork:
 
         # 4. 更新流量
         self._update_flow_rates()
+        self._sync_vectors_to_objects(
+            sync_pressure=True,
+            sync_flow=True,
+            sync_energy=False,
+            sync_properties=False
+        )
 
         # 5. 更新能量 (焓/温度)
         self._step_energy(dt)
+        self._sync_vectors_to_objects(
+            sync_pressure=False,
+            sync_flow=False,
+            sync_energy=True,
+            sync_properties=False
+        )
 
     @TEASAProfiler.profile
     def step_Picard(self, dt: float, max_iter: int = 20, tol: float = 1e-4) -> bool:
@@ -1687,29 +1675,34 @@ class HydraulicNetwork:
         self._update_fluid_properties()
 
         converged = False
+        S_thermal_vec = self._calc_thermal_expansion_source(dt)
 
         # --- 2. 外部迭代循环 (Hydraulic Iteration) ---
         # 目标：解决 W 与 阻力系数(W) 之间的非线性耦合
 
         # 进入迭代前，冻结历史流量
-        W_old_frozen = self.W_vec.copy()
+        np.copyto(self.W_old, self.W_vec)
 
         diff = 1e6
 
         for k in range(max_iter):
             # 2.1 备份当前流量 (用于收敛检查)
-            W_prev_iter = self.W_vec.copy()
+            np.copyto(self.W_iterate, self.W_vec)
 
             # 2.2 计算动量系数 (Phase 2)
             #     这里会使用最新的 self.W_vec 来计算 Re 和 f
             #     如果是第0次迭代，使用的是 W^n
             #     如果是第k次迭代，使用的是 W^{n+1, k-1}
             # 传入冻结的历史流量，保证惯性项守恒
-            self._calc_momentum_coeffs(dt, W_old_frozen=W_old_frozen)
+            self._calc_momentum_coeffs(dt, W_old_frozen=self.W_old)
 
             # 2.3 组装压力矩阵 (Phase 3)
-            #     包含热膨胀预测 (S_thermal)
-            A, B = self._assemble_pressure_system(dt, include_thermal_expansion=True)
+            #     时间步内冻结热膨胀源项，避免 Picard 内重复计算
+            A, B = self._assemble_pressure_system(
+                dt,
+                include_thermal_expansion=False,
+                S_thermal_vec=S_thermal_vec
+            )
 
             # 2.4 求解压力场
             try:
@@ -1723,8 +1716,9 @@ class HydraulicNetwork:
 
             # 2.6 收敛性检查
             #     检查流量变化的最大范数
-            diff = np.linalg.norm(self.W_vec - W_prev_iter, ord=np.inf)
-            # diff = np.sqrt(np.linalg.norm(self.W_vec - W_prev_iter, ord=2))
+            np.subtract(self.W_vec, self.W_iterate, out=self.W_residual)
+            np.abs(self.W_residual, out=self.W_residual)
+            diff = float(np.max(self.W_residual))
 
             logger.debug(f"Iter {k}: Max dW = {diff:.6e}")
 
@@ -1743,6 +1737,12 @@ class HydraulicNetwork:
         # 这样保证了能量输运使用的是正确的流速
         # self._step_energy(dt)
         self._step_energy_implicit(dt)
+        self._sync_vectors_to_objects(
+            sync_pressure=True,
+            sync_flow=True,
+            sync_energy=True,
+            sync_properties=False
+        )
 
         return converged
 
@@ -1762,26 +1762,32 @@ class HydraulicNetwork:
 
         converged = False
         # converged = True
+        S_thermal_vec = self._calc_thermal_expansion_source(dt)
 
         # --- 2. 外部迭代循环 (Hydraulic Iteration) ---
         # 目标：解决 W 与 阻力系数(W) 之间的非线性耦合
 
+        np.copyto(self.W_old, self.W_vec)
         diff = 1e6
 
         for k in range(max_iter):
             # 2.1 备份当前流量 (用于收敛检查)
-            W_prev_iter = self.W_vec.copy()
+            np.copyto(self.W_iterate, self.W_vec)
 
             # 2.2 计算动量系数 (Phase 2)
             #     这里会使用最新的 self.W_vec 来计算 Re 和 f
             #     如果是第0次迭代，使用的是 W^n
             #     如果是第k次迭代，使用的是 W^{n+1, k-1}
             # 传入冻结的历史流量，保证惯性项守恒
-            self._calc_momentum_coeffs(dt)
+            self._calc_momentum_coeffs(dt, W_old_frozen=self.W_old)
 
             # 2.3 组装压力矩阵 (Phase 3)
-            #     包含热膨胀预测 (S_thermal)
-            A, B = self._assemble_pressure_system(dt, include_thermal_expansion=True)
+            #     时间步内冻结热膨胀源项，避免 Picard 内重复计算
+            A, B = self._assemble_pressure_system(
+                dt,
+                include_thermal_expansion=False,
+                S_thermal_vec=S_thermal_vec
+            )
 
             # 2.4 求解压力场
             try:
@@ -1795,8 +1801,9 @@ class HydraulicNetwork:
 
             # 2.6 收敛性检查
             #     检查流量变化的最大范数
-            diff = np.linalg.norm(self.W_vec - W_prev_iter, ord=np.inf)
-            # diff = np.sqrt(np.linalg.norm(self.W_vec - W_prev_iter, ord=2))
+            np.subtract(self.W_vec, self.W_iterate, out=self.W_residual)
+            np.abs(self.W_residual, out=self.W_residual)
+            diff = float(np.max(self.W_residual))
 
             logger.debug(f"Iter {k}: Max dW = {diff:.6e}")
 
@@ -1815,6 +1822,12 @@ class HydraulicNetwork:
         # 这样保证了能量输运使用的是正确的流速
         # self._step_energy(dt)
         self._step_energy_implicit(dt)
+        self._sync_vectors_to_objects(
+            sync_pressure=True,
+            sync_flow=True,
+            sync_energy=True,
+            sync_properties=False
+        )
 
         return converged
 
@@ -1842,12 +1855,12 @@ class HydraulicNetwork:
 
         for k in range(max_iter):
             # 备份旧流量用于检查收敛
-            W_prev = self.W_vec.copy()
+            np.copyto(self.W_iterate, self.W_vec)
 
             # 2. 计算动量系数
             #    注意：这里 dt 起到了松弛因子(Relaxation)的作用
             #    I = L/Adt。当收敛时 W_new = W_old，惯性项自然消失。
-            self._calc_momentum_coeffs(dt, W_old_frozen=W_prev)
+            self._calc_momentum_coeffs(dt, W_old_frozen=self.W_iterate)
 
             # 3. 组装压力矩阵 关闭热膨胀源项
             A, B = self._assemble_pressure_system(dt, include_thermal_expansion=False)
@@ -1863,15 +1876,12 @@ class HydraulicNetwork:
             self._update_flow_rates()
 
             # 6. 选用显式亚松驰（稳态计算）
-            self.W_vec = omega * self.W_vec + (1.0 - omega) * W_prev
-            # 将松弛后的流量同步回去
-            for j_idx, junc in enumerate(self.junctions_obj):
-                junc.W = self.W_vec[j_idx]
-                if hasattr(junc, 'update_velocity'):
-                    junc.update_velocity()
+            self.W_vec[:] = omega * self.W_vec + (1.0 - omega) * self.W_iterate
 
             # 6. 检查收敛 (L_inf norm)
-            diff = np.linalg.norm(self.W_vec - W_prev, ord=np.inf)
+            np.subtract(self.W_vec, self.W_iterate, out=self.W_residual)
+            np.abs(self.W_residual, out=self.W_residual)
+            diff = float(np.max(self.W_residual))
 
             if diff < tol:
                 converged = True
@@ -1880,6 +1890,13 @@ class HydraulicNetwork:
 
         if not converged:
             logger.warning(f"Initial: Hydraulic initialization NOT converged after {max_iter} iters. Residual={diff:.2e}")
+
+        self._sync_vectors_to_objects(
+            sync_pressure=True,
+            sync_flow=True,
+            sync_energy=False,
+            sync_properties=False
+        )
 
         return converged
 
@@ -1956,28 +1973,37 @@ class HydraulicNetwork:
         # 2. 将恢复后的向量同步回对象实例
         self._sync_vectors_to_objects()
 
-    def _sync_vectors_to_objects(self):
+    def _sync_vectors_to_objects(
+        self,
+        sync_pressure: bool = True,
+        sync_flow: bool = True,
+        sync_energy: bool = True,
+        sync_properties: bool = True
+    ):
         """
         [辅助] 将求解器向量同步回物理对象 (Volume, Junction)
         确保对象属性 (vol.P, junc.W 等) 与求解器向量保持一致。
         """
         # 1. 同步节点状态 (Volume)
         for i, vol in enumerate(self.volumes_obj):
-            vol.P = self.P_vec[i]
-            vol.T = self.T_vec[i]
-            vol.h = self.h_vec[i]
-            # 如果对象有缓存的物性，也一并恢复
-            vol.rho = self.rho_vec[i]
-            vol.mu = self.mu_vec[i]
+            if sync_pressure:
+                vol.P = self.P_vec[i]
+            if sync_energy:
+                vol.T = self.T_vec[i]
+                vol.h = self.h_vec[i]
+            if sync_properties:
+                vol.rho = self.rho_vec[i]
+                vol.mu = self.mu_vec[i]
 
         # 2. 同步连接状态 (Junction)
-        for i, junc in enumerate(self.junctions_obj):
-            junc.W = self.W_vec[i]
+        if sync_flow:
+            for i, junc in enumerate(self.junctions_obj):
+                junc.W = self.W_vec[i]
 
-            # [关键] 必须同时更新流速 (vel)，因为阻力计算依赖 junc.vel
-            # 如果只恢复 W 而不更新 vel，下一次阻力计算可能会用错速度
-            if hasattr(junc, 'update_velocity'):
-                junc.update_velocity()
+                # [关键] 必须同时更新流速 (vel)，因为阻力计算依赖 junc.vel
+                # 如果只恢复 W 而不更新 vel，下一次阻力计算可能会用错速度
+                if hasattr(junc, 'update_velocity'):
+                    junc.update_velocity()
 
     # =========================================================================
     # Phase 7: 断点续算与状态持久化 (Restart & Persistence)
@@ -1992,6 +2018,7 @@ class HydraulicNetwork:
         state = {
             # 1. 拓扑指纹 (防御性校验用: [n_vol, n_junc])
             f"{prefix}/shape": np.array([self.n_vol, self.n_junc]),
+            f"{prefix}/fixed_pressure_idx": np.array(sorted(self.fixed_pressure_indices), dtype=np.int32),
 
             # 2. 核心状态向量 (极速高压缩比)
             f"{prefix}/P_vec": self.P_vec,
@@ -2027,6 +2054,24 @@ class HydraulicNetwork:
                 f"CRITICAL: Topology mismatch! Restart file has ({saved_shape[0]} Vols, {saved_shape[1]} Juncs), "
                 f"but current memory has ({self.n_vol} Vols, {self.n_junc} Juncs).")
 
+        fixed_idx_key = f"{prefix}/fixed_pressure_idx"
+        if fixed_idx_key in data:
+            saved_fixed_idx = np.asarray(data[fixed_idx_key], dtype=np.int32).reshape(-1)
+            current_fixed_idx = np.array(sorted(self.fixed_pressure_indices), dtype=np.int32)
+            if saved_fixed_idx.shape != current_fixed_idx.shape or not np.array_equal(saved_fixed_idx, current_fixed_idx):
+                raise ValueError(
+                    "CRITICAL: Fixed-pressure boundary set mismatch! "
+                    f"Restart file has {saved_fixed_idx.tolist()}, "
+                    f"but current model has {current_fixed_idx.tolist()}. "
+                    "Changing fixed-pressure boundary membership across restart is not supported "
+                    "with the cached matrix structures."
+                )
+        else:
+            logger.warning(
+                "Restart file is missing fixed-pressure boundary fingerprint. "
+                "Skipping fixed-boundary-set validation for backward compatibility."
+            )
+
         # --- 2. 恢复核心状态向量 ---
         self.P_vec[:] = data[f"{prefix}/P_vec"]
         self.T_vec[:] = data[f"{prefix}/T_vec"]
@@ -2043,6 +2088,9 @@ class HydraulicNetwork:
             t_w_key = f"{prefix}/Juncs/{j}/target_W"
             if t_w_key in data and hasattr(junc, 'target_W'):
                 junc.target_W = float(data[t_w_key][0])
+
+        self._refresh_cached_pressure_targets()
+        self._refresh_cached_boundary_targets()
 
         # --- 4. 强制状态同步与物性刷新 ---
         # 必须把恢复到全局向量的数值同步给底层的 Physical Objects

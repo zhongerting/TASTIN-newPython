@@ -101,6 +101,14 @@ class BenchmarkConfig:
     outlet_pressure: float = env_float("BENCH_P_OUTLET", 1.61e5)
     inlet_pressure_guess: float = env_float("BENCH_P_INLET", 1.66e5)
     total_flow: float = env_float("BENCH_W_TOTAL", 2.2)
+    flow_primary_amp: float = env_float("BENCH_FLOW_PRIMARY_AMP", 0.16)
+    flow_secondary_amp: float = env_float("BENCH_FLOW_SECONDARY_AMP", 0.05)
+    flow_primary_period: float = env_float("BENCH_FLOW_PRIMARY_PERIOD", 6.5)
+    flow_secondary_period: float = env_float("BENCH_FLOW_SECONDARY_PERIOD", 2.4)
+    flow_primary_phase: float = env_float("BENCH_FLOW_PRIMARY_PHASE", 0.0)
+    flow_secondary_phase: float = env_float("BENCH_FLOW_SECONDARY_PHASE", 0.0)
+    flow_min_scale: float = env_float("BENCH_FLOW_MIN_SCALE", 0.72)
+    flow_max_scale: float = env_float("BENCH_FLOW_MAX_SCALE", 1.28)
     gravity: float = env_float("BENCH_GRAVITY", 0.0)
     dt: float = env_float("BENCH_DT", 0.02)
     n_steps: int = env_int("BENCH_N_STEPS", 2000)
@@ -125,11 +133,13 @@ class SyntheticFluidSourceCoupler:
         name: str,
         volumetric_loads: Sequence[Tuple[str, Sequence, np.ndarray, Dict[str, float]]],
         implicit_cooling_loads: Sequence[Tuple[str, Sequence, np.ndarray, np.ndarray, float]],
+        inlet_flow_controls: Sequence[Tuple[str, InletJunction, float, Dict[str, float]]] = (),
         time_getter: Callable[[], float] = None,
     ) -> None:
         self.name = name
         self.volumetric_loads = list(volumetric_loads)
         self.implicit_cooling_loads = list(implicit_cooling_loads)
+        self.inlet_flow_controls = list(inlet_flow_controls)
         self.time_getter = time_getter
 
     def set_time_getter(self, time_getter: Callable[[], float]) -> None:
@@ -171,6 +181,9 @@ class SyntheticFluidSourceCoupler:
                 vol.Q_wall += float(q_explicit)
                 vol.implicit_coeff += float(lam)
 
+        for _, inlet_junction, base_flow, periodic_spec in self.inlet_flow_controls:
+            inlet_junction.target_W = float(base_flow) * self._periodic_multiplier(time_value, periodic_spec)
+
     def base_heating_power(self) -> float:
         return float(sum(np.sum(q_vol_array) for _, _, q_vol_array, _ in self.volumetric_loads))
 
@@ -189,6 +202,16 @@ class SyntheticFluidSourceCoupler:
         for _, volumes, _, implicit_array, sink_temp in self.implicit_cooling_loads:
             for vol, lam in zip(volumes, implicit_array):
                 total += float(lam) * (float(vol.T) - sink_temp)
+        return total
+
+    def base_inlet_flow(self) -> float:
+        return float(sum(base_flow for _, _, base_flow, _ in self.inlet_flow_controls))
+
+    def current_inlet_flow_target(self) -> float:
+        time_value = self.current_time()
+        total = 0.0
+        for _, _, base_flow, periodic_spec in self.inlet_flow_controls:
+            total += float(base_flow) * self._periodic_multiplier(time_value, periodic_spec)
         return total
 
 
@@ -307,7 +330,13 @@ def build_branch_module(
     }
 
 
-def build_synthetic_source_coupler(branches, radiator_1, radiator_2, config: BenchmarkConfig) -> SyntheticFluidSourceCoupler:
+def build_synthetic_source_coupler(
+    branches,
+    radiator_1,
+    radiator_2,
+    inlet_junction: InletJunction,
+    config: BenchmarkConfig,
+) -> SyntheticFluidSourceCoupler:
     branch_total_powers = config.heat_scale * np.array([30000.0, 33500.0, 28500.0, 32000.0], dtype=float)
     upper_fraction = np.array([0.57, 0.58, 0.56, 0.58], dtype=float)
     lower_fraction = 1.0 - upper_fraction
@@ -385,10 +414,30 @@ def build_synthetic_source_coupler(branches, radiator_1, radiator_2, config: Ben
         ),
     ]
 
+    inlet_flow_controls = [
+        (
+            "InletBoundary_TargetFlow",
+            inlet_junction,
+            config.total_flow,
+            {
+                "bias": 1.0,
+                "primary_amp": config.flow_primary_amp,
+                "primary_period": config.flow_primary_period,
+                "primary_phase": config.flow_primary_phase,
+                "secondary_amp": config.flow_secondary_amp,
+                "secondary_period": config.flow_secondary_period,
+                "secondary_phase": config.flow_secondary_phase,
+                "min_scale": config.flow_min_scale,
+                "max_scale": config.flow_max_scale,
+            },
+        )
+    ]
+
     return SyntheticFluidSourceCoupler(
         name="SyntheticFluidSourceCoupler",
         volumetric_loads=volumetric_loads,
         implicit_cooling_loads=implicit_cooling_loads,
+        inlet_flow_controls=inlet_flow_controls,
     )
 
 
@@ -716,8 +765,15 @@ def build_benchmark_model(config: BenchmarkConfig) -> Dict[str, object]:
 
     network = HydraulicNetwork(all_volumes, all_junctions, gravity_vector=config.gravity)
     system = SystemManager(fluid_network=network)
-    source_coupler = build_synthetic_source_coupler(branch_modules, radiator_1, radiator_2, config)
+    source_coupler = build_synthetic_source_coupler(
+        branch_modules,
+        radiator_1,
+        radiator_2,
+        inlet_junction,
+        config,
+    )
     source_coupler.set_time_getter(lambda: system.global_time)
+    inlet_junction.target_W = source_coupler.current_inlet_flow_target()
     system.add_coupler(source_coupler)
 
     return {
@@ -760,8 +816,11 @@ def print_model_summary(model: Dict[str, object]) -> None:
     print(f"Inlet temperature: {config.inlet_temp:.2f} K")
     print(f"Initial temp     : {config.init_temp:.2f} K")
     print(f"Outlet pressure  : {config.outlet_pressure:.2f} Pa")
-    print(f"Total flow       : {config.total_flow:.4f} kg/s")
+    print(f"Base inlet flow  : {config.total_flow:.4f} kg/s")
     print(f"Gravity          : {config.gravity:.3f} m/s^2")
+    print("Flow forcing     : periodic, multi-frequency")
+    print(f"Flow primary amp : +/- {100.0 * config.flow_primary_amp:.1f} %")
+    print(f"Flow secondary amp: +/- {100.0 * config.flow_secondary_amp:.1f} %")
     print(f"Base Q_vol       : {source_coupler.base_heating_power():.2f} W")
     print(f"Heat forcing     : periodic, multi-frequency")
     print(f"Primary amplitude: +/- {100.0 * config.heat_primary_amp:.1f} %")
@@ -784,6 +843,7 @@ def print_progress(step_index: int, model: Dict[str, object], step_wall_time: fl
         f"step={step_index:4d} | "
         f"wall={step_wall_time:.4f} s | "
         f"W_in={float(inlet_junction.W):.4f} kg/s | "
+        f"W_target={source_coupler.current_inlet_flow_target():.4f} kg/s | "
         f"Q_vol={source_coupler.current_heating_power():8.1f} W | "
         f"T_rad2_out={float(radiator_2.volumes[-1].T):.2f} K | "
         f"T_out={float(outlet_buffer.volumes[-1].T):.2f} K | "
@@ -815,6 +875,7 @@ def print_final_summary(model: Dict[str, object], total_wall_time: float) -> Non
     print(f"Total wall time      : {total_wall_time:.6f} s")
     print(f"Average step time    : {total_wall_time / max(config.n_steps, 1):.6f} s")
     print(f"Inlet mass flow      : {float(inlet_junction.W):.6f} kg/s")
+    print(f"Inlet target flow    : {source_coupler.current_inlet_flow_target():.6f} kg/s")
     print(f"Outlet mass flow     : {float(outlet_junction.W):.6f} kg/s")
     print(
         "Branch split         : "

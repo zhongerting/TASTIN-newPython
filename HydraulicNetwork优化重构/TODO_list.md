@@ -364,3 +364,24 @@
 
 - 当前 TODO 已经不是单纯的函数清单，而是“可安全实施的分组清单”
 - 后续执行时，优先以 Group 为单位推进，不建议再按单个函数零散修改
+
+## 11. 当前进度
+
+### 已完成
+
+- [x] Group A：热路径拓扑与几何缓存
+- [x] Group B：状态同步策略重构、`_update_flow_rates` 向量化
+- [x] Group C：压力矩阵结构复用、时间步内冻结 `S_thermal`
+- [x] Group D：物性更新瘦身、能量矩阵结构复用、焓导数缓冲区复用
+- [x] Group E：求解器层评估（结论：保持 `spsolve`，不引入实验性替代 solver）
+
+### 当前剩余
+
+- [ ] `_update_fluid_properties` 的剩余热点清理
+- [ ] `_calc_momentum_coeffs` 的残余开销
+
+### 下一轮优先级
+
+1. `_update_fluid_properties` 的剩余热点清理
+2. `_calc_momentum_coeffs` 的残余开销
+3. 如有必要，再评估更激进的物性/摩擦因子近似策略
