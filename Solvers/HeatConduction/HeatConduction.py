@@ -521,8 +521,14 @@ class HeatConduction2D(BaseHeatConduction):
         # [修改] 内部界面热导缓存 (使用 Conductance = 1 / Resistance)
         # G_x_inner: X方向内部界面热导, Size (nx-1, ny)
         # G_y_inner: Y方向内部界面热导, Size (nx, ny-1)
-        self.G_x_inner = None
-        self.G_y_inner = None
+        nx, ny = self.shape_nodes
+        self.G_x_inner = np.empty((max(nx - 1, 0), ny), dtype=float)
+        self.G_y_inner = np.empty((nx, max(ny - 1, 0)), dtype=float)
+        self._conductance_work_x = np.empty_like(self.G_x_inner)
+        self._conductance_work_y = np.empty_like(self.G_y_inner)
+        self._flux_x_buffer = np.empty_like(self.G_x_inner)
+        self._flux_y_buffer = np.empty_like(self.G_y_inner)
+        self._jac_sparsity_cache = None
 
         # --- 边界初始化 (修正: 无 name 参数) ---
         # 必须确保 BoundaryRegion 接收正确的 shape 和 area_array
@@ -567,6 +573,8 @@ class HeatConduction2D(BaseHeatConduction):
 
         动态生成差分格式的稀疏对角矩阵，完美适配降维退化 (1D/0D)。
         """
+        if self._jac_sparsity_cache is not None:
+            return self._jac_sparsity_cache
 
         N = self.N
         nx, ny = self.shape_nodes
@@ -593,9 +601,9 @@ class HeatConduction2D(BaseHeatConduction):
         data = np.vstack(data_rows)
 
         # 使用 scipy.sparse 生成稀疏矩阵 (csc 格式在 ODE 求解器中效率较高)
-        jac_sparsity = spdiags(data, offsets, N, N, format='csc')
+        self._jac_sparsity_cache = spdiags(data, offsets, N, N, format='csc')
 
-        return jac_sparsity
+        return self._jac_sparsity_cache
 
         # 旧版，无法处理 1D/0D 的导热网格模型
         # N = self.N
@@ -630,16 +638,20 @@ class HeatConduction2D(BaseHeatConduction):
 
         # 界面导热系数 (调和平均)
         # [优化点] 分母加上 1e-30，绝对防止 0/0 报错，无需使用 np.errstate 和 np.nan_to_num
-        k_sum_x = k_left + k_right + 1e-30
-        k_face_x = (2.0 * k_left * k_right) / k_sum_x
+        np.add(k_left, k_right, out=self._conductance_work_x)
+        self._conductance_work_x += 1e-30
+        np.multiply(k_left, k_right, out=self.G_x_inner)
+        self.G_x_inner *= 2.0
+        np.divide(self.G_x_inner, self._conductance_work_x, out=self.G_x_inner)
 
         dx_inner = self.mesh.dx_matrix[1:-1, :]
         # [优化点] 防止 dx 为 0 导致除零
-        dx_inner_safe = np.maximum(dx_inner, 1e-30)
         area_x_inner = self.mesh.area_x_matrix[1:-1, :]
 
         # 计算热导 G_x (乘法优先，最后做一次除法)
-        self.G_x_inner = (k_face_x * area_x_inner) / dx_inner_safe
+        np.maximum(dx_inner, 1e-30, out=self._conductance_work_x)
+        np.multiply(self.G_x_inner, area_x_inner, out=self.G_x_inner)
+        np.divide(self.G_x_inner, self._conductance_work_x, out=self.G_x_inner)
 
         # === Y 方向 (Axial/Vertical) ===
         # 内部界面: indices 1 to ny-1
@@ -647,16 +659,20 @@ class HeatConduction2D(BaseHeatConduction):
         k_top = k_2d[:, 1:]
 
         # 界面导热系数 (调和平均)
-        k_sum_y = k_bottom + k_top + 1e-30
-        k_face_y = (2.0 * k_bottom * k_top) / k_sum_y
+        np.add(k_bottom, k_top, out=self._conductance_work_y)
+        self._conductance_work_y += 1e-30
+        np.multiply(k_bottom, k_top, out=self.G_y_inner)
+        self.G_y_inner *= 2.0
+        np.divide(self.G_y_inner, self._conductance_work_y, out=self.G_y_inner)
 
         dy_inner = self.mesh.dy_matrix[:, 1:-1]
         # [优化点] 防止 dy 为 0 导致除零
-        dy_inner_safe = np.maximum(dy_inner, 1e-30)
         area_y_inner = self.mesh.area_y_matrix[:, 1:-1]
 
         # 计算热导 G_y
-        self.G_y_inner = (k_face_y * area_y_inner) / dy_inner_safe
+        np.maximum(dy_inner, 1e-30, out=self._conductance_work_y)
+        np.multiply(self.G_y_inner, area_y_inner, out=self.G_y_inner)
+        np.divide(self.G_y_inner, self._conductance_work_y, out=self.G_y_inner)
 
     def _update_boundaries_state(self, current_time: Optional[float] = None):
         """
@@ -723,14 +739,16 @@ class HeatConduction2D(BaseHeatConduction):
         # [优化点 2] 使用热导 (G_x_inner) 进行乘法运算，不再有除以 0 的风险
 
         # X 方向
-        flux_x = (T_2d[:-1, :] - T_2d[1:, :]) * self.G_x_inner
-        Q_net_2d[:-1, :] -= flux_x  # 流出 Left Node
-        Q_net_2d[1:, :] += flux_x  # 流入 Right Node
+        np.subtract(T_2d[:-1, :], T_2d[1:, :], out=self._flux_x_buffer)
+        np.multiply(self._flux_x_buffer, self.G_x_inner, out=self._flux_x_buffer)
+        Q_net_2d[:-1, :] -= self._flux_x_buffer
+        Q_net_2d[1:, :] += self._flux_x_buffer
 
         # Y 方向
-        flux_y = (T_2d[:, :-1] - T_2d[:, 1:]) * self.G_y_inner
-        Q_net_2d[:, :-1] -= flux_y  # 流出 Bottom Node
-        Q_net_2d[:, 1:] += flux_y  # 流入 Top Node
+        np.subtract(T_2d[:, :-1], T_2d[:, 1:], out=self._flux_y_buffer)
+        np.multiply(self._flux_y_buffer, self.G_y_inner, out=self._flux_y_buffer)
+        Q_net_2d[:, :-1] -= self._flux_y_buffer
+        Q_net_2d[:, 1:] += self._flux_y_buffer
 
         # === B. 边界通量 (Boundary Fluxes) ===
         # BoundaryRegion 返回的是 "流入节点" (Inflow to Node)

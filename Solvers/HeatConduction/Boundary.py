@@ -276,10 +276,14 @@ class BoundaryRegion:
         # 对于电阻型 BC: J = T_ext / R_ext
         # 对于热流型 BC: J = Q_flux
         self.J_sum = np.zeros(shape)
+        self.Q_sum_flux = np.zeros(shape)
 
         # 有效等效参数
         self.R_eff = np.full(shape, np.inf)
         self.T_eff = np.zeros(shape)
+        self._g_work = np.zeros(shape)
+        self._mix_work = np.zeros(shape)
+        self._resistance_mask = np.zeros(shape, dtype=bool)
         # 默认绝热
         self.add_resistance_condition(T_ext=300.0, R_ext=1e15)
 
@@ -421,70 +425,53 @@ class BoundaryRegion:
             return self.current_flux
 
         # --- 1. 初始化累加器 ---
-        # G_sum: 总外部导热能力 (Sigma 1/R)
-        G_sum = np.zeros(self.shape)
-        # J_sum_R: 电阻型边界的诺顿电流源 (Sigma T/R)
-        J_sum_R = np.zeros(self.shape)
-        # Q_sum_flux: 纯热流边界的总功率 (Sigma Watts)
-        Q_sum_flux = np.zeros(self.shape)
+        self.G_sum.fill(0.0)
+        self.J_sum.fill(0.0)
+        self.Q_sum_flux.fill(0.0)
 
         # --- 2. 循环遍历并分类累加 ---
         for bc in self.conditions:
             if bc.bc_type == "resistance":
                 # 计算总外部热阻 (不含 R_internal)
-                R_ext_total = bc.R_ext + bc.R_add
+                np.add(bc.R_ext, bc.R_add, out=self._mix_work)
 
                 # G = 1/R
                 with np.errstate(divide='ignore', invalid='ignore'):
-                    G_i = 1.0 / R_ext_total
+                    np.divide(1.0, self._mix_work, out=self._g_work)
                     # 绝热保护 (R=inf -> G=0)
-                    G_i = np.nan_to_num(G_i, posinf=0.0)
+                    np.nan_to_num(self._g_work, copy=False, posinf=0.0)
                     # Dirichlet保护 (R=0 -> G=inf, 截断防止溢出)
-                    G_i = np.nan_to_num(G_i, posinf=1e20)
+                    np.nan_to_num(self._g_work, copy=False, posinf=1e20)
 
                 # 累加
-                G_sum += G_i
-                J_sum_R += bc.T_ext * G_i
+                self.G_sum += self._g_work
+                np.multiply(bc.T_ext, self._g_work, out=self._mix_work)
+                self.J_sum += self._mix_work
 
             elif bc.bc_type == "flux":
                 # 纯热流直接累加 (单位: W)
-                Q_sum_flux += bc.q_flux
+                self.Q_sum_flux += bc.q_flux
 
         # --- 3. 混合逻辑计算 ---
         # 使用掩码区分 "有电阻回路的区域" 和 "纯热流/绝热区域"
         # 阈值 1e-20 用于判定是否存在有效的 ResistanceBC
-        has_resistance_path = (G_sum > 1e-20)
+        np.greater(self.G_sum, 1e-20, out=self._resistance_mask)
 
         # 预填充纯热流结果 (应对没有 ResistanceBC 的情况)
         # 此时 Flux = Q_flux (全部注入，无处分流)
-        self.current_flux[:] = Q_sum_flux
+        self.current_flux[:] = self.Q_sum_flux
+        self.R_eff.fill(np.inf)
+        self.T_eff.fill(0.0)
 
         # --- 针对有 ResistanceBC 的区域进行戴维南等效计算 ---
-        if np.any(has_resistance_path):
-            # 提取这些节点的参数
-            G_active = G_sum[has_resistance_path]
-            J_active = J_sum_R[has_resistance_path]
-            Q_active = Q_sum_flux[has_resistance_path]
-            R_int_active = self.R_internal[has_resistance_path]
-            T_node_active = self.T_adj_node[has_resistance_path]
-
-            # A. 电阻并联等效
-            # R_eq = 1 / Sigma(1/Ri)
-            R_eq = 1.0 / G_active
-            # T_base = R_eq * Sigma(Ti/Ri)
-            T_base = J_active / G_active
-
-            # B. 叠加热流源 (FluxBC)
-            # 等效温度修正: T_eff = T_base + Q_flux * R_eq
-            # (物理意义: 为了吃进 Q_flux，等效环境温度必须升高 Q*R)
-            T_eff = T_base + Q_active * R_eq
-
-            # C. 串联内部热阻求解最终热流
-            # Flux = (T_eff - T_node) / (R_eq + R_internal)
-            flux_active = (T_eff - T_node_active) / (R_eq + R_int_active)
-
-            # 回填结果
-            self.current_flux[has_resistance_path] = flux_active
+        if np.any(self._resistance_mask):
+            np.divide(1.0, self.G_sum, out=self.R_eff, where=self._resistance_mask)
+            np.divide(self.J_sum, self.G_sum, out=self.T_eff, where=self._resistance_mask)
+            np.multiply(self.Q_sum_flux, self.R_eff, out=self._mix_work)
+            np.add(self.T_eff, self._mix_work, out=self.T_eff, where=self._resistance_mask)
+            np.add(self.R_eff, self.R_internal, out=self._mix_work)
+            np.subtract(self.T_eff, self.T_adj_node, out=self._g_work)
+            np.divide(self._g_work, self._mix_work, out=self.current_flux, where=self._resistance_mask)
 
         # --- 4. 更新表面温度 ---
         # T_surf = T_node + Flux * R_internal
@@ -492,7 +479,8 @@ class BoundaryRegion:
         # 若 current_flux 为流入节点，则节点得到热量，
         # 但这里的 R_internal 压降意味着: T_surf = T_node + Flux_in * R_int
         # (热从高温流向低温: 如果 Flux>0 (流入), 则 T_surf > T_node)
-        self.T_surface = self.T_adj_node + self.current_flux * self.R_internal
+        np.multiply(self.current_flux, self.R_internal, out=self.T_surface)
+        np.add(self.T_adj_node, self.T_surface, out=self.T_surface)
 
         for bc in self.conditions:
             if isinstance(bc, DynamicRadiationResistanceBC):
