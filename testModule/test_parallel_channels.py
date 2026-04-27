@@ -2,20 +2,49 @@ import numpy as np
 import matplotlib.pyplot as plt
 import logging
 import sys
+import os
 
 # 设置日志显示
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 # --- 引入项目模块 ---
-try:
-    from Solvers.Hydrodynamics.HydraulicNetwork import HydraulicNetwork
-    from Materials.Fluids.Sodium import Sodium
-    from Solvers.Hydrodynamics.Components import FluidChannel, FlowJunction, IncompressibleFluidChannel
-    from Solvers.Hydrodynamics.BoundaryVolume import IncompressibleBoundaryVolume
-except ImportError as e:
-    print(f"Import Error: {e}")
-    print("请确保脚本运行在包含 Materials 和 Solvers 文件夹的根目录下。")
-    sys.exit(1)
+# try:
+#     from Solvers.Hydrodynamics.HydraulicNetwork import HydraulicNetwork
+#     from Materials.Fluids.Sodium import Sodium
+#     from Solvers.Hydrodynamics.Components import FluidChannel, FlowJunction, IncompressibleFluidChannel
+#     from Solvers.Hydrodynamics.BoundaryVolume import IncompressibleBoundaryVolume
+# except ImportError as e:
+#     print(f"Import Error: {e}")
+#     print("请确保脚本运行在包含 Materials 和 Solvers 文件夹的根目录下。")
+#     sys.exit(1)
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+root_dir = os.path.abspath(os.path.join(current_dir, ".."))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+
+# --- TASTIN 框架导入 ---
+from Solvers.SystemManager import SystemManager
+from Solvers.Hydrodynamics.HydraulicNetwork import HydraulicNetwork
+from Solvers.Hydrodynamics.Components import (
+    IncompressibleFluidChannel, IncompressibleFluidVolume,
+    FlowJunction, MacroFlowJunction,
+)
+from Solvers.Hydrodynamics.BoundaryVolume import (
+    IncompressibleBoundaryVolume, InletJunction,
+)
+from Solvers.HeatConduction.HeatConduction import HeatConduction2D
+from Solvers.HeatConduction.Mesh import Mesh2D
+from Materials.Fluids.SodiumPotassium78 import SodiumPotassium78
+from Materials.Solids.WallMaterial import SS316
+from Materials.Solids.NaHP import SodiumHP
+from Materials.Solids.WickMaterial import WickMaterial
+from Components.RingHP import RingHP
 
 
 def run_parallel_test():
@@ -25,7 +54,7 @@ def run_parallel_test():
 
     # 1. 物理参数与几何定义
     # ----------------------------------------------------------
-    mat = Sodium()
+    mat = SodiumPotassium78()
 
     # 边界条件: 恒定压差驱动
     P_out = 1.5e5  # 出口压力 150 kPa

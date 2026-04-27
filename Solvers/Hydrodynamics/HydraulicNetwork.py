@@ -1296,41 +1296,6 @@ class HydraulicNetwork:
 
         return dh_dt_vec
 
-        # for i, vol in enumerate(self.volumes_obj):
-        #     # 获取质量 M = rho * V
-        #     mass = self.rho_vec[i] * getattr(vol, 'vol', 1.0)
-        #
-        #     # A. 获取显式部分
-        #     # Q_wall 在 Components.py 中被累加为: explicit_part (即 h * A * T_wall)
-        #     # Q_vol 是体积热源
-        #     Q_explicit = getattr(vol, 'Q_wall', 0.0) + getattr(vol, 'Q_vol', 0.0)
-        #
-        #     # B. 获取隐式系数
-        #     # implicit_coeff 在 Components.py 中被累加为: implicit_factor (即 h * A)
-        #     imp_coeff = getattr(vol, 'implicit_coeff', 0.0)
-        #
-        #     # C. 获取当前流体温度
-        #     # 使用 SystemManager 维护的状态向量 self.T_vec[i]，保证与当前时间步一致
-        #     T_curr = self.T_vec[i]
-        #
-        #     # D. 合成净热源
-        #     # 公式: Q_net = (hA * Tw) - (hA) * Tf
-        #     # 这引入了负反馈：Tf 升高会导致 Q_total 减小，从而抑制温度爆炸
-        #     Q_total = Q_explicit - imp_coeff * T_curr
-        #
-        #     # 获取热源 Q (Wall + Volumetric) （错误方法，不调用）
-        #     # 假设 FluidVolume 有 Q_wall, Q_vol 属性
-        #     # Q_total = getattr(vol, 'Q_wall', 0.0) + getattr(vol, 'Q_vol', 0.0)
-        #
-        #     # 计算最终 dh/dt
-        #     # 保护 mass 防止除零
-        #     if mass > 1e-6:
-        #         dh_dt_vec[i] = (dh_dt_vec[i] + Q_total) / mass
-        #     else:
-        #         dh_dt_vec[i] = 0.0
-
-        # return dh_dt_vec
-
     def _calc_thermal_expansion_source(self, dt: float) -> np.ndarray:
         """
         计算热膨胀源项 S_thermal [kg/s] (归一化到质量方程右端项)
@@ -1589,36 +1554,6 @@ class HydraulicNetwork:
                 dh = (Q_net_actual / mass) * dt
                 self.h_vec[i] += dh
                 vol.h = self.h_vec[i]
-
-    # def _step_energy(self, dt: float):
-    #     """
-    #     [Phase 4] 显式推进能量方程 (Corrector)
-    #     使用更新后的流量 W^{n+1} 更新焓 h^{n+1}
-    #     """
-    #     # 计算导数 (使用更新后的 W_vec)
-    #     # 注意: 此时 W_vec 已经是 W_new 了
-    #     dh_dt_vec = self._calc_enthalpy_time_derivative_explicit()
-    #
-    #     # 显式积分
-    #     self.h_vec += dh_dt_vec * dt
-    #
-    #     # 同步更新温度 T 和 对象属性
-    #     for i, vol in enumerate(self.volumes_obj):
-    #         vol.h = self.h_vec[i]
-    #
-    #         # 反算温度
-    #         if hasattr(vol, 'material') and vol.material is not None:
-    #             # T = T(h, P)
-    #             try:
-    #                 new_T = vol.material.temperature_from_enthalpy(vol.h, vol.P)
-    #                 self.T_vec[i] = new_T
-    #                 vol.T = new_T
-    #             except AttributeError:
-    #                 pass
-    #         else:
-    #             # 如果没有物性库，简单近似 dh = Cp * dT (假设 Cp=1000)
-    #             vol.T += dh_dt_vec[i] * dt / 1000.0
-    #             self.T_vec[i] = vol.T
 
     def step(self, dt: float):
         """

@@ -244,9 +244,9 @@ def run_ringhp_case(case_name: str, external_heat_config=None, t_end: float = 50
         current_T_f = chan.volumes[0].T
         current_T_wall = np.mean(solid_header.boundaries['left'].T_surface)
 
-        gross_q = ring_hp.get_total_heat_rejection()
-        external_q = ring_hp.get_total_external_heat_absorption(current_t)
-        net_q = gross_q - external_q
+        gross_q = ring_hp.get_total_heat_rejection_scaled()
+        external_q = ring_hp.get_total_external_heat_absorption_scaled(current_t)
+        net_q = ring_hp.get_total_net_heat_rejection_scaled(current_t)
 
         history['time'].append(current_t)
         history['W_in'].append(current_W)

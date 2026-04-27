@@ -207,6 +207,11 @@ class HPwithFin(BaseComponent):
         self.last_fin_effective_temperature_distribution = np.full_like(area_con, self.T_space)
         self.last_fin_equivalent_resistance_distribution = np.full_like(area_con, 1e15)
 
+        # HeatPipe2D 在父类构造阶段尚未创建切片边界；
+        # 这里在所有边界和外部条件挂接完成后，再做一次完整初始化，
+        # 确保 outer_eva / outer_aba / outer_con 的初始温度和热阻状态可直接用于首个 pre_step()。
+        self.hp.initialize_state()
+
     def set_fin_external_heat_source(self, heat_source, illuminated_area_scale: float = 1.0):
         """
         为降维翅片模型挂载“直接受照”的外热流源。
@@ -397,13 +402,24 @@ class HPwithFin(BaseComponent):
             c_prime = np.zeros((Na, Nh))
             d_prime = np.zeros((Na, Nh))
 
-            c_prime[:, 0] = c[:, 0] / b[:, 0]
-            d_prime[:, 0] = d[:, 0] / b[:, 0]
+            denom_floor = 1.0e-12
+            b0 = b[:, 0]
+            b0_safe = np.copysign(
+                np.maximum(np.abs(b0), denom_floor),
+                np.where(b0 == 0.0, 1.0, b0)
+            )
+
+            c_prime[:, 0] = c[:, 0] / b0_safe
+            d_prime[:, 0] = d[:, 0] / b0_safe
 
             for j in range(1, Nh):
                 denom = b[:, j] - a[:, j] * c_prime[:, j - 1]
-                c_prime[:, j] = c[:, j] / denom
-                d_prime[:, j] = (d[:, j] - a[:, j] * d_prime[:, j - 1]) / denom
+                denom_safe = np.copysign(
+                    np.maximum(np.abs(denom), denom_floor),
+                    np.where(denom == 0.0, 1.0, denom)
+                )
+                c_prime[:, j] = c[:, j] / denom_safe
+                d_prime[:, j] = (d[:, j] - a[:, j] * d_prime[:, j - 1]) / denom_safe
 
             T_new = np.zeros((Na, Nh))
             T_new[:, -1] = d_prime[:, -1]

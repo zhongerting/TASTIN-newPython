@@ -1,7 +1,10 @@
 import csv
+import io
 import logging
 import os
 import sys
+import time
+from contextlib import redirect_stdout
 import numpy as np
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -20,8 +23,8 @@ from Solvers.SystemManager import SystemManager
 from Solvers.Hydrodynamics.HydraulicNetwork import HydraulicNetwork
 from Solvers.Hydrodynamics.Components import (
     IncompressibleFluidChannel,
-    IncompressibleFluidVolume,
     FlowJunction,
+    MacroFlowJunction,
 )
 from Solvers.Hydrodynamics.BoundaryVolume import (
     IncompressibleBoundaryVolume,
@@ -34,6 +37,7 @@ from Materials.Solids.WallMaterial import SS316
 from Materials.Solids.NaHP import SodiumHP
 from Materials.Solids.WickMaterial import WickMaterial
 from Components.RingHP import RingHP
+from profiler import TEASAProfiler
 
 
 logging.basicConfig(level=logging.WARNING)
@@ -73,21 +77,16 @@ N_HOT_LEG = 28
 AREA_INLET_BUFFER = 3.0 * AREA_HOT_LEG
 DH_INLET_BUFFER = 2.0 * np.sqrt(AREA_INLET_BUFFER / np.pi)
 
-L_MANIFOLD = 0.40911
-R_IN_MANIFOLD = 0.009
-DH_MANIFOLD = 2.0 * R_IN_MANIFOLD
-AREA_MANIFOLD = np.pi * R_IN_MANIFOLD**2
-N_MANIFOLD = 5
+L_OUTLET_BRANCH = 0.40911
+R_IN_OUTLET_BRANCH = 0.009
+DH_OUTLET_BRANCH = 2.0 * R_IN_OUTLET_BRANCH
+AREA_OUTLET_BRANCH = np.pi * R_IN_OUTLET_BRANCH**2
+N_OUTLET_BRANCH = 5
 
 L_OUTLET_BUFFER = 0.20
-AREA_OUTLET_BUFFER = 3.0 * AREA_MANIFOLD
+AREA_OUTLET_BUFFER = 3.0 * AREA_OUTLET_BRANCH
 DH_OUTLET_BUFFER = 2.0 * np.sqrt(AREA_OUTLET_BUFFER / np.pi)
 N_OUTLET_BUFFER = 5
-
-INTERFACE_LENGTH = 1.0e-3
-INTERFACE_AREA = AREA_RING
-INTERFACE_DH = DH_RING
-INTERFACE_VOLUME = INTERFACE_AREA * INTERFACE_LENGTH
 
 R_OUT_HP = 0.0085
 R_IN_HP = 0.0081
@@ -104,6 +103,18 @@ N_FIN_HEIGHT = 15
 DEFAULT_T_END = 50.0
 DEFAULT_PRINT_EVERY_TIME = 1.0
 DEFAULT_RESTART_SAVE_EVERY = 10.0
+
+PROFILER_KEY_FUNCTIONS = [
+    "SystemManager.initialize_system",
+    "SystemManager.compute_adaptive_dt",
+    "SystemManager.step",
+    "HydraulicNetwork.get_max_stable_dt",
+    "HydraulicNetwork.step",
+    "HydraulicNetwork.step_hydraulic",
+    "HydraulicNetwork._step_energy_implicit",
+    "HeatConduction2D.step",
+    "FluidSolidCouple.execute",
+]
 
 if len(HP_MULTIPLIERS_SECTOR) != N_SECTOR:
     raise ValueError("HP_MULTIPLIERS_SECTOR length must equal N_SECTOR.")
@@ -196,19 +207,6 @@ def build_sector_solid(name):
     return solid
 
 
-def build_interface_volume(name):
-    return IncompressibleFluidVolume(
-        name=name,
-        volume=INTERFACE_VOLUME,
-        length=INTERFACE_LENGTH,
-        flow_area=INTERFACE_AREA,
-        hydraulic_diam=INTERFACE_DH,
-        initial_P=P_OUTLET,
-        initial_T=T_INIT,
-        material=nak,
-    )
-
-
 def build_model():
     # -----------------------------------------------------
     # 1. External boundaries
@@ -229,7 +227,7 @@ def build_model():
     outlet_boundary.is_pressure_boundary = True
 
     # -----------------------------------------------------
-    # 2. Adiabatic inlet/outlet buffers + three inlet legs/manifolds
+    # 2. Adiabatic inlet/outlet buffers + three inlet legs/outlet branches
     # -----------------------------------------------------
     inlet_buffer_channel = IncompressibleFluidChannel(
         name="InletBuffer",
@@ -267,13 +265,13 @@ def build_model():
         material=nak,
     )
 
-    manifolds = [
+    outlet_branches = [
         IncompressibleFluidChannel(
-            name=f"Manifold_{i}",
-            n_nodes=N_MANIFOLD,
-            total_length=L_MANIFOLD,
-            flow_area=AREA_MANIFOLD,
-            hydraulic_diam=DH_MANIFOLD,
+            name=f"OutletBranch_{i}",
+            n_nodes=N_OUTLET_BRANCH,
+            total_length=L_OUTLET_BRANCH,
+            flow_area=AREA_OUTLET_BRANCH,
+            hydraulic_diam=DH_OUTLET_BRANCH,
             initial_P=P_OUTLET,
             initial_T=T_INIT,
             material=nak,
@@ -282,20 +280,7 @@ def build_model():
     ]
 
     # -----------------------------------------------------
-    # 3. Six ring interface nodes:
-    #    I1 - O1 - I2 - O2 - I3 - O3
-    # -----------------------------------------------------
-    interface_nodes = {
-        "I1": build_interface_volume("RingNode_I1"),
-        "O1": build_interface_volume("RingNode_O1"),
-        "I2": build_interface_volume("RingNode_I2"),
-        "O2": build_interface_volume("RingNode_O2"),
-        "I3": build_interface_volume("RingNode_I3"),
-        "O3": build_interface_volume("RingNode_O3"),
-    }
-
-    # -----------------------------------------------------
-    # 4. Build 6 stitched 1/6 RingHP sectors
+    # 3. Build 6 stitched 1/6 RingHP sectors
     # -----------------------------------------------------
     sector_specs = [
         ("S1_I1_to_O1", "I1", "O1"),
@@ -309,8 +294,6 @@ def build_model():
     sectors = []
     solids = []
     ring_hps = []
-    sector_entry_junctions = []
-    sector_exit_junctions = []
 
     for sector_name, start_key, end_key in sector_specs:
         channel = IncompressibleFluidChannel(
@@ -331,30 +314,71 @@ def build_model():
             hp_multipliers=HP_MULTIPLIERS_SECTOR,
         )
 
-        entry = FlowJunction(
-            name=f"J_{start_key}_{sector_name}_In",
-            from_vol=interface_nodes[start_key],
-            to_vol=channel.volumes[0],
-            flow_area=AREA_RING,
-            k_loss=0.0,
-        )
-        exit_ = FlowJunction(
-            name=f"J_{sector_name}_{end_key}_Out",
-            from_vol=channel.volumes[-1],
-            to_vol=interface_nodes[end_key],
-            flow_area=AREA_RING,
-            k_loss=ring_hp.outlet_k_loss,
-        )
-
         sectors.append(channel)
         solids.append(solid)
         ring_hps.append(ring_hp)
-        sector_entry_junctions.append(entry)
-        sector_exit_junctions.append(exit_)
 
     # -----------------------------------------------------
-    # 5. Connect inlet buffer -> three legs -> ring,
-    #    and ring -> three manifolds -> outlet buffer
+    # 4. Use sector endpoint control volumes as shared ring nodes:
+    #    I1=S1[0], O1=S2[0], I2=S3[0], O2=S4[0], I3=S5[0], O3=S6[0]
+    # -----------------------------------------------------
+    ring_nodes = {
+        "I1": sectors[0].volumes[0],
+        "O1": sectors[1].volumes[0],
+        "I2": sectors[2].volumes[0],
+        "O2": sectors[3].volumes[0],
+        "I3": sectors[4].volumes[0],
+        "O3": sectors[5].volumes[0],
+    }
+
+    sector_link_junctions = [
+        FlowJunction(
+            name="J_S1_O1_to_S2_O1",
+            from_vol=sectors[0].volumes[-1],
+            to_vol=ring_nodes["O1"],
+            flow_area=AREA_RING,
+            k_loss=ring_hps[0].outlet_k_loss,
+        ),
+        FlowJunction(
+            name="J_S2_I2_to_S3_I2",
+            from_vol=sectors[1].volumes[-1],
+            to_vol=ring_nodes["I2"],
+            flow_area=AREA_RING,
+            k_loss=ring_hps[1].outlet_k_loss,
+        ),
+        FlowJunction(
+            name="J_S3_O2_to_S4_O2",
+            from_vol=sectors[2].volumes[-1],
+            to_vol=ring_nodes["O2"],
+            flow_area=AREA_RING,
+            k_loss=ring_hps[2].outlet_k_loss,
+        ),
+        FlowJunction(
+            name="J_S4_I3_to_S5_I3",
+            from_vol=sectors[3].volumes[-1],
+            to_vol=ring_nodes["I3"],
+            flow_area=AREA_RING,
+            k_loss=ring_hps[3].outlet_k_loss,
+        ),
+        FlowJunction(
+            name="J_S5_O3_to_S6_O3",
+            from_vol=sectors[4].volumes[-1],
+            to_vol=ring_nodes["O3"],
+            flow_area=AREA_RING,
+            k_loss=ring_hps[4].outlet_k_loss,
+        ),
+        FlowJunction(
+            name="J_S6_I1_to_S1_I1",
+            from_vol=sectors[5].volumes[-1],
+            to_vol=ring_nodes["I1"],
+            flow_area=AREA_RING,
+            k_loss=ring_hps[5].outlet_k_loss,
+        ),
+    ]
+
+    # -----------------------------------------------------
+    # 5. Connect inlet buffer -> three legs -> ring inlets,
+    #    and ring outlets -> three outlet branches -> outlet buffer
     # -----------------------------------------------------
     inlet_junction = InletJunction(
         name="J_InletBoundary_InletBuffer",
@@ -365,8 +389,8 @@ def build_model():
 
     inlet_buffer_to_hot_leg = []
     hot_leg_to_ring = []
-    ring_to_manifold = []
-    manifold_to_outlet_buffer = []
+    ring_to_outlet_branch = []
+    outlet_branch_to_outlet_buffer = []
     outlet_junction = FlowJunction(
         name="J_OutletBuffer_OutletBoundary",
         from_vol=outlet_buffer_channel.volumes[-1],
@@ -389,31 +413,35 @@ def build_model():
             )
         )
         hot_leg_to_ring.append(
-            FlowJunction(
+            MacroFlowJunction(
                 name=f"J_HotLeg_{idx + 1}_{interface_key}",
                 from_vol=hot_legs[idx].volumes[-1],
-                to_vol=interface_nodes[interface_key],
+                to_vol=ring_nodes[interface_key],
+                macro_vol=hot_legs[idx].volumes[-1],
+                multiplier=2,
                 flow_area=AREA_HOT_LEG,
                 k_loss=0.0,
             )
         )
 
     for interface_key, idx in outlet_map:
-        ring_to_manifold.append(
-            FlowJunction(
-                name=f"J_{interface_key}_Manifold_{idx + 1}",
-                from_vol=interface_nodes[interface_key],
-                to_vol=manifolds[idx].volumes[0],
-                flow_area=AREA_MANIFOLD,
+        ring_to_outlet_branch.append(
+            MacroFlowJunction(
+                name=f"J_{interface_key}_OutletBranch_{idx + 1}",
+                from_vol=ring_nodes[interface_key],
+                to_vol=outlet_branches[idx].volumes[0],
+                macro_vol=outlet_branches[idx].volumes[0],
+                multiplier=2,
+                flow_area=AREA_OUTLET_BRANCH,
                 k_loss=0.0,
             )
         )
-        manifold_to_outlet_buffer.append(
+        outlet_branch_to_outlet_buffer.append(
             FlowJunction(
-                name=f"J_Manifold_{idx + 1}_OutletBuffer",
-                from_vol=manifolds[idx].volumes[-1],
+                name=f"J_OutletBranch_{idx + 1}_OutletBuffer",
+                from_vol=outlet_branches[idx].volumes[-1],
                 to_vol=outlet_buffer_channel.volumes[0],
-                flow_area=AREA_MANIFOLD,
+                flow_area=AREA_OUTLET_BRANCH,
                 k_loss=0.0,
             )
         )
@@ -427,10 +455,9 @@ def build_model():
     all_vols.extend(inlet_buffer_channel.volumes)
     for channel in hot_legs:
         all_vols.extend(channel.volumes)
-    for channel in manifolds:
+    for channel in outlet_branches:
         all_vols.extend(channel.volumes)
     all_vols.extend(outlet_buffer_channel.volumes)
-    all_vols.extend(interface_nodes.values())
     for channel in sectors:
         all_vols.extend(channel.volumes)
 
@@ -438,15 +465,14 @@ def build_model():
     all_juncs.append(inlet_junction)
     all_juncs.extend(inlet_buffer_to_hot_leg)
     all_juncs.extend(hot_leg_to_ring)
-    all_juncs.extend(ring_to_manifold)
-    all_juncs.extend(manifold_to_outlet_buffer)
+    all_juncs.extend(ring_to_outlet_branch)
+    all_juncs.extend(outlet_branch_to_outlet_buffer)
     all_juncs.append(outlet_junction)
-    all_juncs.extend(sector_entry_junctions)
-    all_juncs.extend(sector_exit_junctions)
+    all_juncs.extend(sector_link_junctions)
     all_juncs.extend(inlet_buffer_channel.internal_junctions)
     for channel in hot_legs:
         all_juncs.extend(channel.internal_junctions)
-    for channel in manifolds:
+    for channel in outlet_branches:
         all_juncs.extend(channel.internal_junctions)
     all_juncs.extend(outlet_buffer_channel.internal_junctions)
     for channel in sectors:
@@ -462,20 +488,19 @@ def build_model():
         "outlet_boundary": outlet_boundary,
         "inlet_buffer_channel": inlet_buffer_channel,
         "hot_legs": hot_legs,
-        "manifolds": manifolds,
+        "outlet_branches": outlet_branches,
         "outlet_buffer_channel": outlet_buffer_channel,
-        "interface_nodes": interface_nodes,
+        "ring_nodes": ring_nodes,
         "sectors": sectors,
         "solids": solids,
         "ring_hps": ring_hps,
         "inlet_junction": inlet_junction,
         "inlet_buffer_to_hot_leg": inlet_buffer_to_hot_leg,
         "hot_leg_to_ring": hot_leg_to_ring,
-        "ring_to_manifold": ring_to_manifold,
-        "manifold_to_outlet_buffer": manifold_to_outlet_buffer,
+        "ring_to_outlet_branch": ring_to_outlet_branch,
+        "outlet_branch_to_outlet_buffer": outlet_branch_to_outlet_buffer,
         "outlet_junction": outlet_junction,
-        "sector_entry_junctions": sector_entry_junctions,
-        "sector_exit_junctions": sector_exit_junctions,
+        "sector_link_junctions": sector_link_junctions,
         "all_vols": all_vols,
         "all_juncs": all_juncs,
         "network": network,
@@ -517,6 +542,75 @@ def next_event_time(current_time, interval):
     return (np.floor((current_time + 1.0e-12) / interval) + 1.0) * interval
 
 
+def install_profiler_hooks():
+    def wrap_method(cls, method_name):
+        method = getattr(cls, method_name)
+        if getattr(method, "_teasa_profile_wrapped", False):
+            return
+        if hasattr(method, "__wrapped__"):
+            return
+        wrapped = TEASAProfiler.profile(method)
+        wrapped._teasa_profile_wrapped = True
+        setattr(cls, method_name, wrapped)
+
+    wrap_method(SystemManager, "initialize_system")
+    wrap_method(SystemManager, "compute_adaptive_dt")
+    wrap_method(HydraulicNetwork, "get_max_stable_dt")
+
+
+def reset_profiler_stats():
+    TEASAProfiler.stats = {}
+
+
+def get_profiler_snapshot_rows(sim_time, cpu_elapsed_s, wall_elapsed_s):
+    rows = []
+    for func_name in PROFILER_KEY_FUNCTIONS:
+        data = TEASAProfiler.stats.get(func_name, {"count": 0, "time": 0.0})
+        count = int(data["count"])
+        total_time_s = float(data["time"])
+        avg_time_ms = 1000.0 * total_time_s / count if count > 0 else 0.0
+        rows.append(
+            {
+                "sim_time_s": float(sim_time),
+                "cpu_elapsed_s": float(cpu_elapsed_s),
+                "wall_elapsed_s": float(wall_elapsed_s),
+                "function_name": func_name,
+                "call_count": count,
+                "total_time_s": total_time_s,
+                "avg_time_ms": avg_time_ms,
+            }
+        )
+    return rows
+
+
+def get_profiler_summary_rows():
+    rows = []
+    for func_name in PROFILER_KEY_FUNCTIONS:
+        data = TEASAProfiler.stats.get(func_name, {"count": 0, "time": 0.0})
+        count = int(data["count"])
+        total_time_s = float(data["time"])
+        avg_time_ms = 1000.0 * total_time_s / count if count > 0 else 0.0
+        rows.append(
+            {
+                "function_name": func_name,
+                "call_count": count,
+                "total_time_s": total_time_s,
+                "avg_time_ms": avg_time_ms,
+            }
+        )
+    return rows
+
+
+def write_profiler_report(report_path):
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        TEASAProfiler.report()
+    report_text = buffer.getvalue()
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(report_text)
+    print(report_text, end="")
+
+
 def get_model_statistics(model):
     solid_nodes = int(sum(np.size(solid.T) for solid in model["solids"]))
     fluid_nodes = int(len(model["all_vols"]) - 2)
@@ -550,7 +644,15 @@ def run_case(
     restart_from=None,
     restart_save_path=None,
     restart_save_every=DEFAULT_RESTART_SAVE_EVERY,
+    profiler_summary_path=None,
+    profiler_snapshot_path=None,
+    profiler_report_path=None,
 ):
+    install_profiler_hooks()
+    reset_profiler_stats()
+    wall_start = time.perf_counter()
+    cpu_start = time.process_time()
+
     model = build_model()
     sys_mgr = model["sys_mgr"]
     network = model["network"]
@@ -558,17 +660,16 @@ def run_case(
     outlet_boundary = model["outlet_boundary"]
     inlet_buffer_channel = model["inlet_buffer_channel"]
     hot_legs = model["hot_legs"]
-    manifolds = model["manifolds"]
+    outlet_branches = model["outlet_branches"]
     outlet_buffer_channel = model["outlet_buffer_channel"]
-    interface_nodes = model["interface_nodes"]
+    ring_nodes = model["ring_nodes"]
     sectors = model["sectors"]
     inlet_junction = model["inlet_junction"]
     inlet_buffer_to_hot_leg = model["inlet_buffer_to_hot_leg"]
     hot_leg_to_ring = model["hot_leg_to_ring"]
-    ring_to_manifold = model["ring_to_manifold"]
-    manifold_to_outlet_buffer = model["manifold_to_outlet_buffer"]
+    ring_to_outlet_branch = model["ring_to_outlet_branch"]
+    outlet_branch_to_outlet_buffer = model["outlet_branch_to_outlet_buffer"]
     outlet_junction = model["outlet_junction"]
-    sector_entry_junctions = model["sector_entry_junctions"]
 
     print_pre_run_summary(model, case_name)
 
@@ -585,6 +686,7 @@ def run_case(
         print("System initialized from initial condition.")
 
     history = []
+    profiler_snapshots = []
     next_print_time = next_event_time(sys_mgr.global_time, print_every_time)
     next_restart_save_time = next_event_time(sys_mgr.global_time, restart_save_every)
 
@@ -607,29 +709,37 @@ def run_case(
         sys_mgr.step(dt=dt, inner_iter=inner_iter)
 
         current_t = sys_mgr.global_time
+        cpu_elapsed_s = time.process_time() - cpu_start
+        wall_elapsed_s = time.perf_counter() - wall_start
 
         w_in_total = float(inlet_junction.W)
         w_out_total = float(outlet_junction.W)
-        t_outlet_list = [channel.volumes[-1].T for channel in manifolds]
+        w_ring_in_total = float(sum(j.W for j in hot_leg_to_ring))
+        w_ring_out_total = float(sum(j.W for j in ring_to_outlet_branch))
+        t_outlet_list = [channel.volumes[-1].T for channel in outlet_branches]
         t_out_avg = float(np.mean(t_outlet_list))
 
         row = {
             "time": current_t,
             "dt": dt,
+            "cpu_elapsed_s": float(cpu_elapsed_s),
+            "wall_elapsed_s": float(wall_elapsed_s),
             "W_in_total": w_in_total,
             "W_out_total": w_out_total,
+            "W_ring_in_total": w_ring_in_total,
+            "W_ring_out_total": w_ring_out_total,
             "T_out_avg": t_out_avg,
             "T_inlet_buffer_out": float(inlet_buffer_channel.volumes[-1].T),
             "T_outlet_1": float(t_outlet_list[0]),
             "T_outlet_2": float(t_outlet_list[1]),
             "T_outlet_3": float(t_outlet_list[2]),
             "T_outlet_buffer_out": float(outlet_buffer_channel.volumes[-1].T),
-            "P_node_I1": float(interface_nodes["I1"].P),
-            "P_node_O1": float(interface_nodes["O1"].P),
-            "P_node_I2": float(interface_nodes["I2"].P),
-            "P_node_O2": float(interface_nodes["O2"].P),
-            "P_node_I3": float(interface_nodes["I3"].P),
-            "P_node_O3": float(interface_nodes["O3"].P),
+            "P_node_I1": float(ring_nodes["I1"].P),
+            "P_node_O1": float(ring_nodes["O1"].P),
+            "P_node_I2": float(ring_nodes["I2"].P),
+            "P_node_O2": float(ring_nodes["O2"].P),
+            "P_node_I3": float(ring_nodes["I3"].P),
+            "P_node_O3": float(ring_nodes["O3"].P),
         }
 
         row["W_inlet_boundary"] = float(inlet_junction.W)
@@ -637,19 +747,24 @@ def run_case(
         for idx, junc in enumerate(inlet_buffer_to_hot_leg, start=1):
             row[f"W_inlet_buffer_to_hotleg_{idx}"] = float(junc.W)
         for idx, junc in enumerate(hot_leg_to_ring, start=1):
+            row[f"W_hotleg_to_ring_macro_{idx}"] = float(
+                junc.get_mass_flow_for(hot_legs[idx - 1].volumes[-1])
+            )
             row[f"W_hotleg_to_ring_{idx}"] = float(junc.W)
-        for idx, junc in enumerate(ring_to_manifold, start=1):
-            row[f"W_ring_to_manifold_{idx}"] = float(junc.W)
-        for idx, junc in enumerate(manifold_to_outlet_buffer, start=1):
-            row[f"W_manifold_to_outlet_buffer_{idx}"] = float(junc.W)
-        for idx, junc in enumerate(sector_entry_junctions, start=1):
-            row[f"W_sector_{idx}_entry"] = float(junc.W)
+        for idx, junc in enumerate(ring_to_outlet_branch, start=1):
+            row[f"W_ring_to_outlet_branch_{idx}"] = float(junc.W)
+            row[f"W_ring_to_outlet_branch_macro_{idx}"] = float(
+                junc.get_mass_flow_for(outlet_branches[idx - 1].volumes[0])
+            )
+        for idx, junc in enumerate(outlet_branch_to_outlet_buffer, start=1):
+            row[f"W_outlet_branch_to_outlet_buffer_{idx}"] = float(junc.W)
         for idx, channel in enumerate(sectors, start=1):
+            row[f"W_sector_{idx}_entry"] = float(channel.internal_junctions[0].W)
             row[f"T_sector_{idx}_out"] = float(channel.volumes[-1].T)
         for idx, channel in enumerate(hot_legs, start=1):
             row[f"T_hotleg_{idx}_out"] = float(channel.volumes[-1].T)
-        for idx, channel in enumerate(manifolds, start=1):
-            row[f"T_manifold_{idx}_out"] = float(channel.volumes[-1].T)
+        for idx, channel in enumerate(outlet_branches, start=1):
+            row[f"T_outlet_branch_{idx}_out"] = float(channel.volumes[-1].T)
 
         history.append(row)
 
@@ -658,11 +773,20 @@ def run_case(
             should_print = True
 
         if should_print:
+            profiler_snapshots.extend(
+                get_profiler_snapshot_rows(
+                    sim_time=current_t,
+                    cpu_elapsed_s=cpu_elapsed_s,
+                    wall_elapsed_s=wall_elapsed_s,
+                )
+            )
             print(
                 f"t = {current_t:8.3f} s | "
                 f"T_out_avg = {t_out_avg:.3f} K | "
                 f"W_in_total = {w_in_total:.4f} kg/s | "
-                f"W_out_total = {w_out_total:.4f} kg/s"
+                f"W_ring_in_total = {w_ring_in_total:.4f} kg/s | "
+                f"W_out_total = {w_out_total:.4f} kg/s | "
+                f"CPU = {cpu_elapsed_s:.2f} s"
             )
             while next_print_time is not None and current_t >= next_print_time - 1.0e-12:
                 next_print_time += print_every_time
@@ -684,8 +808,23 @@ def run_case(
 
     if csv_path is None:
         csv_path = os.path.join(current_dir, f"{case_name}_history.csv")
+    if profiler_summary_path is None:
+        profiler_summary_path = os.path.join(
+            current_dir, f"{case_name}_profiler_summary.csv"
+        )
+    if profiler_snapshot_path is None:
+        profiler_snapshot_path = os.path.join(
+            current_dir, f"{case_name}_profiler_snapshots.csv"
+        )
+    if profiler_report_path is None:
+        profiler_report_path = os.path.join(
+            current_dir, f"{case_name}_profiler_report.txt"
+        )
 
     write_history_csv(csv_path, history)
+    write_history_csv(profiler_summary_path, get_profiler_summary_rows())
+    write_history_csv(profiler_snapshot_path, profiler_snapshots)
+    write_profiler_report(profiler_report_path)
 
     if restart_save_path is not None:
         sys_mgr.save_global_state(restart_save_path)
@@ -693,6 +832,9 @@ def run_case(
 
     print("=" * 70)
     print(f"Case completed: {case_name}")
+    print(f"Profiler summary : {profiler_summary_path}")
+    print(f"Profiler snapshots: {profiler_snapshot_path}")
+    print(f"Profiler report  : {profiler_report_path}")
     print("=" * 70)
 
     return model, history
@@ -706,8 +848,9 @@ def print_model_summary(model):
     print(f"Nodes per 1/6    : {N_SECTOR}")
     print(f"HPs per 1/6 sector: {HP_COUNT_PER_SECTOR}")
     print(f"HPs in whole ring : {6 * HP_COUNT_PER_SECTOR}")
-    print("  Topology: inlet boundary -> inlet buffer -> 3 hot legs -> ring")
-    print("            ring -> 3 manifolds -> outlet buffer -> outlet boundary")
+    print("  Topology: inlet boundary -> inlet buffer -> 3 hot legs -> ring inlets")
+    print("            (branch-side flow is halved when entering the ring)")
+    print("            ring outlets -> 3 outlet branches -> outlet buffer -> outlet boundary")
     for idx, (sector_name, start_key, end_key) in enumerate(model["sector_specs"], start=1):
         print(f"  Sector {idx}: {start_key} -> {end_key} ({sector_name})")
     print("  Inlet nodes: I1, I2, I3")

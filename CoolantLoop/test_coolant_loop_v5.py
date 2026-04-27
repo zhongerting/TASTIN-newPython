@@ -62,25 +62,32 @@ def get_ring_wall_radiation_by_node(solid_ring):
     """
     return get_boundary_radiation_by_node(solid_ring.boundaries["right"])
 
-def get_hp_rejection_by_node(ring_hp):
+def get_hp_rejection_by_node(ring_hp, hp_multipliers):
     """
-    RingHP 中每个流体节点对应热管/翅片的散热量 [W/node]。
-
-    注意：
-    RingHP 内部每个 hp_unit 是一个代表热管；
-    实际节点热管数量由 SingleVolumeProxy 在耦合源项中放大。
-    但 get_total_heat_rejection() 是否对 multiplier 放大，需要看 HPwithFin 的实现。
-    为了和你当前 RingHP 的总量接口保持一致，这里采用每个 hp_unit 的
-    get_heat_rejection_distribution() 直接求和。
-    如果后续确认该函数未乘 hp_multipliers，需要显式乘对应 multiplier。
+    返回每个流体节点对应的真实热管总散热量 [W/node]。
+    这里显式按 `hp_multipliers` 折算，避免把代表热管单元误当成真实节点总量。
     """
-    q_nodes = []
+    n_nodes = len(hp_multipliers)
+    q_nodes = np.zeros(n_nodes, dtype=float)
 
-    for hp_unit in ring_hp.hp_units:
-        _, q_con_dist = hp_unit.get_heat_rejection_distribution()
-        q_nodes.append(float(np.sum(q_con_dist)))
+    hp_idx = 0
+    for i, multiplier in enumerate(hp_multipliers):
+        if multiplier <= 0:
+            continue
 
-    return np.array(q_nodes, dtype=float)
+        hp_unit = ring_hp.hp_units[hp_idx]
+        hp_idx += 1
+
+        q_aba_dist, _ = hp_unit.get_heat_rejection_distribution()
+        breakdown = hp_unit.get_heat_exchange_breakdown()
+        q_single = (
+            float(np.sum(q_aba_dist))
+            + float(np.sum(breakdown["bare_radiation"]))
+            + float(np.sum(breakdown["fin_radiation"]))
+        )
+        q_nodes[i] = q_single * float(multiplier)
+
+    return q_nodes
 
 def get_hp_radiation_breakdown_by_node(ring_hp, hp_multipliers):
     n_nodes = len(hp_multipliers)
@@ -118,12 +125,12 @@ def get_hp_radiation_breakdown_by_node(ring_hp, hp_multipliers):
         "segment_total": single_total * multiplier_arr,
     }
 
-def get_ring_total_rejection_by_node(solid_ring, ring_hp):
+def get_ring_total_rejection_by_node(solid_ring, ring_hp, hp_multipliers):
     """
     每个节点总散热量 = 集流环外壁直接辐射 + 热管/翅片散热。
     """
     q_wall = get_ring_wall_radiation_by_node(solid_ring)
-    q_hp = get_hp_rejection_by_node(ring_hp)
+    q_hp = get_hp_rejection_by_node(ring_hp, hp_multipliers)
 
     if len(q_wall) != len(q_hp):
         raise ValueError(

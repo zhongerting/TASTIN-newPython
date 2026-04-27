@@ -143,6 +143,7 @@ class RingHP(BaseComponent):
         self._hp_k_loss_distribution = np.zeros(n_nodes, dtype=float)
         self._hp_presence_mask = np.zeros(n_nodes, dtype=bool)
         self._hp_external_heat_enabled = np.zeros(n_nodes, dtype=bool)
+        self._hp_multipliers = np.asarray(hp_multipliers, dtype=float)
 
         # ===== B. 为每个流体控制体构造代表热管 =====
         for i in range(n_nodes):
@@ -211,11 +212,14 @@ class RingHP(BaseComponent):
                 proxy = SingleVolumeProxy(vol, self.fluid_channel, i, hp_L_eva, N_hp)
 
                 # 这里仍保留当前工程中的简化换热模型。
-                # 如后续需要，可替换成基于横掠管束的 Nu 相关式。
-                def constant_h_corr(Re, Pr, dummy=1.1):
-                    k_f = proxy.material.conductivity(np.array([proxy.vol.T]), np.array([proxy.vol.P]))[0]
+                # TODO: 实现基于横掠管束的 Nu 换热相关式，参考张文文师兄论文来写
+                def constant_h_corr(Re, Pr, dummy=1.1, proxy_ref=proxy):
+                    k_f = proxy_ref.material.conductivity(
+                        np.array([proxy_ref.vol.T]),
+                        np.array([proxy_ref.vol.P]),
+                    )[0]
                     target_h = 10000.0
-                    return (target_h * proxy.d_h) / k_f
+                    return (target_h * proxy_ref.d_h) / k_f
 
                 hp_peri_single = 2.0 * np.pi * hp_r_out
                 cap_hp = hp.hp.get_boundary_node_capacitance('outer_eva')
@@ -448,6 +452,38 @@ class RingHP(BaseComponent):
             total_q += float(np.sum(q_abs_dist))
         return total_q
 
+    def _iter_present_hp_units_with_multiplier(self):
+        hp_pos = 0
+        for node_index, present in enumerate(self._hp_presence_mask):
+            if present:
+                yield node_index, self.hp_units[hp_pos], float(self._hp_multipliers[node_index])
+                hp_pos += 1
+
+    def get_total_heat_rejection_scaled(self) -> float:
+        """返回按 `hp_multipliers` 折算后的真实总向外散热量。"""
+        total_q = 0.0
+        for _, hp, multiplier in self._iter_present_hp_units_with_multiplier():
+            q_aba_dist, q_con_dist = hp.get_heat_rejection_distribution()
+            total_q += multiplier * (
+                float(np.sum(q_aba_dist)) + float(np.sum(q_con_dist))
+            )
+        return total_q
+
+    def get_total_external_heat_absorption_scaled(self, current_time: float) -> float:
+        """返回按 `hp_multipliers` 折算后的真实轨道外热流总吸收功率。"""
+        total_q = 0.0
+        for _, hp, multiplier in self._iter_present_hp_units_with_multiplier():
+            _, _, q_abs_dist = hp.get_external_heat_absorption_distribution(current_time)
+            total_q += multiplier * float(np.sum(q_abs_dist))
+        return total_q
+
+    def get_total_net_heat_rejection_scaled(self, current_time: float) -> float:
+        """返回按 `hp_multipliers` 折算后的真实净排热。"""
+        return (
+            self.get_total_heat_rejection_scaled()
+            - self.get_total_external_heat_absorption_scaled(current_time)
+        )
+
     def get_hp_status_summary(self, current_time: Optional[float] = None) -> Dict[str, Any]:
         """
         返回 RingHP 内部热管阵列的汇总信息，便于调试和后处理。
@@ -456,11 +492,18 @@ class RingHP(BaseComponent):
             'n_header_nodes': self.n_header_nodes,
             'n_hp_units': len(self.hp_units),
             'hp_presence_mask': np.array(self._hp_presence_mask, copy=True),
+            'hp_multipliers': np.array(self._hp_multipliers, copy=True),
             'hp_external_heat_enabled': np.array(self._hp_external_heat_enabled, copy=True),
             'hp_k_loss_distribution': np.array(self._hp_k_loss_distribution, copy=True),
             'gross_heat_rejection': self.get_total_heat_rejection(),
+            'gross_heat_rejection_scaled': self.get_total_heat_rejection_scaled(),
         }
         if current_time is not None:
             summary['external_heat_absorption'] = self.get_total_external_heat_absorption(current_time)
             summary['net_heat_rejection'] = summary['gross_heat_rejection'] - summary['external_heat_absorption']
+            summary['external_heat_absorption_scaled'] = self.get_total_external_heat_absorption_scaled(current_time)
+            summary['net_heat_rejection_scaled'] = (
+                summary['gross_heat_rejection_scaled']
+                - summary['external_heat_absorption_scaled']
+            )
         return summary
