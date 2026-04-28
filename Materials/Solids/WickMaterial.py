@@ -44,8 +44,24 @@ class WickMaterial(SolidMaterial):
         self._lookup_mu_v = None
         self._lookup_h_fg = None
         self._lookup_log_k_total = None
+        self._lookup_log_k_structural = None
         self._lookup_high_nonlinear_min = None
         self._lookup_high_nonlinear_max = None
+
+    def invalidate_lookup_table(self):
+        self._lookup_table_ready = False
+        self._lookup_temperature_grid = None
+        self._lookup_log_p_sat = None
+        self._lookup_mu_v = None
+        self._lookup_h_fg = None
+        self._lookup_log_k_total = None
+        self._lookup_log_k_structural = None
+        self._lookup_high_nonlinear_min = None
+        self._lookup_high_nonlinear_max = None
+
+    def set_conductivity_cap(self, conductivity_cap: Union[float, None]):
+        self.conductivity_cap = conductivity_cap
+        self.invalidate_lookup_table()
 
     def density(self, T: Numeric) -> Numeric:
         return self.fluid.density(T)
@@ -65,11 +81,33 @@ class WickMaterial(SolidMaterial):
         return capa_eff / rho_f
 
     def conductivity(self, T: Numeric) -> Numeric:
+        return self.conductivity_axial(T)
+
+    def conductivity_structural(self, T: Numeric) -> Numeric:
+        if not self.use_lookup_table:
+            return self._conductivity_structural_direct(T)
+
+        self._ensure_lookup_table()
+        return self._lookup_k_structural(T)
+
+    def conductivity_pseudothermal(self, T: Numeric) -> Numeric:
+        k_axial = np.asarray(self.conductivity_axial(T), dtype=float)
+        k_structural = np.asarray(self.conductivity_structural(T), dtype=float)
+        k_pseudothermal = np.maximum(k_axial - k_structural, 0.0)
+
+        if np.isscalar(T):
+            return float(k_pseudothermal)
+        return k_pseudothermal
+
+    def conductivity_axial(self, T: Numeric) -> Numeric:
         if not self.use_lookup_table:
             return self._conductivity_direct(T)
 
         self._ensure_lookup_table()
         return self._lookup_k_total(T)
+
+    def conductivity_radial(self, T: Numeric) -> Numeric:
+        return self.conductivity_structural(T)
 
     def is_high_nonlinearity_temperature(self, T: Numeric) -> Numeric:
         self._ensure_lookup_table()
@@ -87,7 +125,24 @@ class WickMaterial(SolidMaterial):
             return bool(result)
         return result
 
-    def _conductivity_direct(self, T: Numeric) -> Numeric:
+    def _nan_to_num_posinf_value(self) -> float:
+        if self.conductivity_cap is None:
+            return float(np.finfo(float).max)
+        return float(self.conductivity_cap)
+
+    def _apply_conductivity_cap(self, k_total: Numeric) -> Numeric:
+        k_total_arr = np.maximum(np.asarray(k_total, dtype=float), 0.0)
+        if self.conductivity_cap is None:
+            if np.isscalar(k_total):
+                return float(k_total_arr)
+            return k_total_arr
+
+        capped = np.clip(k_total_arr, a_min=0.0, a_max=self.conductivity_cap)
+        if np.isscalar(k_total):
+            return float(capped)
+        return capped
+
+    def _conductivity_structural_direct(self, T: Numeric) -> Numeric:
         phi = self.porosity
 
         k_f = self.fluid.conductivity(T)
@@ -99,6 +154,11 @@ class WickMaterial(SolidMaterial):
             k_self = k_f * (numerator / denominator)
             k_self = np.nan_to_num(k_self, nan=0.0)
 
+        if np.isscalar(T):
+            return float(k_self)
+        return k_self
+
+    def _conductivity_pseudothermal_direct(self, T: Numeric) -> Numeric:
         P_sat = self.fluid.saturation_pressure(T)
         mu_v = self.fluid.vapor_viscosity(T)
         h_fg = self.fluid.latent_heat(T)
@@ -114,8 +174,18 @@ class WickMaterial(SolidMaterial):
             k_pse_total = pse1 / parameter2
             k_pse_total = np.nan_to_num(k_pse_total, nan=0.0)
 
-        k_total = k_self + k_pse_total
-        return np.clip(k_total, a_min=0.0, a_max=self.conductivity_cap)
+        if np.isscalar(T):
+            return float(k_pse_total)
+        return k_pse_total
+
+    def _conductivity_axial_direct(self, T: Numeric) -> Numeric:
+        k_self = self._conductivity_structural_direct(T)
+        k_pse_total = self._conductivity_pseudothermal_direct(T)
+        k_total = np.asarray(k_self, dtype=float) + np.asarray(k_pse_total, dtype=float)
+        return self._apply_conductivity_cap(k_total)
+
+    def _conductivity_direct(self, T: Numeric) -> Numeric:
+        return self._conductivity_axial_direct(T)
 
     def _ensure_lookup_table(self):
         if self._lookup_table_ready:
@@ -131,6 +201,7 @@ class WickMaterial(SolidMaterial):
         P_sat = np.asarray(self.fluid.saturation_pressure(T_grid), dtype=float)
         mu_v = np.asarray(self.fluid.vapor_viscosity(T_grid), dtype=float)
         h_fg = np.asarray(self.fluid.latent_heat(T_grid), dtype=float)
+        k_structural = np.asarray(self._conductivity_structural_direct(T_grid), dtype=float)
         k_total = np.asarray(self._conductivity_direct(T_grid), dtype=float)
 
         self._lookup_temperature_grid = T_grid
@@ -138,6 +209,7 @@ class WickMaterial(SolidMaterial):
         self._lookup_mu_v = np.maximum(mu_v, 1.0e-30)
         self._lookup_h_fg = np.maximum(h_fg, 1.0e-30)
         self._lookup_log_k_total = np.log(np.maximum(k_total, 1.0e-30))
+        self._lookup_log_k_structural = np.log(np.maximum(k_structural, 1.0e-30))
 
         dlogk_dT = np.gradient(self._lookup_log_k_total, T_grid)
         grad_max = float(np.max(np.abs(dlogk_dT))) if dlogk_dT.size > 0 else 0.0
@@ -166,6 +238,9 @@ class WickMaterial(SolidMaterial):
     def _lookup_k_total(self, T: Numeric) -> Numeric:
         return self._interp_table(T, self._lookup_log_k_total, log_space=True)
 
+    def _lookup_k_structural(self, T: Numeric) -> Numeric:
+        return self._interp_table(T, self._lookup_log_k_structural, log_space=True)
+
     def _pse1_conductivity(self, T: Numeric, P_sat: Numeric, mu_v: Numeric, h_fg: Numeric) -> Numeric:
         T_safe = np.maximum(T, 1.0e-3)
         mu_safe = np.maximum(mu_v, 1.0e-12)
@@ -181,6 +256,10 @@ class WickMaterial(SolidMaterial):
             parameter2 = (h_fg * Mg * P_sat) ** 2
             parameter3 = 4.0 * mu_safe * (R_gas ** 2) * (T_safe ** 3)
             pse1_cond_temp = parameter1 * parameter2 / parameter3
-            pse1_cond_temp = np.nan_to_num(pse1_cond_temp, nan=0.0, posinf=self.conductivity_cap)
+            pse1_cond_temp = np.nan_to_num(
+                pse1_cond_temp,
+                nan=0.0,
+                posinf=self._nan_to_num_posinf_value(),
+            )
 
         return pse1_cond_temp

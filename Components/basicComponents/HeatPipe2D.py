@@ -73,6 +73,8 @@ class HeatPipe2D(HeatConduction2D):
         self._property_update_tol = 5.0e-2
         self._property_cache_initialized = False
         self._k_2d_view = None
+        self._k_axial_2d_view = None
+        self._k_radial_2d_view = None
         self._rho_2d_view = None
         self._cp_2d_view = None
         self._cap_2d_view = None
@@ -86,11 +88,17 @@ class HeatPipe2D(HeatConduction2D):
         self._R_int_top_buffer = np.zeros(mesh.n_x, dtype=float)
         self._boundary_work_y = np.zeros(mesh.n_y, dtype=float)
         self._boundary_work_x = np.zeros(mesh.n_x, dtype=float)
+        self._face_resistance_work_x = np.empty((max(mesh.n_x - 1, 0), mesh.n_y), dtype=float)
+        self._face_resistance_work_y = np.empty((mesh.n_x, max(mesh.n_y - 1, 0)), dtype=float)
 
         self.enable_frozen_property_correction = False
         self.max_outer_property_corrections = 2
         self.outer_property_tol = 1.0e-3
         self._properties_frozen = False
+        self.minimum_physical_temperature = 0.0
+        self.maximum_physical_temperature = np.inf
+        self.use_anisotropic_wick_conductivity = False
+        self.face_conductance_mode = "legacy_harmonic"
 
         super().__init__(mesh, self.wall_mat, name=name, initial_temp=initial_temp)
 
@@ -120,6 +128,8 @@ class HeatPipe2D(HeatConduction2D):
             return
 
         self._k_2d_view = self.k_node.reshape(self.shape_nodes)
+        self._k_axial_2d_view = self._k_2d_view
+        self._k_radial_2d_view = np.empty(self.shape_nodes, dtype=float)
         self._rho_2d_view = self.rho_node.reshape(self.shape_nodes)
         self._cp_2d_view = self.cp_node.reshape(self.shape_nodes)
         self._cap_2d_view = self.thermal_capacitance.reshape(self.shape_nodes)
@@ -142,6 +152,65 @@ class HeatPipe2D(HeatConduction2D):
         self._update_boundaries_state(current_time=current_time)
         self._compute_fluxes(current_time)
 
+    def set_wick_conductivity_mode(self, anisotropic: bool):
+        self.use_anisotropic_wick_conductivity = bool(anisotropic)
+        self._property_cache_initialized = False
+
+    def set_face_conductance_mode(self, mode: str):
+        valid_modes = {
+            "legacy_harmonic",
+            "resistance_split_axial",
+            "resistance_split_xy",
+            "resistance_split_full",
+        }
+        if mode not in valid_modes:
+            raise ValueError(f"Unsupported face conductance mode: {mode}")
+        self.face_conductance_mode = mode
+
+    def _reset_boundary_condition_diagnostics(self):
+        for boundary in self.boundaries.values():
+            for condition in getattr(boundary, "conditions", []):
+                if hasattr(condition, "reset_diagnostics"):
+                    condition.reset_diagnostics()
+
+    def _collect_boundary_condition_diagnostics(self):
+        diagnostics = []
+        for location, boundary in self.boundaries.items():
+            for condition in getattr(boundary, "conditions", []):
+                if getattr(condition, "invalid_temperature_detected", False):
+                    diagnostics.append(
+                        f"{location}_trial_min={float(condition.min_trial_temperature):.6f}K"
+                    )
+        return diagnostics
+
+    def _is_temperature_state_physical(self, temperature_field: np.ndarray) -> bool:
+        return (
+            np.all(np.isfinite(temperature_field))
+            and float(np.min(temperature_field)) >= self.minimum_physical_temperature
+            and float(np.max(temperature_field)) <= self.maximum_physical_temperature
+        )
+
+    def _compose_failure_message(self, base_message: str) -> str:
+        """组装失败信息，包含温度状态及边界条件的诊断信息"""
+        details = []
+        # 检查最小试算温度是否非有限或超出物理下限
+        if not np.isfinite(self.last_trial_temperature_min):
+            details.append("trial_temperature_nonfinite")
+        elif self.last_trial_temperature_min < self.minimum_physical_temperature:
+            details.append(f"trial_temperature_min={self.last_trial_temperature_min:.6f}K")
+
+        # 检查最大试算温度是否非有限或超出物理上限
+        if not np.isfinite(self.last_trial_temperature_max):
+            details.append("trial_temperature_max_nonfinite")
+        elif self.last_trial_temperature_max > self.maximum_physical_temperature:
+            details.append(f"trial_temperature_max={self.last_trial_temperature_max:.6f}K")
+
+        # 收集边界条件诊断信息
+        details.extend(self._collect_boundary_condition_diagnostics())
+        if not details:
+            return base_message
+        return f"{base_message}; " + "; ".join(details)
+
     def _solve_ivp_step(self, dt: float, method: str = 'BDF', **kwargs):
         t_span = (self.current_time, self.current_time + dt)
         solve_kwargs = dict(kwargs)
@@ -158,10 +227,21 @@ class HeatPipe2D(HeatConduction2D):
         )
 
         if not sol.success:
-            print(f"HeatConduction step failed at t={self.current_time}: {sol.message}")
+            failure_message = self._compose_failure_message(sol.message)
+            self._mark_step_failure(failure_message, failure_time=t_span[1])
+            print(f"HeatConduction step failed at t={self.current_time}: {failure_message}")
             return False, None
 
-        return True, sol.y[:, -1]
+        candidate_T = sol.y[:, -1]
+        if not self._is_temperature_state_physical(candidate_T):
+            failure_message = self._compose_failure_message(
+                "Unphysical temperature state returned by solver"
+            )
+            self._mark_step_failure(failure_message, failure_time=t_span[1])
+            print(f"HeatConduction step failed at t={self.current_time}: {failure_message}")
+            return False, None
+
+        return True, candidate_T
 
     def _update_properties(self):
         if self._properties_frozen and self._property_cache_initialized:
@@ -170,24 +250,32 @@ class HeatPipe2D(HeatConduction2D):
         self._ensure_property_views()
 
         T_2d = self.T.reshape(self.shape_nodes)
-        k_2d = self._k_2d_view
+        k_axial_2d = self._k_axial_2d_view
+        k_radial_2d = self._k_radial_2d_view
         rho_2d = self._rho_2d_view
         cp_2d = self._cp_2d_view
 
         T_wick = T_2d[:self.n_wick, :]
-        k_wick = k_2d[:self.n_wick, :]
+        k_wick_axial = k_axial_2d[:self.n_wick, :]
+        k_wick_radial = k_radial_2d[:self.n_wick, :]
         rho_wick = rho_2d[:self.n_wick, :]
         cp_wick = cp_2d[:self.n_wick, :]
 
         T_wall = T_2d[self.n_wick:, :]
-        k_wall = k_2d[self.n_wick:, :]
+        k_wall_axial = k_axial_2d[self.n_wick:, :]
+        k_wall_radial = k_radial_2d[self.n_wick:, :]
         rho_wall = rho_2d[self.n_wick:, :]
         cp_wall = cp_2d[self.n_wick:, :]
 
         properties_changed = not self._property_cache_initialized
 
         if not self._property_cache_initialized:
-            k_wick[:] = self.wick_mat.conductivity(T_wick)
+            if self.use_anisotropic_wick_conductivity:
+                k_wick_axial[:] = self.wick_mat.conductivity_axial(T_wick)
+                k_wick_radial[:] = self.wick_mat.conductivity_radial(T_wick)
+            else:
+                k_wick_axial[:] = self.wick_mat.conductivity(T_wick)
+                k_wick_radial[:] = k_wick_axial
             rho_wick[:] = self.wick_mat.density(T_wick)
             cp_wick[:] = self.wick_mat.heat_capacity(T_wick)
             self._wick_temperature_cache[:] = T_wick
@@ -198,7 +286,12 @@ class HeatPipe2D(HeatConduction2D):
 
             if np.any(wick_update_mask):
                 T_wick_update = T_wick[wick_update_mask]
-                k_wick[wick_update_mask] = self.wick_mat.conductivity(T_wick_update)
+                if self.use_anisotropic_wick_conductivity:
+                    k_wick_axial[wick_update_mask] = self.wick_mat.conductivity_axial(T_wick_update)
+                    k_wick_radial[wick_update_mask] = self.wick_mat.conductivity_radial(T_wick_update)
+                else:
+                    k_wick_axial[wick_update_mask] = self.wick_mat.conductivity(T_wick_update)
+                    k_wick_radial[wick_update_mask] = k_wick_axial[wick_update_mask]
                 rho_wick[wick_update_mask] = self.wick_mat.density(T_wick_update)
                 cp_wick[wick_update_mask] = self.wick_mat.heat_capacity(T_wick_update)
                 self._wick_temperature_cache[wick_update_mask] = T_wick_update
@@ -206,7 +299,8 @@ class HeatPipe2D(HeatConduction2D):
 
         if T_wall.size > 0:
             if not self._property_cache_initialized:
-                k_wall[:] = self.wall_mat.conductivity(T_wall)
+                k_wall_axial[:] = self.wall_mat.conductivity(T_wall)
+                k_wall_radial[:] = k_wall_axial
                 rho_wall[:] = self.wall_mat.density(T_wall)
                 cp_wall[:] = self.wall_mat.heat_capacity(T_wall)
                 self._wall_temperature_cache[:] = T_wall
@@ -214,7 +308,8 @@ class HeatPipe2D(HeatConduction2D):
                 wall_update_mask = np.abs(T_wall - self._wall_temperature_cache) > self._property_update_tol
                 if np.any(wall_update_mask):
                     T_wall_update = T_wall[wall_update_mask]
-                    k_wall[wall_update_mask] = self.wall_mat.conductivity(T_wall_update)
+                    k_wall_axial[wall_update_mask] = self.wall_mat.conductivity(T_wall_update)
+                    k_wall_radial[wall_update_mask] = k_wall_axial[wall_update_mask]
                     rho_wall[wall_update_mask] = self.wall_mat.density(T_wall_update)
                     cp_wall[wall_update_mask] = self.wall_mat.heat_capacity(T_wall_update)
                     self._wall_temperature_cache[wall_update_mask] = T_wall_update
@@ -226,45 +321,225 @@ class HeatPipe2D(HeatConduction2D):
 
         self._property_cache_initialized = True
 
+    def _compute_radial_conductance_legacy(self):
+        k_radial = self._k_radial_2d_view
+        k_left = k_radial[:-1, :]
+        k_right = k_radial[1:, :]
+        np.add(k_left, k_right, out=self._conductance_work_x)
+        self._conductance_work_x += 1.0e-30
+        np.multiply(k_left, k_right, out=self.G_x_inner)
+        self.G_x_inner *= 2.0
+        np.divide(self.G_x_inner, self._conductance_work_x, out=self.G_x_inner)
+
+        dx_inner = self.mesh.dx_matrix[1:-1, :]
+        area_x_inner = self.mesh.area_x_matrix[1:-1, :]
+        np.maximum(dx_inner, 1.0e-30, out=self._conductance_work_x)
+        np.multiply(self.G_x_inner, area_x_inner, out=self.G_x_inner)
+        np.divide(self.G_x_inner, self._conductance_work_x, out=self.G_x_inner)
+
+    def _compute_axial_conductance_legacy(self):
+        k_axial = self._k_axial_2d_view
+        k_bottom = k_axial[:, :-1]
+        k_top = k_axial[:, 1:]
+        np.add(k_bottom, k_top, out=self._conductance_work_y)
+        self._conductance_work_y += 1.0e-30
+        np.multiply(k_bottom, k_top, out=self.G_y_inner)
+        self.G_y_inner *= 2.0
+        np.divide(self.G_y_inner, self._conductance_work_y, out=self.G_y_inner)
+
+        dy_inner = self.mesh.dy_matrix[:, 1:-1]
+        area_y_inner = self.mesh.area_y_matrix[:, 1:-1]
+        np.maximum(dy_inner, 1.0e-30, out=self._conductance_work_y)
+        np.multiply(self.G_y_inner, area_y_inner, out=self.G_y_inner)
+        np.divide(self.G_y_inner, self._conductance_work_y, out=self.G_y_inner)
+
+    def _compute_axial_conductance_resistance_split(self):
+        k_axial = self._k_axial_2d_view
+        k_bottom = k_axial[:, :-1]
+        k_top = k_axial[:, 1:]
+        area_y_inner = self.mesh.area_y_matrix[:, 1:-1]
+
+        dy_bottom_half = (self.mesh.y_faces[1:-1] - self.mesh.y_centers[:-1])[np.newaxis, :]
+        dy_top_half = (self.mesh.y_centers[1:] - self.mesh.y_faces[1:-1])[np.newaxis, :]
+
+        np.multiply(k_bottom, area_y_inner, out=self._conductance_work_y)
+        np.maximum(self._conductance_work_y, 1.0e-30, out=self._conductance_work_y)
+        np.divide(dy_bottom_half, self._conductance_work_y, out=self._face_resistance_work_y)
+
+        np.multiply(k_top, area_y_inner, out=self._conductance_work_y)
+        np.maximum(self._conductance_work_y, 1.0e-30, out=self._conductance_work_y)
+        self._face_resistance_work_y += dy_top_half / self._conductance_work_y
+
+        np.maximum(self._face_resistance_work_y, 1.0e-30, out=self._face_resistance_work_y)
+        np.divide(1.0, self._face_resistance_work_y, out=self.G_y_inner)
+
+    def _compute_radial_conductance_resistance_split(self):
+        k_radial = self._k_radial_2d_view
+        k_left = k_radial[:-1, :]
+        k_right = k_radial[1:, :]
+
+        if self.mesh.geometry_type == "cylindrical":
+            radial_length = self.mesh.dy[np.newaxis, :]
+            r_left = self.mesh.x_centers[:-1][:, np.newaxis]
+            r_face = self.mesh.x_faces[1:-1][:, np.newaxis]
+            r_right = self.mesh.x_centers[1:][:, np.newaxis]
+
+            log_left = np.log(np.maximum(r_face, 1.0e-30) / np.maximum(r_left, 1.0e-30))
+            log_right = np.log(np.maximum(r_right, 1.0e-30) / np.maximum(r_face, 1.0e-30))
+
+            np.multiply(k_left, radial_length, out=self._conductance_work_x)
+            self._conductance_work_x *= 2.0 * np.pi
+            np.maximum(self._conductance_work_x, 1.0e-30, out=self._conductance_work_x)
+            np.divide(log_left, self._conductance_work_x, out=self._face_resistance_work_x)
+
+            np.multiply(k_right, radial_length, out=self._conductance_work_x)
+            self._conductance_work_x *= 2.0 * np.pi
+            np.maximum(self._conductance_work_x, 1.0e-30, out=self._conductance_work_x)
+            self._face_resistance_work_x += log_right / self._conductance_work_x
+        else:
+            area_x_inner = self.mesh.area_x_matrix[1:-1, :]
+            dx_left_half = (self.mesh.x_faces[1:-1] - self.mesh.x_centers[:-1])[:, np.newaxis]
+            dx_right_half = (self.mesh.x_centers[1:] - self.mesh.x_faces[1:-1])[:, np.newaxis]
+
+            np.multiply(k_left, area_x_inner, out=self._conductance_work_x)
+            np.maximum(self._conductance_work_x, 1.0e-30, out=self._conductance_work_x)
+            np.divide(dx_left_half, self._conductance_work_x, out=self._face_resistance_work_x)
+
+            np.multiply(k_right, area_x_inner, out=self._conductance_work_x)
+            np.maximum(self._conductance_work_x, 1.0e-30, out=self._conductance_work_x)
+            self._face_resistance_work_x += dx_right_half / self._conductance_work_x
+
+        np.maximum(self._face_resistance_work_x, 1.0e-30, out=self._face_resistance_work_x)
+        np.divide(1.0, self._face_resistance_work_x, out=self.G_x_inner)
+
+    def _compute_internal_resistance(self):
+        self._ensure_property_views()
+
+        mode = self.face_conductance_mode
+        if mode == "legacy_harmonic":
+            self._compute_radial_conductance_legacy()
+            self._compute_axial_conductance_legacy()
+            return
+
+        if mode == "resistance_split_axial":
+            self._compute_radial_conductance_legacy()
+            self._compute_axial_conductance_resistance_split()
+            return
+
+        if mode in {"resistance_split_xy", "resistance_split_full"}:
+            self._compute_radial_conductance_resistance_split()
+            self._compute_axial_conductance_resistance_split()
+            return
+
+        raise ValueError(f"Unsupported face conductance mode: {mode}")
+
+    def _fill_boundary_halfcell_resistance_radial(self,
+                                                  target: np.ndarray,
+                                                  conductivity: np.ndarray,
+                                                  radius_center: float,
+                                                  radius_face: float,
+                                                  axial_lengths: np.ndarray):
+        np.multiply(conductivity, axial_lengths, out=self._boundary_work_y)
+        self._boundary_work_y *= 2.0 * np.pi
+        np.maximum(self._boundary_work_y, 1.0e-30, out=self._boundary_work_y)
+        log_ratio = np.log(np.maximum(radius_face, radius_center) / np.maximum(min(radius_face, radius_center), 1.0e-30))
+        target[:] = log_ratio / self._boundary_work_y
+
+    def _fill_boundary_halfcell_resistance_axial(self,
+                                                 target: np.ndarray,
+                                                 distances: float,
+                                                 conductivity: np.ndarray,
+                                                 area: np.ndarray):
+        np.multiply(conductivity, area, out=self._boundary_work_x)
+        np.maximum(self._boundary_work_x, 1.0e-30, out=self._boundary_work_x)
+        target[:] = distances / self._boundary_work_x
+
     def _update_boundaries_state(self, current_time: float = None):
         self._ensure_property_views()
 
         T_2d = self.T.reshape(self.shape_nodes)
-        k_2d = self._k_2d_view
+        k_axial_2d = self._k_axial_2d_view
+        k_radial_2d = self._k_radial_2d_view
         dx_mat = self.mesh.dx_matrix
         dy_mat = self.mesh.dy_matrix
         ax_mat = self.mesh.area_x_matrix
         ay_mat = self.mesh.area_y_matrix
 
         if not self._properties_frozen:
-            self._fill_boundary_resistance(
-                self._R_int_left_buffer,
-                dx_mat[0, :],
-                k_2d[0, :],
-                ax_mat[0, :],
-                self._boundary_work_y
-            )
-            self._fill_boundary_resistance(
-                self._R_int_out_buffer,
-                dx_mat[-1, :],
-                k_2d[-1, :],
-                ax_mat[-1, :],
-                self._boundary_work_y
-            )
-            self._fill_boundary_resistance(
-                self._R_int_bottom_buffer,
-                dy_mat[:, 0],
-                k_2d[:, 0],
-                ay_mat[:, 0],
-                self._boundary_work_x
-            )
-            self._fill_boundary_resistance(
-                self._R_int_top_buffer,
-                dy_mat[:, -1],
-                k_2d[:, -1],
-                ay_mat[:, -1],
-                self._boundary_work_x
-            )
+            if self.face_conductance_mode == "resistance_split_full":
+                if self.mesh.geometry_type == "cylindrical":
+                    axial_lengths = self.mesh.dy
+                    self._fill_boundary_halfcell_resistance_radial(
+                        self._R_int_left_buffer,
+                        k_radial_2d[0, :],
+                        float(self.mesh.x_centers[0]),
+                        float(self.mesh.x_faces[0]),
+                        axial_lengths
+                    )
+                    self._fill_boundary_halfcell_resistance_radial(
+                        self._R_int_out_buffer,
+                        k_radial_2d[-1, :],
+                        float(self.mesh.x_centers[-1]),
+                        float(self.mesh.x_faces[-1]),
+                        axial_lengths
+                    )
+                else:
+                    self._fill_boundary_resistance(
+                        self._R_int_left_buffer,
+                        dx_mat[0, :],
+                        k_radial_2d[0, :],
+                        ax_mat[0, :],
+                        self._boundary_work_y
+                    )
+                    self._fill_boundary_resistance(
+                        self._R_int_out_buffer,
+                        dx_mat[-1, :],
+                        k_radial_2d[-1, :],
+                        ax_mat[-1, :],
+                        self._boundary_work_y
+                    )
+
+                self._fill_boundary_halfcell_resistance_axial(
+                    self._R_int_bottom_buffer,
+                    float(self.mesh.y_centers[0] - self.mesh.y_faces[0]),
+                    k_axial_2d[:, 0],
+                    ay_mat[:, 0]
+                )
+                self._fill_boundary_halfcell_resistance_axial(
+                    self._R_int_top_buffer,
+                    float(self.mesh.y_faces[-1] - self.mesh.y_centers[-1]),
+                    k_axial_2d[:, -1],
+                    ay_mat[:, -1]
+                )
+            else:
+                self._fill_boundary_resistance(
+                    self._R_int_left_buffer,
+                    dx_mat[0, :],
+                    k_radial_2d[0, :],
+                    ax_mat[0, :],
+                    self._boundary_work_y
+                )
+                self._fill_boundary_resistance(
+                    self._R_int_out_buffer,
+                    dx_mat[-1, :],
+                    k_radial_2d[-1, :],
+                    ax_mat[-1, :],
+                    self._boundary_work_y
+                )
+                self._fill_boundary_resistance(
+                    self._R_int_bottom_buffer,
+                    dy_mat[:, 0],
+                    k_axial_2d[:, 0],
+                    ay_mat[:, 0],
+                    self._boundary_work_x
+                )
+                self._fill_boundary_resistance(
+                    self._R_int_top_buffer,
+                    dy_mat[:, -1],
+                    k_axial_2d[:, -1],
+                    ay_mat[:, -1],
+                    self._boundary_work_x
+                )
 
         if 'left' in self.boundaries:
             self.boundaries['left'].update_internal_state(
@@ -350,6 +625,7 @@ class HeatPipe2D(HeatConduction2D):
             return super().get_derivatives(t, T_current)
 
         self.T[:] = T_current
+        self._record_trial_state(t, T_current)
         self._update_boundaries_state(current_time=t)
         Q_net_conduction = self._compute_fluxes(t)
         self._update_sources(t)
@@ -365,8 +641,31 @@ class HeatPipe2D(HeatConduction2D):
         return self.dTdt
 
     def step(self, dt: float, method: str = 'BDF', **kwargs) -> bool:
+        attempted_end_time = self.current_time + dt
+        self._reset_step_diagnostics(attempted_end_time)
+        self._reset_boundary_condition_diagnostics()
+        self.save_state()
+
         if not self.enable_frozen_property_correction:
-            return super().step(dt, method=method, **kwargs)
+            success = super().step(dt, method=method, **kwargs)
+            if not success:
+                failure_message = self.last_step_failure_message or self._compose_failure_message(
+                    "Solver step failed"
+                )
+                self.load_state()
+                self._mark_step_failure(failure_message, failure_time=attempted_end_time)
+                return False
+
+            if not self._is_temperature_state_physical(self.T):
+                failure_message = self._compose_failure_message(
+                    "Accepted state violates physical temperature bound"
+                )
+                self.load_state()
+                self._mark_step_failure(failure_message, failure_time=attempted_end_time)
+                return False
+
+            self._mark_step_success()
+            return True
 
         time_start = self.current_time
         T_start = self.T.copy()
@@ -389,9 +688,11 @@ class HeatPipe2D(HeatConduction2D):
 
             success, candidate_T = self._solve_ivp_step(dt, method=method, **kwargs)
             if not success:
-                self.T[:] = T_start
-                self.current_time = time_start
-                self._refresh_current_state(current_time=time_start)
+                failure_message = self.last_step_failure_message or self._compose_failure_message(
+                    "Frozen-property correction step failed"
+                )
+                self.load_state()
+                self._mark_step_failure(failure_message, failure_time=attempted_end_time)
                 return False
 
             accepted_T = candidate_T
@@ -402,9 +703,18 @@ class HeatPipe2D(HeatConduction2D):
 
             guess_T = candidate_T.copy()
 
+        if accepted_T is None or not self._is_temperature_state_physical(accepted_T):
+            failure_message = self._compose_failure_message(
+                "Frozen-property correction produced unphysical state"
+            )
+            self.load_state()
+            self._mark_step_failure(failure_message, failure_time=attempted_end_time)
+            return False
+
         self.T[:] = accepted_T
         self.current_time = time_start + dt
         self._refresh_current_state(current_time=self.current_time)
+        self._mark_step_success()
         return True
 
     def get_boundary_node_capacitance(self, location: str) -> np.ndarray:

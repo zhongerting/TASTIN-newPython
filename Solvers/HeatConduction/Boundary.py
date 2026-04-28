@@ -171,6 +171,12 @@ class DynamicRadiationResistanceBC(ResistanceBC):
         self.T_ref = np.full(shape, 1.0e-3, dtype=float)
         self.q_flux = np.zeros(shape, dtype=float)
         self.last_q_flux = self.q_flux
+        self.invalid_temperature_detected = False
+        self.min_trial_temperature = np.inf
+
+    def reset_diagnostics(self):
+        self.invalid_temperature_detected = False
+        self.min_trial_temperature = np.inf
 
     def update_state(self, T_node: np.ndarray, T_surface: Optional[np.ndarray] = None):
         """
@@ -184,6 +190,11 @@ class DynamicRadiationResistanceBC(ResistanceBC):
             t_surface_arr = np.asarray(T_surface, dtype=float)
             t_node_arr = np.asarray(T_node, dtype=float)
             t_ref_raw = np.where(t_surface_arr > 1.0e-3, t_surface_arr, t_node_arr)
+
+        raw_min = float(np.min(t_ref_raw))
+        if raw_min < 0.0:
+            self.invalid_temperature_detected = True
+            self.min_trial_temperature = min(self.min_trial_temperature, raw_min)
 
         T_safe = np.maximum(t_ref_raw, 1.0e-3)
         T_env_safe = np.maximum(self.T_env, 1.0e-3)

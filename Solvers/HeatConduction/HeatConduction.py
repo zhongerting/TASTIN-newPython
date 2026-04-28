@@ -48,9 +48,48 @@ class BaseHeatConduction(ABC):
 
         # 内部仿真时间记录
         self.current_time = 0.0
+        self.last_step_success = True
+        self.last_step_failure_message = ""
+        self.last_step_failure_time: Optional[float] = None
+        self.last_attempted_step_end_time: Optional[float] = None
+        self.last_trial_temperature_min = float(initial_temp)
+        self.last_trial_temperature_max = float(initial_temp)
+        self.last_trial_temperature_time: Optional[float] = None
 
         # 初始化
         self._update_properties()
+
+    def _reset_step_diagnostics(self, attempted_end_time: Optional[float] = None):
+        current_min = float(np.min(self.T))
+        current_max = float(np.max(self.T))
+        self.last_step_success = False
+        self.last_step_failure_message = ""
+        self.last_step_failure_time = None
+        self.last_attempted_step_end_time = attempted_end_time
+        self.last_trial_temperature_min = current_min
+        self.last_trial_temperature_max = current_max
+        self.last_trial_temperature_time = self.current_time
+
+    def _record_trial_state(self, t: float, T_current: np.ndarray):
+        trial_min = float(np.min(T_current))
+        trial_max = float(np.max(T_current))
+
+        if trial_min < self.last_trial_temperature_min:
+            self.last_trial_temperature_min = trial_min
+            self.last_trial_temperature_time = t
+
+        if trial_max > self.last_trial_temperature_max:
+            self.last_trial_temperature_max = trial_max
+
+    def _mark_step_success(self):
+        self.last_step_success = True
+        self.last_step_failure_message = ""
+        self.last_step_failure_time = None
+
+    def _mark_step_failure(self, message: str, failure_time: Optional[float] = None):
+        self.last_step_success = False
+        self.last_step_failure_message = message
+        self.last_step_failure_time = self.current_time if failure_time is None else failure_time
 
     # 新增的初始化函数
     def initialize_state(self):
@@ -214,6 +253,7 @@ class BaseHeatConduction(ABC):
         """计算 dT/dt"""
         # 1. 接收状态
         self.T[:] = T_current
+        self._record_trial_state(t, T_current)
 
         # 2. 更新物性
         self._update_properties()
@@ -252,6 +292,7 @@ class BaseHeatConduction(ABC):
         """
 
         t_span = (self.current_time, self.current_time + dt)
+        self._reset_step_diagnostics(t_span[1])
 
         # 动态检测是否存在预计算的雅可比稀疏矩阵方法 (兼容 1D 和 2D)
         if hasattr(self, 'get_jac_sparsity') and method in ['BDF', 'Radau']:
@@ -279,11 +320,13 @@ class BaseHeatConduction(ABC):
             self._compute_internal_resistance()
             self._update_boundaries_state(current_time=self.current_time)
             self._compute_fluxes(self.current_time)
+            self._mark_step_success()
 
             # 可选：可以在这里调用一个后处理钩子
             # self.post_step_update()
             return True
         else:
+            self._mark_step_failure(sol.message, failure_time=t_span[1])
             print(f"HeatConduction step failed at t={self.current_time}: {sol.message}")
             return False
 
