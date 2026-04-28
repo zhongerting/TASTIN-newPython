@@ -190,31 +190,32 @@ class SystemManager:
     # Coupler scheduling and boundary cache lifecycle
     # =========================================================================
 
-    def _refresh_solid_boundary_cache(self, update_flux: bool = False):
+    def _refresh_solid_boundary_cache(self, update_flux: bool = False, current_time: float = None):
+        cache_time = self.global_time if current_time is None else current_time
         for solid in self.solid_components.values():
             if hasattr(solid, '_update_properties'):
                 solid._update_properties()
             if hasattr(solid, '_compute_internal_resistance'):
                 solid._compute_internal_resistance()
             if hasattr(solid, '_update_boundaries_state'):
-                solid._update_boundaries_state(current_time=self.global_time)
+                solid._update_boundaries_state(current_time=cache_time)
 
             if update_flux:
                 if hasattr(solid, '_compute_fluxes'):
-                    solid._compute_fluxes(self.global_time)
+                    solid._compute_fluxes(cache_time)
                 elif hasattr(solid, 'boundaries'):
                     for boundary in solid.boundaries.values():
                         if hasattr(boundary, 'compute_net_flux_for_solver'):
                             boundary.compute_net_flux_for_solver()
 
-    def _run_couplers(self, interface_relaxation: float = 1.0):
-        self._refresh_solid_boundary_cache(update_flux=False)
+    def _run_couplers(self, interface_relaxation: float = 1.0, current_time: float = None):
+        self._refresh_solid_boundary_cache(update_flux=False, current_time=current_time)
 
         for coupler in self.couplers:
             if hasattr(coupler, 'sync'):
                 coupler.sync()
 
-        self._refresh_solid_boundary_cache(update_flux=False)
+        self._refresh_solid_boundary_cache(update_flux=False, current_time=current_time)
 
         for coupler in self.couplers:
             if isinstance(coupler, FluidSolidCouple):
@@ -267,7 +268,11 @@ class SystemManager:
                 # 恢复流体源项，防止coupler造成的源项发生累积
                 self._restore_fluid_sources(base_fluid_sources)
                 # 执行execute（流体-固体耦合）以及sync（固体-固体耦合）
-                self._run_couplers(interface_relaxation=interface_relaxation)
+                coupling_time = t_start if k == 0 else t_start + dt
+                self._run_couplers(
+                    interface_relaxation=interface_relaxation,
+                    current_time=coupling_time,
+                )
 
                 # 进行核反应更新，进入到 ReactorCore 中，由 ReactorCore 执行中子单步的计算
                 handled, fallback_power = self._advance_neutronics_for_iteration(

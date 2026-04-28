@@ -180,6 +180,18 @@ class ExecuteOnlyCoupler:
             self.volume.implicit_coeff += 2.0 + self.execute_count
 
 
+class BoundaryTimeCoupler:
+    def __init__(self, boundary, solid):
+        self.boundary = boundary
+        self.solid = solid
+        self.boundary_times = []
+        self.solid_times = []
+
+    def execute(self):
+        self.boundary_times.append(self.solid.boundary_time)
+        self.solid_times.append(self.solid.current_time)
+
+
 class SyncOnlyCoupler:
     def __init__(self, name, log):
         self.name = name
@@ -420,6 +432,20 @@ class SystemManagerLifecycleTests(unittest.TestCase):
         self.assertAlmostEqual(vol.Q_wall, 200.0)
         self.assertAlmostEqual(vol.implicit_coeff, 4.0)
         self.assertFalse(hasattr(manager, "_fluid_total_Q_backup"))
+
+    def test_picard_correction_refreshes_solid_cache_at_predicted_time(self):
+        manager = make_manager(FakeFluid())
+        manager.global_time = 2.0
+        solid = FakeSolid()
+        solid.current_time = 2.0
+        manager.solid_components["solid"] = solid
+        coupler = BoundaryTimeCoupler(solid.boundaries["left"], solid)
+        manager.add_coupler(coupler)
+
+        manager.step(0.25, inner_iter=2, convergence_tol=0.0)
+
+        self.assertEqual(coupler.boundary_times, [2.0, 2.25])
+        self.assertEqual(coupler.solid_times, [2.0, 2.25])
 
     def test_interface_relaxation_state_resets_once_per_global_step(self):
         manager = make_manager(FakeFluid())
