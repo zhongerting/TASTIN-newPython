@@ -29,6 +29,9 @@ class SystemManager:
         self.components: List[BaseComponent] = []
 
         self._persistent_fluid_sources: List[Callable[['SystemManager'], None]] = []
+        self.last_step_diagnostics = None
+        self._component_step_states = []
+        self._point_reactor_step_state = None
         logger.info(f"SystemManager 在 t={self.global_time}s 时初始化")
         logger.info(
             f"  - 流体求解器已连接: {self.fluid_solver.n_vol} 个控制体, {self.fluid_solver.n_junc} 个连接点"
@@ -236,45 +239,59 @@ class SystemManager:
         reactivity_control: float = 0.0,
         fail_on_fluid_nonconvergence: bool = False,
         interface_relaxation: float = 1.0,
+        interface_convergence_tol: float = None,
     ):
-        # 检查内迭代次数是否有效
         if inner_iter < 1:
             raise ValueError("inner_iter 必须 >= 1")
-        # 检查界面松弛因子是否在有效范围内
         if not (0.0 < interface_relaxation <= 1.0):
             raise ValueError("interface_relaxation 必须在 (0, 1] 范围内。")
+        if interface_convergence_tol is not None and interface_convergence_tol < 0.0:
+            raise ValueError("interface_convergence_tol must be non-negative or None.")
+        if interface_convergence_tol is not None and inner_iter < 2:
+            raise ValueError("interface_convergence_tol requires inner_iter >= 2.")
 
         t_start = self.global_time
-        # 在每个时间步开始时，重置所有耦合器的界面松弛因子
-        for coupler in self.couplers:
-            reset_relaxation = getattr(coupler, 'reset_interface_relaxation', None)
-            if callable(reset_relaxation):
-                reset_relaxation()
-
-        self._prepare_fluid_sources_for_coupling()
-        for comp in self.components:
-            if hasattr(comp, 'pre_step'):
-                comp.pre_step(dt, t_start)
-
-        base_fluid_sources = self._capture_fluid_sources()
-        self._save_system_state()
+        entry_fluid_sources = self._capture_fluid_sources()
+        self._save_system_state(include_components=True, include_point_reactor=True)
+        diagnostics = self._new_step_diagnostics(
+            t_start=t_start,
+            dt=dt,
+            inner_iter=inner_iter,
+            convergence_tol=convergence_tol,
+            interface_relaxation=interface_relaxation,
+            interface_convergence_tol=interface_convergence_tol,
+        )
+        self.last_step_diagnostics = diagnostics
 
         T_f_prev = None
         T_s_prev = {}
         component_neutronics_handled = False
 
         try:
+            for coupler in self.couplers:
+                reset_relaxation = getattr(coupler, 'reset_interface_relaxation', None)
+                if callable(reset_relaxation):
+                    reset_relaxation()
+
+            self._prepare_fluid_sources_for_coupling()
+            for comp in self.components:
+                if hasattr(comp, 'pre_step'):
+                    comp.pre_step(dt, t_start)
+
+            base_fluid_sources = self._capture_fluid_sources()
+
             for k in range(inner_iter):
-                # 恢复流体源项，防止coupler造成的源项发生累积
                 self._restore_fluid_sources(base_fluid_sources)
-                # 执行execute（流体-固体耦合）以及sync（固体-固体耦合）
                 coupling_time = t_start if k == 0 else t_start + dt
                 self._run_couplers(
                     interface_relaxation=interface_relaxation,
                     current_time=coupling_time,
                 )
+                coupler_diagnostics = self._collect_coupler_diagnostics()
+                diagnostics["coupler_diagnostics_by_iteration"].append(coupler_diagnostics)
+                if coupler_diagnostics:
+                    diagnostics["couplers"] = coupler_diagnostics
 
-                # 进行核反应更新，进入到 ReactorCore 中，由 ReactorCore 执行中子单步的计算
                 handled, fallback_power = self._advance_neutronics_for_iteration(
                     dt=dt,
                     reactivity_control=reactivity_control,
@@ -283,38 +300,34 @@ class SystemManager:
                 component_neutronics_handled = component_neutronics_handled or handled
 
                 if k > 0:
-                    # 回滚到当前时刻的初始状态
-                    self._rollback_system_state()
-                    # 应用更新后的计算功率到所有固体组件
+                    self._rollback_system_state(include_components=False, include_point_reactor=False)
                     self._apply_pending_nuclear_power(fallback_power)
                 else:
-                    # 应用初始计算功率到所有固体组件
                     self._apply_pending_nuclear_power(fallback_power)
 
-                # 流体方程计算
                 fluid_converged = self.fluid_solver.step_Picard(
                     dt,
                     max_iter=20 if inner_iter > 1 else 100,
                 )
+                diagnostics["fluid_converged_by_iteration"].append(bool(fluid_converged))
 
-                # 检查流体方程是否收敛
                 if not fluid_converged:
                     message = f"Fluid solver NOT converged at t={t_start:.4f}s"
+                    diagnostics["warnings"].append(message)
                     if fail_on_fluid_nonconvergence:
                         raise RuntimeError(message)
                     logger.warning(message)
 
-                # 固体方程计算
                 for name, solid in self.solid_components.items():
                     success = solid.step(dt)
                     if not success:
                         raise RuntimeError(f"Solid '{name}' integration failed at t={t_start:.4f}s")
 
-                # 记录当前时刻流体和固体温度分布
+                diagnostics["iterations"] = k + 1
+
                 if inner_iter > 1:
                     T_f_curr = self._fluid_temperature_vector()
                     T_s_curr = self._solid_temperature_snapshot()
-                    # 非首次计算：检查流体和固体温度是否收敛
                     if k > 0:
                         err_f = self._max_abs_delta(T_f_curr, T_f_prev)
                         err_s = 0.0
@@ -322,32 +335,124 @@ class SystemManager:
                             if name in T_s_prev:
                                 err_s = max(err_s, self._max_abs_delta(T_arr, T_s_prev[name]))
 
-                        if err_f < convergence_tol and err_s < convergence_tol:
+                        diagnostics["err_fluid_temperature"] = err_f
+                        diagnostics["err_solid_temperature"] = err_s
+                        temperature_converged = err_f < convergence_tol and err_s < convergence_tol
+
+                        if interface_convergence_tol is None:
+                            interface_converged = True
+                        else:
+                            interface_residual = self._interface_residual_from_diagnostics(coupler_diagnostics)
+                            diagnostics["interface_residual"] = interface_residual
+                            interface_converged = interface_residual < interface_convergence_tol
+
+                        diagnostics["temperature_converged"] = temperature_converged
+                        diagnostics["interface_converged"] = interface_converged
+
+                        if temperature_converged and interface_converged:
+                            diagnostics["converged"] = all(diagnostics["fluid_converged_by_iteration"])
                             break
 
                     T_f_prev = T_f_curr
                     T_s_prev = T_s_curr
+                else:
+                    diagnostics["temperature_converged"] = True
+                    diagnostics["interface_converged"] = interface_convergence_tol is None
+                    diagnostics["converged"] = bool(fluid_converged)
 
-            # 提交核反应更新
             self._commit_neutronics(component_neutronics_handled)
 
-            # 计算进入尾声，更新全局时间
             self.global_time = t_start + dt
             self._sync_solid_times_to_global()
             self._refresh_solid_boundary_cache(update_flux=True)
 
-            # 执行后处理操作
             for comp in self.components:
                 if hasattr(comp, 'post_step'):
                     comp.post_step(dt, self.global_time)
 
-        except Exception:
-            self._rollback_system_state()
-            self._restore_fluid_sources(base_fluid_sources)
+            diagnostics["status"] = "completed"
+            diagnostics["t_end"] = self.global_time
+            diagnostics["component_neutronics_handled"] = component_neutronics_handled
+
+        except Exception as exc:
+            self._rollback_system_state(include_components=True, include_point_reactor=True)
+            self._restore_fluid_sources(entry_fluid_sources)
             self.global_time = t_start
             self._sync_solid_times_to_global()
             self._refresh_solid_boundary_cache(update_flux=True)
+            diagnostics["status"] = "failed"
+            diagnostics["t_end"] = t_start
+            diagnostics["exception"] = f"{type(exc).__name__}: {exc}"
             raise
+
+    def _new_step_diagnostics(
+        self,
+        *,
+        t_start: float,
+        dt: float,
+        inner_iter: int,
+        convergence_tol: float,
+        interface_relaxation: float,
+        interface_convergence_tol: float,
+    ):
+        return {
+            "status": "running",
+            "t_start": t_start,
+            "t_end": None,
+            "dt": dt,
+            "inner_iter_limit": inner_iter,
+            "iterations": 0,
+            "convergence_tol": convergence_tol,
+            "interface_relaxation": interface_relaxation,
+            "interface_convergence_tol": interface_convergence_tol,
+            "converged": False,
+            "temperature_converged": False,
+            "interface_converged": interface_convergence_tol is None,
+            "err_fluid_temperature": None,
+            "err_solid_temperature": None,
+            "interface_residual": None,
+            "fluid_converged_by_iteration": [],
+            "warnings": [],
+            "couplers": [],
+            "coupler_diagnostics_by_iteration": [],
+            "component_neutronics_handled": False,
+            "exception": None,
+        }
+
+    def _collect_coupler_diagnostics(self):
+        diagnostics = []
+        for coupler in self.couplers:
+            getter = getattr(coupler, 'get_coupling_diagnostics', None)
+            if not callable(getter):
+                continue
+
+            data = getter()
+            if data is None:
+                continue
+
+            entry = dict(data)
+            entry.setdefault("name", getattr(coupler, "name", type(coupler).__name__))
+            entry.setdefault("type", type(coupler).__name__)
+            diagnostics.append(entry)
+
+        return diagnostics
+
+    @staticmethod
+    def _interface_residual_from_diagnostics(coupler_diagnostics) -> float:
+        residuals = []
+        for diagnostics in coupler_diagnostics:
+            residual = diagnostics.get("interface_residual")
+            if residual is None:
+                continue
+            residuals.append(float(residual))
+
+        if not residuals:
+            raise RuntimeError(
+                "interface_convergence_tol requires at least one coupler "
+                "diagnostic entry with 'interface_residual'."
+            )
+
+        return max(residuals)
 
     def _advance_neutronics_for_iteration(
         self,
@@ -437,6 +542,7 @@ class SystemManager:
         min_dt: float = 1e-4,
         max_dt: float = 0.5,
         safety_factor: float = 0.8,
+        use_last_step_diagnostics: bool = True,
     ) -> float:
         raw_dt_fluid = self.fluid_solver.get_max_stable_dt(max_limit=max_dt)
         dt_fluid = raw_dt_fluid * safety_factor
@@ -458,6 +564,25 @@ class SystemManager:
         else:
             dt_clamped = min(dt_target, max_dt)
 
+        if use_last_step_diagnostics and self.last_step_diagnostics is not None:
+            diag = self.last_step_diagnostics
+            fluid_ok = all(diag.get("fluid_converged_by_iteration", [True]))
+            picard_ok = bool(diag.get("converged", True))
+            iterations = int(diag.get("iterations", 0) or 0)
+            iteration_limit = int(diag.get("inner_iter_limit", 1) or 1)
+
+            if not fluid_ok or not picard_ok:
+                dt_clamped *= 0.5
+            elif iteration_limit > 1 and iterations >= iteration_limit:
+                dt_clamped *= 0.8
+
+            if dt_clamped < min_dt:
+                logger.warning(
+                    "Adaptive dt target %.6e is below min_dt %.6e after convergence control.",
+                    dt_clamped,
+                    min_dt,
+                )
+
         if hasattr(self, '_last_dt'):
             dt_final = min(dt_clamped, 1.2 * self._last_dt)
         else:
@@ -470,7 +595,7 @@ class SystemManager:
     # State management for inner iteration and restart
     # =========================================================================
 
-    def _save_system_state(self):
+    def _save_system_state(self, include_components: bool = False, include_point_reactor: bool = False):
         if hasattr(self.fluid_solver, 'save_state'):
             self.fluid_solver.save_state()
 
@@ -478,13 +603,35 @@ class SystemManager:
             if hasattr(solid, 'save_state'):
                 solid.save_state()
 
-    def _rollback_system_state(self):
+        if include_components:
+            self._component_step_states = []
+            for comp in self.components:
+                save_step_state = getattr(comp, 'save_step_state', None)
+                if callable(save_step_state):
+                    self._component_step_states.append((comp, save_step_state()))
+
+        if include_point_reactor and self.point_reactor is not None:
+            save_step_state = getattr(self.point_reactor, 'save_step_state', None)
+            self._point_reactor_step_state = save_step_state() if callable(save_step_state) else None
+
+    def _rollback_system_state(self, include_components: bool = False, include_point_reactor: bool = False):
         if hasattr(self.fluid_solver, 'load_state'):
             self.fluid_solver.load_state()
 
         for solid in self.solid_components.values():
             if hasattr(solid, 'load_state'):
                 solid.load_state()
+
+        if include_components:
+            for comp, state in reversed(self._component_step_states):
+                load_step_state = getattr(comp, 'load_step_state', None)
+                if callable(load_step_state):
+                    load_step_state(state)
+
+        if include_point_reactor and self.point_reactor is not None:
+            load_step_state = getattr(self.point_reactor, 'load_step_state', None)
+            if callable(load_step_state):
+                load_step_state(self._point_reactor_step_state)
 
     def _sync_solid_times_to_global(self):
         for solid in self.solid_components.values():

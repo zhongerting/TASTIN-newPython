@@ -139,6 +139,44 @@ class HookComponent(BaseComponent):
         self.post_times.append(current_time)
 
 
+class StepStateComponent(BaseComponent):
+    def __init__(self, name="step-state"):
+        super().__init__(name)
+        self.value = 0.0
+        self.save_calls = 0
+        self.load_calls = 0
+
+    def save_step_state(self):
+        self.save_calls += 1
+        return {"value": self.value}
+
+    def load_step_state(self, state):
+        self.load_calls += 1
+        self.value = state["value"]
+
+    def pre_step(self, dt, current_time):
+        self.value += 10.0
+
+
+class HandledIterationComponent(BaseComponent):
+    def __init__(self):
+        super().__init__("handled-iteration")
+        self.iteration_index = None
+
+    def save_step_state(self):
+        return {"iteration_index": self.iteration_index}
+
+    def load_step_state(self, state):
+        self.iteration_index = state["iteration_index"]
+
+    def advance_neutronics(self, dt, reactivity_control=0.0, iteration_index=0):
+        self.iteration_index = iteration_index
+        return True
+
+    def commit_neutronics(self):
+        return True
+
+
 class LogCoupler:
     def __init__(self, name, log, volume=None, boundary=None):
         self.name = name
@@ -178,6 +216,23 @@ class ExecuteOnlyCoupler:
         if self.volume is not None:
             self.volume.Q_wall += 100.0 * self.execute_count
             self.volume.implicit_coeff += 2.0 + self.execute_count
+
+
+class DiagnosticCoupler:
+    def __init__(self, residuals):
+        self.name = "diagnostic"
+        self.residuals = list(residuals)
+        self.execute_count = 0
+
+    def execute(self):
+        self.execute_count += 1
+
+    def get_coupling_diagnostics(self):
+        index = min(max(self.execute_count - 1, 0), len(self.residuals) - 1)
+        return {
+            "name": self.name,
+            "interface_residual": self.residuals[index],
+        }
 
 
 class BoundaryTimeCoupler:
@@ -321,6 +376,22 @@ class FakePointReactor:
         self.commit_calls += 1
         return True
 
+    def save_step_state(self):
+        return {
+            "step_calls": self.step_calls,
+            "commit_calls": self.commit_calls,
+            "fission_power": self.fission_power,
+            "decay_power": self.decay_power,
+            "total_power": self.total_power,
+        }
+
+    def load_step_state(self, state):
+        self.step_calls = state["step_calls"]
+        self.commit_calls = state["commit_calls"]
+        self.fission_power = state["fission_power"]
+        self.decay_power = state["decay_power"]
+        self.total_power = state["total_power"]
+
 
 class NeutronicsComponent(BaseComponent):
     def __init__(self, handled=False, committed=False):
@@ -366,8 +437,10 @@ class SystemManagerLifecycleTests(unittest.TestCase):
         manager = make_manager(fluid)
         manager.solid_components["bad"] = FakeSolid(fail=True)
         hook = HookComponent(volume=vol, pre_source=7.0)
+        stateful = StepStateComponent()
         point = FakePointReactor()
         manager.components.append(hook)
+        manager.components.append(stateful)
         manager.add_point_reactor(point)
 
         with self.assertRaisesRegex(RuntimeError, "Solid 'bad' integration failed"):
@@ -375,10 +448,16 @@ class SystemManagerLifecycleTests(unittest.TestCase):
 
         self.assertAlmostEqual(manager.global_time, 0.0)
         self.assertAlmostEqual(vol.T, 300.0)
+        self.assertAlmostEqual(vol.Q_wall, 0.0)
+        self.assertAlmostEqual(stateful.value, 0.0)
+        self.assertEqual(stateful.save_calls, 1)
+        self.assertEqual(stateful.load_calls, 1)
         self.assertEqual(hook.pre_times, [0.0])
         self.assertEqual(hook.post_times, [])
-        self.assertEqual(point.step_calls, 1)
+        self.assertEqual(point.step_calls, 0)
         self.assertEqual(point.commit_calls, 0)
+        self.assertAlmostEqual(point.fission_power, 10.0)
+        self.assertEqual(manager.last_step_diagnostics["status"], "failed")
 
     def test_fluid_nonconvergence_default_warns_but_strict_mode_fails(self):
         manager = make_manager(FakeFluid(converged=False))
@@ -447,6 +526,15 @@ class SystemManagerLifecycleTests(unittest.TestCase):
         self.assertEqual(coupler.boundary_times, [2.0, 2.25])
         self.assertEqual(coupler.solid_times, [2.0, 2.25])
 
+    def test_picard_thermal_rollback_keeps_latest_component_neutronics_trial(self):
+        manager = make_manager(FakeFluid())
+        component = HandledIterationComponent()
+        manager.components.append(component)
+
+        manager.step(0.0, inner_iter=2, convergence_tol=0.0)
+
+        self.assertEqual(component.iteration_index, 1)
+
     def test_interface_relaxation_state_resets_once_per_global_step(self):
         manager = make_manager(FakeFluid())
         coupler = ResetTrackingCoupler()
@@ -477,6 +565,11 @@ class SystemManagerLifecycleTests(unittest.TestCase):
         self.assertAlmostEqual(vol.implicit_coeff, 20.0)
         self.assertAlmostEqual(coupler.solid_bc.T_ext[0], 400.0)
         self.assertAlmostEqual(coupler.solid_bc.R_ext[0], 0.05)
+        diagnostics = coupler.get_coupling_diagnostics()
+        self.assertTrue(diagnostics["relaxed"])
+        self.assertGreater(diagnostics["interface_residual"], 0.0)
+        self.assertGreater(diagnostics["source_residual"], 0.0)
+        self.assertEqual(manager.last_step_diagnostics["couplers"][0]["name"], "fluid-solid")
 
     def test_interface_relaxation_one_keeps_fluid_solid_coupler_default_behavior(self):
         fluid = FakeFluidSolidChannel()
@@ -498,6 +591,57 @@ class SystemManagerLifecycleTests(unittest.TestCase):
         self.assertAlmostEqual(vol.implicit_coeff, 30.0)
         self.assertAlmostEqual(coupler.solid_bc.T_ext[0], 500.0)
         self.assertAlmostEqual(coupler.solid_bc.R_ext[0], 1.0 / 30.0)
+
+    def test_last_step_diagnostics_records_picard_convergence(self):
+        manager = make_manager(FakeFluid())
+
+        manager.step(0.0, inner_iter=2, convergence_tol=1.0)
+
+        diagnostics = manager.last_step_diagnostics
+        self.assertEqual(diagnostics["status"], "completed")
+        self.assertEqual(diagnostics["iterations"], 2)
+        self.assertTrue(diagnostics["converged"])
+        self.assertTrue(diagnostics["temperature_converged"])
+        self.assertEqual(diagnostics["fluid_converged_by_iteration"], [True, True])
+        self.assertAlmostEqual(diagnostics["t_end"], 0.0)
+
+    def test_interface_convergence_uses_public_coupler_diagnostics(self):
+        manager = make_manager(FakeFluid())
+        coupler = DiagnosticCoupler(residuals=[10.0, 0.1])
+        manager.add_coupler(coupler)
+
+        manager.step(
+            0.0,
+            inner_iter=3,
+            convergence_tol=1.0,
+            interface_convergence_tol=0.5,
+        )
+
+        diagnostics = manager.last_step_diagnostics
+        self.assertEqual(diagnostics["iterations"], 2)
+        self.assertTrue(diagnostics["converged"])
+        self.assertTrue(diagnostics["interface_converged"])
+        self.assertAlmostEqual(diagnostics["interface_residual"], 0.1)
+
+    def test_interface_convergence_requires_coupler_residual_diagnostics(self):
+        manager = make_manager(FakeFluid())
+        manager.add_coupler(ExecuteOnlyCoupler("execute", []))
+
+        with self.assertRaisesRegex(RuntimeError, "interface_convergence_tol requires"):
+            manager.step(
+                0.0,
+                inner_iter=2,
+                convergence_tol=1.0,
+                interface_convergence_tol=1.0,
+            )
+
+        self.assertEqual(manager.last_step_diagnostics["status"], "failed")
+
+    def test_interface_convergence_requires_multiple_picard_iterations(self):
+        manager = make_manager(FakeFluid())
+
+        with self.assertRaisesRegex(ValueError, "inner_iter >= 2"):
+            manager.step(0.0, inner_iter=1, interface_convergence_tol=1.0)
 
     def test_neutronics_fallback_uses_return_value_not_method_presence(self):
         manager = make_manager(FakeFluid())
@@ -531,6 +675,19 @@ class SystemManagerLifecycleTests(unittest.TestCase):
         dt = manager.compute_adaptive_dt(min_dt=1.0e-4, max_dt=1.0, safety_factor=1.0)
 
         self.assertAlmostEqual(dt, 1.0e-6)
+
+    def test_compute_adaptive_dt_shrinks_after_nonconverged_step_diagnostics(self):
+        manager = make_manager(FakeFluid(stable_dt=1.0))
+        manager.last_step_diagnostics = {
+            "fluid_converged_by_iteration": [False],
+            "converged": False,
+            "iterations": 1,
+            "inner_iter_limit": 1,
+        }
+
+        dt = manager.compute_adaptive_dt(min_dt=1.0e-4, max_dt=1.0, safety_factor=1.0)
+
+        self.assertAlmostEqual(dt, 0.5)
 
     def test_invalid_coupler_and_duplicate_component_registration_fail_fast(self):
         manager = make_manager(FakeFluid())

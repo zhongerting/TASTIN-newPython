@@ -205,6 +205,7 @@ class FluidSolidCouple:
         # [新增] 缓存上一次计算的耦合系数 (Lambda = h * A)
         self._last_lambda = None
         self._interface_relaxation_previous = None
+        self._last_coupling_diagnostics = None
 
         # --- 1. 校验网格一致性 ---
         # 确保流体节点数与固体边界的节点数一致
@@ -247,6 +248,7 @@ class FluidSolidCouple:
 
     def reset_interface_relaxation(self):
         self._interface_relaxation_previous = None
+        self._last_coupling_diagnostics = None
 
     @staticmethod
     def _interface_state_shapes_match(previous_state, current_state):
@@ -258,6 +260,30 @@ class FluidSolidCouple:
             if np.asarray(previous_state[key]).shape != np.asarray(value).shape:
                 return False
         return True
+
+    @staticmethod
+    def _max_abs_delta_or_none(current, previous):
+        if previous is None:
+            return None
+        current_arr = np.asarray(current, dtype=float)
+        previous_arr = np.asarray(previous, dtype=float)
+        if current_arr.shape != previous_arr.shape:
+            return None
+        if current_arr.size == 0:
+            return 0.0
+        return float(np.max(np.abs(current_arr - previous_arr)))
+
+    @staticmethod
+    def _max_existing(*values):
+        finite_values = [float(value) for value in values if value is not None]
+        if not finite_values:
+            return None
+        return max(finite_values)
+
+    def get_coupling_diagnostics(self):
+        if self._last_coupling_diagnostics is None:
+            return None
+        return dict(self._last_coupling_diagnostics)
 
     @TEASAProfiler.profile
     def execute(self, interface_relaxation: float = 1.0):
@@ -339,15 +365,17 @@ class FluidSolidCouple:
             "T_f": T_f,
             "T_wall": T_wall,
         }
+        previous_state = self._interface_relaxation_previous
+        previous_shapes_match = self._interface_state_shapes_match(previous_state, current_state)
 
         if (
             interface_relaxation < 1.0
-            and self._interface_state_shapes_match(self._interface_relaxation_previous, current_state)
+            and previous_shapes_match
         ):
             relaxed_state = {
                 key: (
                     interface_relaxation * value
-                    + (1.0 - interface_relaxation) * self._interface_relaxation_previous[key]
+                    + (1.0 - interface_relaxation) * previous_state[key]
                 )
                 for key, value in current_state.items()
             }
@@ -366,6 +394,38 @@ class FluidSolidCouple:
 
         # [关键调用] 使用 FluidChannel 提供的半隐式接口
         self.fluid.add_coupling_source_distribution(explicit_arr, implicit_arr)
+
+        if previous_shapes_match:
+            previous_explicit = previous_state["lambda"] * previous_state["T_wall"]
+            previous_implicit = previous_state["lambda"]
+            delta_lambda = self._max_abs_delta_or_none(relaxed_lambda, previous_state["lambda"])
+            delta_T_f = self._max_abs_delta_or_none(relaxed_T_f, previous_state["T_f"])
+            delta_T_wall = self._max_abs_delta_or_none(relaxed_T_wall, previous_state["T_wall"])
+            delta_explicit = self._max_abs_delta_or_none(explicit_arr, previous_explicit)
+            delta_implicit = self._max_abs_delta_or_none(implicit_arr, previous_implicit)
+        else:
+            delta_lambda = None
+            delta_T_f = None
+            delta_T_wall = None
+            delta_explicit = None
+            delta_implicit = None
+
+        self._last_coupling_diagnostics = {
+            "name": self.name,
+            "type": type(self).__name__,
+            "interface_relaxation": float(interface_relaxation),
+            "relaxed": bool(interface_relaxation < 1.0 and previous_shapes_match),
+            "has_previous_state": bool(previous_shapes_match),
+            "interface_residual": self._max_existing(delta_lambda, delta_T_f, delta_T_wall),
+            "source_residual": self._max_existing(delta_explicit, delta_implicit),
+            "delta_lambda": delta_lambda,
+            "delta_T_f": delta_T_f,
+            "delta_T_wall": delta_T_wall,
+            "delta_explicit": delta_explicit,
+            "delta_implicit": delta_implicit,
+            "max_lambda": float(np.max(relaxed_lambda)) if relaxed_lambda.size else 0.0,
+            "max_explicit": float(np.max(np.abs(explicit_arr))) if explicit_arr.size else 0.0,
+        }
 
         # 缓存当前时间步的耦合系数，用于稳定性分析和下次迭代的松弛计算
         self._last_lambda = relaxed_lambda.copy()

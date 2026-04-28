@@ -682,6 +682,99 @@ class TFEUnit(BaseComponent):
         if hasattr(self, 'mod_outer_bc'):
             self.mod_outer_bc.update_params(T_ext=self.boundary_data.moderator_temperature)
 
+    @staticmethod
+    def _capture_solid_source_state(solid):
+        state = {}
+        if hasattr(solid, 'Q_source'):
+            state['Q_source_ref'] = solid.Q_source
+            state['Q_source_value'] = np.asarray(solid.Q_source, dtype=float).copy()
+        if hasattr(solid, 'Q_vol'):
+            state['Q_vol_value'] = np.asarray(solid.Q_vol, dtype=float).copy()
+        if hasattr(solid, 'use_external_source_buffer'):
+            state['use_external_source_buffer'] = bool(solid.use_external_source_buffer)
+        if hasattr(solid, 'source_callback'):
+            state['source_callback'] = solid.source_callback
+        return state
+
+    @staticmethod
+    def _restore_solid_source_state(solid, state):
+        if not state:
+            return
+        if 'Q_source_ref' in state:
+            solid.Q_source = state['Q_source_ref']
+            solid.Q_source[:] = state['Q_source_value']
+        if 'Q_vol_value' in state and hasattr(solid, 'Q_vol'):
+            solid.Q_vol[:] = state['Q_vol_value']
+        if 'use_external_source_buffer' in state:
+            solid.use_external_source_buffer = state['use_external_source_buffer']
+        if 'source_callback' in state:
+            solid.source_callback = state['source_callback']
+
+    @staticmethod
+    def _capture_coupler_source_state(coupler):
+        state = {}
+        for attr in ('Q_source_1', 'Q_source_2', '_current_Q_source'):
+            if hasattr(coupler, attr):
+                state[attr] = np.asarray(getattr(coupler, attr), dtype=float).copy()
+        return state
+
+    @staticmethod
+    def _restore_coupler_source_state(coupler, state):
+        for attr, value in state.items():
+            getattr(coupler, attr)[:] = value
+
+    def save_step_state(self):
+        electric_attrs = [
+            'emitter_voltage', 'emitter_resistivity', 'collector_voltage', 'collector_resistivity',
+            'current_density', 'emitter_joule_heat', 'collector_joule_heat'
+        ]
+        plasma_attrs = [
+            'emitter_work_function', 'collector_work_function', 'barrier_voltage_drop',
+            'emitter_temperature', 'electron_cooling_flux', 'electron_heating_flux'
+        ]
+
+        return {
+            'neutronic_total_power': self.neutronic_data.total_power,
+            'neutronic_total_power_old': self.neutronic_data._total_power_old,
+            'electric': {
+                attr: getattr(self.electric_data, attr).copy()
+                for attr in electric_attrs
+            },
+            'plasma': {
+                attr: getattr(self.plasma_data, attr).copy()
+                for attr in plasma_attrs
+            },
+            'moderator_temperature': self.boundary_data.moderator_temperature.copy(),
+            'solid_sources': [
+                (solid, self._capture_solid_source_state(solid))
+                for solid in self.solids.values()
+            ],
+            'coupler_sources': [
+                (coupler, self._capture_coupler_source_state(coupler))
+                for coupler in self.couplers.values()
+            ],
+        }
+
+    def load_step_state(self, state):
+        if state is None:
+            return
+
+        self.neutronic_data.total_power = state['neutronic_total_power']
+        self.neutronic_data._total_power_old = state['neutronic_total_power_old']
+
+        for attr, value in state['electric'].items():
+            getattr(self.electric_data, attr)[:] = value
+        for attr, value in state['plasma'].items():
+            getattr(self.plasma_data, attr)[:] = value
+
+        self.boundary_data.moderator_temperature[:] = state['moderator_temperature']
+
+        for solid, source_state in state['solid_sources']:
+            self._restore_solid_source_state(solid, source_state)
+
+        for coupler, source_state in state['coupler_sources']:
+            self._restore_coupler_source_state(coupler, source_state)
+
     def get_solids(self) -> list:
         """
         [接口] 返回组件内部包含的所有底层固体导热求解器对象。

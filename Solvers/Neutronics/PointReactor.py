@@ -150,12 +150,26 @@ class PointReactor:
 
         # 提取当前步的最终状态，作为试探状态存入
         self._y_trial = sol.y[:, -1]
+        return True
 
     def commit(self):
         """
         当全局 Picard 迭代收敛时，由 SystemManager 调用，固化当前时间步状态。
         """
         self._y_committed = self._y_trial.copy()
+        return True
+
+    def save_step_state(self):
+        return {
+            "y_committed": self._y_committed.copy(),
+            "y_trial": self._y_trial.copy(),
+        }
+
+    def load_step_state(self, state):
+        if state is None:
+            return
+        self._y_committed = np.asarray(state["y_committed"], dtype=float).copy()
+        self._y_trial = np.asarray(state["y_trial"], dtype=float).copy()
 
     # --- 属性接口：方便其他模块获取功率状态 ---
 

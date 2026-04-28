@@ -1068,6 +1068,85 @@ class ReactorCore(BaseComponent):
         """
         if self.point_reactor is not None:
             self.point_reactor.commit()
+            return True
+        return False
+
+    @staticmethod
+    def _capture_solid_source_state(solid):
+        state = {}
+        if hasattr(solid, 'Q_source'):
+            state['Q_source_ref'] = solid.Q_source
+            state['Q_source_value'] = np.asarray(solid.Q_source, dtype=float).copy()
+        if hasattr(solid, 'use_external_source_buffer'):
+            state['use_external_source_buffer'] = bool(solid.use_external_source_buffer)
+        if hasattr(solid, 'source_callback'):
+            state['source_callback'] = solid.source_callback
+        return state
+
+    @staticmethod
+    def _restore_solid_source_state(solid, state):
+        if not state:
+            return
+        if 'Q_source_ref' in state:
+            solid.Q_source = state['Q_source_ref']
+            solid.Q_source[:] = state['Q_source_value']
+        if 'use_external_source_buffer' in state:
+            solid.use_external_source_buffer = state['use_external_source_buffer']
+        if 'source_callback' in state:
+            solid.source_callback = state['source_callback']
+
+    def save_step_state(self):
+        tfe_states = {}
+        for name, tfe in self.tfes.items():
+            save_step_state = getattr(tfe, 'save_step_state', None)
+            if callable(save_step_state):
+                tfe_states[name] = save_step_state()
+
+        point_reactor_state = None
+        if self.point_reactor is not None:
+            save_step_state = getattr(self.point_reactor, 'save_step_state', None)
+            if callable(save_step_state):
+                point_reactor_state = save_step_state()
+
+        solid_source_states = [
+            (solid, self._capture_solid_source_state(solid))
+            for solid in self.get_solids()
+        ]
+
+        return {
+            '_last_thermo_update_time': self._last_thermo_update_time,
+            'last_total_core_power': self.last_total_core_power,
+            'last_effective_reactivity_feedback': self.last_effective_reactivity_feedback,
+            'last_reactivity_control': self.last_reactivity_control,
+            'tfe_states': tfe_states,
+            'point_reactor_state': point_reactor_state,
+            'solid_source_states': solid_source_states,
+        }
+
+    def load_step_state(self, state):
+        if state is None:
+            return
+
+        self._last_thermo_update_time = state['_last_thermo_update_time']
+        self.last_total_core_power = state['last_total_core_power']
+        self.last_effective_reactivity_feedback = state['last_effective_reactivity_feedback']
+        self.last_reactivity_control = state['last_reactivity_control']
+
+        for name, tfe_state in state['tfe_states'].items():
+            tfe = self.tfes.get(name)
+            if tfe is None:
+                continue
+            load_step_state = getattr(tfe, 'load_step_state', None)
+            if callable(load_step_state):
+                load_step_state(tfe_state)
+
+        if self.point_reactor is not None and state['point_reactor_state'] is not None:
+            load_step_state = getattr(self.point_reactor, 'load_step_state', None)
+            if callable(load_step_state):
+                load_step_state(state['point_reactor_state'])
+
+        for solid, source_state in state['solid_source_states']:
+            self._restore_solid_source_state(solid, source_state)
 
     def get_solids(self) -> list:
         all_solids = list(self.extra_solids.values())
