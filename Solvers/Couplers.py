@@ -204,6 +204,7 @@ class FluidSolidCouple:
 
         # [新增] 缓存上一次计算的耦合系数 (Lambda = h * A)
         self._last_lambda = None
+        self._interface_relaxation_previous = None
 
         # --- 1. 校验网格一致性 ---
         # 确保流体节点数与固体边界的节点数一致
@@ -244,8 +245,22 @@ class FluidSolidCouple:
             raise ValueError(f"Capacitance shape mismatch: {capacitance_arr.shape}")
         self.solid_node_capacitance = capacitance_arr
 
+    def reset_interface_relaxation(self):
+        self._interface_relaxation_previous = None
+
+    @staticmethod
+    def _interface_state_shapes_match(previous_state, current_state):
+        if previous_state is None:
+            return False
+        for key, value in current_state.items():
+            if key not in previous_state:
+                return False
+            if np.asarray(previous_state[key]).shape != np.asarray(value).shape:
+                return False
+        return True
+
     @TEASAProfiler.profile
-    def execute(self):
+    def execute(self, interface_relaxation: float = 1.0):
         """
         执行耦合计算步骤:
         1. 获取状态 (Fluid T, Solid T, Flow properties)
@@ -255,7 +270,10 @@ class FluidSolidCouple:
         """
         # === A. 获取流体物性与状态 (Vectorized) ===
         # 使用 FluidChannel 的向量化属性
-        T_f = self.fluid.temperature_vector
+        if not (0.0 < interface_relaxation <= 1.0):
+            raise ValueError("interface_relaxation must be in (0, 1].")
+
+        T_f = np.asarray(self.fluid.temperature_vector, dtype=float)
         P_f = self.fluid.pressure_vector
         rho = self.fluid.density_vector
         vel = self.fluid.velocity_vector  # 特征流速
@@ -290,12 +308,6 @@ class FluidSolidCouple:
         lambda_vals = h_vals * self.node_areas
         safe_lambda = np.maximum(lambda_vals, 1e-8)
 
-        # [新增] 缓存 Lambda 用于稳定性分析
-        self._last_lambda = safe_lambda
-
-        # 防止 Lambda 过小导致 R 无穷大
-        safe_lambda = np.maximum(lambda_vals, 1e-8)
-
         # === E. 更新固体边界 (Robin BC) ===
         # 固体方程看见的边界: Flux = (T_ext - T_surf) / R_ext
         # 物理对流公式: Flux = h*A * (T_fluid - T_surf)
@@ -320,13 +332,48 @@ class FluidSolidCouple:
             self.solid_bound.compute_net_flux_for_solver()
 
         # [关键数据获取] 从 BoundaryRegion 获取当前壁面温度
-        T_wall = self.solid_bound.T_surface
+        T_wall = np.asarray(self.solid_bound.T_surface, dtype=float)
 
-        explicit_arr = safe_lambda * T_wall
-        implicit_arr = safe_lambda
+        current_state = {
+            "lambda": safe_lambda,
+            "T_f": T_f,
+            "T_wall": T_wall,
+        }
+
+        if (
+            interface_relaxation < 1.0
+            and self._interface_state_shapes_match(self._interface_relaxation_previous, current_state)
+        ):
+            relaxed_state = {
+                key: (
+                    interface_relaxation * value
+                    + (1.0 - interface_relaxation) * self._interface_relaxation_previous[key]
+                )
+                for key, value in current_state.items()
+            }
+        else:
+            relaxed_state = current_state
+
+        relaxed_lambda = np.maximum(relaxed_state["lambda"], 1e-8)
+        relaxed_T_f = relaxed_state["T_f"]
+        relaxed_T_wall = relaxed_state["T_wall"]
+
+        self.solid_bc.R_ext[:] = 1.0 / relaxed_lambda
+        self.solid_bc.T_ext[:] = relaxed_T_f
+
+        explicit_arr = relaxed_lambda * relaxed_T_wall
+        implicit_arr = relaxed_lambda
 
         # [关键调用] 使用 FluidChannel 提供的半隐式接口
         self.fluid.add_coupling_source_distribution(explicit_arr, implicit_arr)
+
+        # 缓存当前时间步的耦合系数，用于稳定性分析和下次迭代的松弛计算
+        self._last_lambda = relaxed_lambda.copy()
+        self._interface_relaxation_previous = {
+            "lambda": relaxed_lambda.copy(),
+            "T_f": np.asarray(relaxed_T_f, dtype=float).copy(),
+            "T_wall": np.asarray(relaxed_T_wall, dtype=float).copy(),
+        }
 
     # =========================================================================
     # Phase 6: Time Step Control (Coupling Stability)
