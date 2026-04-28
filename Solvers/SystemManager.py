@@ -236,12 +236,15 @@ class SystemManager:
         fail_on_fluid_nonconvergence: bool = False,
         interface_relaxation: float = 1.0,
     ):
+        # 检查内迭代次数是否有效
         if inner_iter < 1:
-            raise ValueError("inner_iter must be >= 1")
+            raise ValueError("inner_iter 必须 >= 1")
+        # 检查界面松弛因子是否在有效范围内
         if not (0.0 < interface_relaxation <= 1.0):
-            raise ValueError("interface_relaxation must be in (0, 1].")
+            raise ValueError("interface_relaxation 必须在 (0, 1] 范围内。")
 
         t_start = self.global_time
+        # 在每个时间步开始时，重置所有耦合器的界面松弛因子
         for coupler in self.couplers:
             reset_relaxation = getattr(coupler, 'reset_interface_relaxation', None)
             if callable(reset_relaxation):
@@ -261,9 +264,12 @@ class SystemManager:
 
         try:
             for k in range(inner_iter):
+                # 恢复流体源项，防止coupler造成的源项发生累积
                 self._restore_fluid_sources(base_fluid_sources)
+                # 执行execute（流体-固体耦合）以及sync（固体-固体耦合）
                 self._run_couplers(interface_relaxation=interface_relaxation)
 
+                # 进行核反应更新，进入到 ReactorCore 中，由 ReactorCore 执行中子单步的计算
                 handled, fallback_power = self._advance_neutronics_for_iteration(
                     dt=dt,
                     reactivity_control=reactivity_control,
@@ -272,31 +278,38 @@ class SystemManager:
                 component_neutronics_handled = component_neutronics_handled or handled
 
                 if k > 0:
+                    # 回滚到当前时刻的初始状态
                     self._rollback_system_state()
+                    # 应用更新后的计算功率到所有固体组件
                     self._apply_pending_nuclear_power(fallback_power)
                 else:
+                    # 应用初始计算功率到所有固体组件
                     self._apply_pending_nuclear_power(fallback_power)
 
+                # 流体方程计算
                 fluid_converged = self.fluid_solver.step_Picard(
                     dt,
                     max_iter=20 if inner_iter > 1 else 100,
                 )
 
+                # 检查流体方程是否收敛
                 if not fluid_converged:
                     message = f"Fluid solver NOT converged at t={t_start:.4f}s"
                     if fail_on_fluid_nonconvergence:
                         raise RuntimeError(message)
                     logger.warning(message)
 
+                # 固体方程计算
                 for name, solid in self.solid_components.items():
                     success = solid.step(dt)
                     if not success:
                         raise RuntimeError(f"Solid '{name}' integration failed at t={t_start:.4f}s")
 
+                # 记录当前时刻流体和固体温度分布
                 if inner_iter > 1:
                     T_f_curr = self._fluid_temperature_vector()
                     T_s_curr = self._solid_temperature_snapshot()
-
+                    # 非首次计算：检查流体和固体温度是否收敛
                     if k > 0:
                         err_f = self._max_abs_delta(T_f_curr, T_f_prev)
                         err_s = 0.0
@@ -310,12 +323,15 @@ class SystemManager:
                     T_f_prev = T_f_curr
                     T_s_prev = T_s_curr
 
+            # 提交核反应更新
             self._commit_neutronics(component_neutronics_handled)
 
+            # 计算进入尾声，更新全局时间
             self.global_time = t_start + dt
             self._sync_solid_times_to_global()
             self._refresh_solid_boundary_cache(update_flux=True)
 
+            # 执行后处理操作
             for comp in self.components:
                 if hasattr(comp, 'post_step'):
                     comp.post_step(dt, self.global_time)
@@ -361,6 +377,13 @@ class SystemManager:
         )
 
     def _apply_pending_nuclear_power(self, fallback_power):
+        """
+        将待处理的中子功率应用到所有固体组件。
+
+        参数:
+            fallback_power: 包含裂变功率、衰变功率和总功率的元组 (p_fiss, p_decay, p_total)，
+                           如果为 None 则不执行任何操作
+        """
         if fallback_power is None:
             return
 
