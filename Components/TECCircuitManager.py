@@ -5,6 +5,7 @@ import numpy as np
 
 from Components.BaseComponent import BaseComponent
 from Components.basicComponents.TECPair import TECPair
+from Components.tec_electric import electric_field_from_node_potential
 from ThermoCalc.ThermoCalcWrapper import ThermoCalcModel
 from profiler import TEASAProfiler
 
@@ -100,8 +101,8 @@ class TECCircuitManager(BaseComponent):
         J_density *= 1e4    # [A/m^2]
 
         phiE = tec_results.get('phiE', np.zeros(self.n_node))   # [V]
-        phiC = tec_results.get('phiC', np.zeros(self.n_node))   # [V]
-        Vd = tec_results.get('Vd', np.zeros(self.n_node))       # [V]
+        UE = tec_results.get('UE', np.zeros(self.n_node))       # [V]
+        UC = tec_results.get('UC', np.zeros(self.n_node))       # [V]
 
         TE = tec_results.get('TE', np.zeros(self.n_node))       # [K]
 
@@ -115,7 +116,7 @@ class TECCircuitManager(BaseComponent):
 
         # 对于发射极表面热流，需要获取发射极边界温度、发射极功函数、电流密度
         q_e_flux = -1.0 * J_density * (phiE + 2.0 * 8.617e-5 * TE)
-        q_c_flux = 1.0 * J_density * (phiC + 2.0 * 8.617e-5 * TE + Vd)
+        q_c_flux = 1.0 * J_density * (phiE + 2.0 * 8.617e-5 * TE - (UE - UC))
 
         return q_e_flux, q_c_flux
 
@@ -166,14 +167,28 @@ class TECCircuitManager(BaseComponent):
             rho_e = res.get('rhoE', np.ones(self.n_node) * 1e-6)
             rho_c = res.get('rhoC', np.ones(self.n_node) * 1e-6)
 
-            # 2. 计算每个轴向节点的电势差 dU [V]
-            # np.gradient 计算相邻节点的差值，取绝对值保证发热为正
-            dU_e = np.abs(np.gradient(UE_abs))
-            dU_c = np.abs(np.gradient(UC_abs))
+            # 2. Compute E=dU/dy on axial node centers before mapping Joule heat.
+            try:
+                dl_e = np.asarray(self.circuit._input_data.dlE[i], dtype=float)
+                dl_c = np.asarray(self.circuit._input_data.dlC[i], dtype=float)
+                if dl_e.shape != (self.n_node,) or dl_c.shape != (self.n_node,):
+                    raise ValueError(f"bad dl shape {dl_e.shape}/{dl_c.shape}")
+                E_e = electric_field_from_node_potential(UE_abs, node_lengths=dl_e)
+                E_c = electric_field_from_node_potential(UC_abs, node_lengths=dl_c)
+            except Exception as exc:
+                logger.warning(
+                    "TECCircuitManager '%s': falling back to uniform axial length for TEC '%s'. Detail: %s",
+                    self.name,
+                    tec_pair.name,
+                    exc,
+                )
+                uniform_lengths = np.full(self.n_node, tec_pair.L_node, dtype=float)
+                E_e = electric_field_from_node_potential(UE_abs, node_lengths=uniform_lengths)
+                E_c = electric_field_from_node_potential(UC_abs, node_lengths=uniform_lengths)
 
-            tec_pair.set_joule_heating(dU_emit=dU_e, rho_emit=rho_e,
-                                       dU_coll=dU_c, rho_coll=rho_c,
-                                       alpha=alpha)
+            tec_pair.set_joule_heating_fields(E_emit=E_e, rho_emit=rho_e,
+                                              E_coll=E_c, rho_coll=rho_c,
+                                              alpha=alpha)
 
             # B. 等离子体面热流下发
             q_e, q_c = self._compute_plasma_fluxes(res)

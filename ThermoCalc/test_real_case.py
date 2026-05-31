@@ -58,11 +58,11 @@ input_data.crossAreaC = np.full(N_elem, 1.0786e-4)
 
 # sideAreaE = 0.00092855424159680002 * 25 / 50.0
 sideE_val = 0.00092855424159680002 * 25.0 / float(n_node)
-input_data.sideAreaE  = np.full(N_elem, sideE_val)
+input_data.sideAreaE  = np.full((N_elem, n_node), sideE_val)
 
 # sideAreaC = 0.00097592945800480005 * 25 / 50.0
 sideC_val = 0.00097592945800480005 * 25.0 / float(n_node)
-input_data.sideAreaC  = np.full(N_elem, sideC_val)
+input_data.sideAreaC  = np.full((N_elem, n_node), sideC_val)
 
 # U_init = 1.6, d_gap = 0.5 (from 'other' vector)
 input_data.U_init     = np.full(N_elem, 1.6)

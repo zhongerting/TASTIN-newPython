@@ -191,6 +191,9 @@ class DynamicRadiationResistanceBC(ResistanceBC):
             t_node_arr = np.asarray(T_node, dtype=float)
             t_ref_raw = np.where(t_surface_arr > 1.0e-3, t_surface_arr, t_node_arr)
 
+        if t_ref_raw.size == 0:
+            return
+
         raw_min = float(np.min(t_ref_raw))
         if raw_min < 0.0:
             self.invalid_temperature_detected = True

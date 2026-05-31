@@ -206,6 +206,8 @@ class HPwithFin(BaseComponent):
         self.last_fin_conductance_distribution = np.zeros_like(area_con)
         self.last_fin_effective_temperature_distribution = np.full_like(area_con, self.T_space)
         self.last_fin_equivalent_resistance_distribution = np.full_like(area_con, 1e15)
+        self._fin_scratch_shape = None
+        self._fin_scratch = {}
 
         # HeatPipe2D 在父类构造阶段尚未创建切片边界；
         # 这里在所有边界和外部条件挂接完成后，再做一次完整初始化，
@@ -305,6 +307,129 @@ class HPwithFin(BaseComponent):
         total_absorption = wall_absorption + fin_absorption
         return wall_absorption, fin_absorption, total_absorption
 
+    def _get_fin_active_mask(self, T_root: np.ndarray, q_fin_abs_density: np.ndarray) -> np.ndarray:
+        T_root = np.asarray(T_root, dtype=float)
+        q_fin_abs_density = np.asarray(q_fin_abs_density, dtype=float)
+        Ac = self.fin_width_array * self.fin_thickness
+        P = 2.0 * self.fin_width_array
+        return (
+            np.isfinite(T_root)
+            & np.isfinite(q_fin_abs_density)
+            & (self.fin_height > 0.0)
+            & (Ac > 0.0)
+            & (P > 0.0)
+        )
+
+    def _get_fin_scratch(self, n_active: int, n_height: int):
+        shape = (int(n_active), int(n_height))
+        if self._fin_scratch_shape != shape:
+            self._fin_scratch_shape = shape
+            names = (
+                'a', 'b', 'c', 'd', 'c_prime', 'd_prime', 'T_new', 'rad_term',
+                's_a', 's_b', 's_c', 's_d', 's_c_prime', 's_d_prime',
+                'sensitivity', 'rad_deriv'
+            )
+            self._fin_scratch = {
+                name: np.zeros(shape, dtype=float)
+                for name in names
+            }
+        return self._fin_scratch
+
+    @staticmethod
+    def _solve_tridiagonal_inplace(a, b, c, d, c_prime, d_prime, solution):
+        Nh = b.shape[1]
+        denom_floor = 1.0e-12
+
+        b0 = b[:, 0]
+        b0_safe = np.copysign(
+            np.maximum(np.abs(b0), denom_floor),
+            np.where(b0 == 0.0, 1.0, b0)
+        )
+        c_prime[:, 0] = c[:, 0] / b0_safe
+        d_prime[:, 0] = d[:, 0] / b0_safe
+
+        for j in range(1, Nh):
+            denom = b[:, j] - a[:, j] * c_prime[:, j - 1]
+            denom_safe = np.copysign(
+                np.maximum(np.abs(denom), denom_floor),
+                np.where(denom == 0.0, 1.0, denom)
+            )
+            c_prime[:, j] = c[:, j] / denom_safe
+            d_prime[:, j] = (d[:, j] - a[:, j] * d_prime[:, j - 1]) / denom_safe
+
+        solution[:, -1] = d_prime[:, -1]
+        for j in range(Nh - 2, -1, -1):
+            solution[:, j] = d_prime[:, j] - c_prime[:, j] * solution[:, j + 1]
+
+    def _compute_fin_tangent_conductance(
+            self,
+            T_root: np.ndarray,
+            T_fin: np.ndarray,
+            active_mask: np.ndarray) -> np.ndarray:
+        T_root = np.asarray(T_root, dtype=float)
+        T_fin = np.asarray(T_fin, dtype=float)
+        active = np.asarray(active_mask, dtype=bool).copy()
+        active &= np.isfinite(T_root)
+        active &= np.all(np.isfinite(T_fin), axis=1)
+
+        lambda_raw = np.full_like(T_root, np.nan, dtype=float)
+        if not np.any(active):
+            return lambda_raw
+
+        Nh = self.n_fin_height
+        dx = self.fin_height / Nh
+        Ac = self.fin_width_array * self.fin_thickness
+        P = 2.0 * self.fin_width_array
+
+        T_root_active = T_root[active]
+        T_active = T_fin[active]
+        Ac_active = Ac[active]
+        P_active = P[active]
+        k_fin_array = np.full_like(T_root_active, 348.9)
+
+        G = k_fin_array * Ac_active / dx
+        G_base = 2.0 * G
+        Na = len(T_root_active)
+
+        scratch = self._get_fin_scratch(Na, Nh)
+        a = scratch['s_a']
+        b = scratch['s_b']
+        c = scratch['s_c']
+        d = scratch['s_d']
+        c_prime = scratch['s_c_prime']
+        d_prime = scratch['s_d_prime']
+        sensitivity = scratch['sensitivity']
+        rad_deriv = scratch['rad_deriv']
+
+        a.fill(0.0)
+        b.fill(0.0)
+        c.fill(0.0)
+        d.fill(0.0)
+        rad_deriv[:, :] = (
+            4.0
+            * self.effective_emissivity
+            * self.sigma
+            * P_active[:, np.newaxis]
+            * dx
+            * (T_active ** 3)
+        )
+
+        b[:, 0] = G_base + G + rad_deriv[:, 0]
+        c[:, 0] = -G
+        d[:, 0] = G_base
+
+        if Nh > 1:
+            a[:, 1:-1] = -G[:, np.newaxis]
+            b[:, 1:-1] = 2.0 * G[:, np.newaxis] + rad_deriv[:, 1:-1]
+            c[:, 1:-1] = -G[:, np.newaxis]
+
+            a[:, -1] = -G
+            b[:, -1] = G + rad_deriv[:, -1]
+
+        self._solve_tridiagonal_inplace(a, b, c, d, c_prime, d_prime, sensitivity)
+        lambda_raw[active] = G_base * (1.0 - sensitivity[:, 0])
+        return lambda_raw
+
     def _solve_fin_quasi_steady(self, T_root: np.ndarray, q_fin_abs_density: np.ndarray):
         """
         对每个冷凝段轴向切片求解降维后的一维翅片问题。
@@ -337,13 +462,7 @@ class HPwithFin(BaseComponent):
             * self.fin_external_area_scale
         )
 
-        active = (
-            np.isfinite(T_root)
-            & np.isfinite(q_fin_abs_density)
-            & (self.fin_height > 0.0)
-            & (Ac > 0.0)
-            & (P > 0.0)
-        )
+        active = self._get_fin_active_mask(T_root, q_fin_abs_density)
 
         if not np.any(active):
             Q_fin_net_from_root_array = Q_fin_radiation_array - Q_fin_absorption_array
@@ -373,17 +492,26 @@ class HPwithFin(BaseComponent):
         max_iter = 50
         tol = 1e-4
         Na = len(T_root_active)
+        scratch = self._get_fin_scratch(Na, Nh)
+        a = scratch['a']
+        b = scratch['b']
+        c = scratch['c']
+        d = scratch['d']
+        c_prime = scratch['c_prime']
+        d_prime = scratch['d_prime']
+        T_new = scratch['T_new']
+        rad_term = scratch['rad_term']
 
         for _ in range(max_iter):
-            h_rad = self.effective_emissivity * self.sigma * (
+            rad_term[:, :] = self.effective_emissivity * self.sigma * (
                 T_active ** 2 + self.T_space ** 2
             ) * (T_active + self.T_space)
-            rad_term = h_rad * P_active[:, np.newaxis] * dx
+            rad_term *= P_active[:, np.newaxis] * dx
 
-            a = np.zeros((Na, Nh))
-            b = np.zeros((Na, Nh))
-            c = np.zeros((Na, Nh))
-            d = np.zeros((Na, Nh))
+            a.fill(0.0)
+            b.fill(0.0)
+            c.fill(0.0)
+            d.fill(0.0)
 
             b[:, 0] = G_base + G + rad_term[:, 0]
             c[:, 0] = -G
@@ -399,37 +527,11 @@ class HPwithFin(BaseComponent):
                 b[:, -1] = G + rad_term[:, -1]
                 d[:, -1] = rad_term[:, -1] * self.T_space + q_fin_abs_segment[:, -1]
 
-            c_prime = np.zeros((Na, Nh))
-            d_prime = np.zeros((Na, Nh))
-
-            denom_floor = 1.0e-12
-            b0 = b[:, 0]
-            b0_safe = np.copysign(
-                np.maximum(np.abs(b0), denom_floor),
-                np.where(b0 == 0.0, 1.0, b0)
-            )
-
-            c_prime[:, 0] = c[:, 0] / b0_safe
-            d_prime[:, 0] = d[:, 0] / b0_safe
-
-            for j in range(1, Nh):
-                denom = b[:, j] - a[:, j] * c_prime[:, j - 1]
-                denom_safe = np.copysign(
-                    np.maximum(np.abs(denom), denom_floor),
-                    np.where(denom == 0.0, 1.0, denom)
-                )
-                c_prime[:, j] = c[:, j] / denom_safe
-                d_prime[:, j] = (d[:, j] - a[:, j] * d_prime[:, j - 1]) / denom_safe
-
-            T_new = np.zeros((Na, Nh))
-            T_new[:, -1] = d_prime[:, -1]
-            for j in range(Nh - 2, -1, -1):
-                T_new[:, j] = d_prime[:, j] - c_prime[:, j] * T_new[:, j + 1]
-
+            self._solve_tridiagonal_inplace(a, b, c, d, c_prime, d_prime, T_new)
             if np.max(np.abs(T_new - T_active)) < tol:
-                T_active = T_new
+                T_active[:, :] = T_new
                 break
-            T_active = T_new
+            T_active[:, :] = T_new
 
         T[active] = T_active
         Q_fin_radiation_array[active] = np.sum(
@@ -479,14 +581,8 @@ class HPwithFin(BaseComponent):
             Q_fin_net_from_root_array,      # 从热管根部抽取的净热量 [W]
         ) = self._solve_fin_quasi_steady(T_surf, q_fin_abs_density)
 
-        dT = np.maximum(0.1, 1.0e-4 * np.maximum(T_surf, 1.0))
-        _, _, _, Q_fin_net_plus = self._solve_fin_quasi_steady(
-            T_surf + dT,
-            q_fin_abs_density
-        )
-
-        with np.errstate(divide='ignore', invalid='ignore'):
-            lambda_raw = (Q_fin_net_plus - Q_fin_net_from_root_array) / dT
+        active = self._get_fin_active_mask(T_surf, q_fin_abs_density)
+        lambda_raw = self._compute_fin_tangent_conductance(T_surf, T, active)
 
         lambda_min = 1.0e-12
         lambda_max = 1.0e12

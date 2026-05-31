@@ -22,6 +22,8 @@ class SystemManager:
     def __init__(self, fluid_network: HydraulicNetwork, start_time: float = 0.0):
         self.global_time = float(start_time)
         self.fluid_solver = fluid_network
+        if hasattr(self.fluid_solver, 'set_time'):
+            self.fluid_solver.set_time(self.global_time)
 
         self.solid_components: Dict[str, BaseHeatConduction] = {}
         self.couplers: List[Union[FluidSolidCouple, SolidSolidCouple1D, SolidSolidCouple2D]] = []
@@ -304,6 +306,9 @@ class SystemManager:
                     self._apply_pending_nuclear_power(fallback_power)
                 else:
                     self._apply_pending_nuclear_power(fallback_power)
+
+                if hasattr(self.fluid_solver, 'set_time'):
+                    self.fluid_solver.set_time(coupling_time)
 
                 fluid_converged = self.fluid_solver.step_Picard(
                     dt,

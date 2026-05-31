@@ -330,6 +330,127 @@ class IncompressibleFluidVolume(FluidVolume):
 
 
 # ==============================================================================
+# 1.2. 用于封闭不可压缩网络的被动压力参考控制体
+# ==============================================================================
+
+class PressurizerVolume(IncompressibleFluidVolume):
+    """
+    封闭液压网络的被动绝对压力参考点。
+
+    该控制体在压力求解后锚定绝对压力水平，
+    但它不是固定压力边界，也不作为质量源/汇。
+    """
+
+    is_pressure_reference = True
+    is_pressure_boundary = False
+
+    def __init__(self,
+                 name: str,
+                 volume: float,
+                 length: float,
+                 flow_area: float,
+                 hydraulic_diam: float,
+                 initial_P: float = 1.013e5,
+                 initial_T: float = 600.0,
+                 material: Optional['FluidMaterial'] = None):
+        super().__init__(name, volume, length, flow_area, hydraulic_diam,
+                         initial_P, initial_T, material)
+        self.is_pressure_reference = True
+        self.is_pressure_boundary = False
+        self.target_P = float(initial_P)
+        self._fixed_target_P = float(initial_P)
+        self.current_time = 0.0
+        self._pressure_table_times = None
+        self._pressure_table_values = None
+
+    def set_pressure(self, pressure: float):
+        """设置固定的绝对压力目标值 [Pa]。"""
+        self._fixed_target_P = float(pressure)
+        if self._pressure_table_times is None:
+            self.target_P = self._fixed_target_P
+
+    def set_time(self, time: float):
+        """更新本地时间以及当前的目标压力。"""
+        self.current_time = float(time)
+        self.target_P = self.compute_target_pressure(self.current_time)
+
+    def set_pressure_table(self, times, pressures):
+        """
+        设置时间-绝对压力表格。
+
+        时间单位为秒，压力单位为Pa。超出表格范围的值将通过np.interp钳位到最近的端点。
+        """
+        times_arr = np.asarray(times, dtype=float)
+        pressures_arr = np.asarray(pressures, dtype=float)
+
+        if times_arr.ndim != 1 or pressures_arr.ndim != 1:
+            raise ValueError("稳压器压力表的时间和压力必须为一维数组。")
+        if times_arr.size == 0:
+            raise ValueError("稳压器压力表不能为空。")
+        if times_arr.size != pressures_arr.size:
+            raise ValueError("稳压器压力表的时间和压力必须具有相同的长度。")
+        if not np.all(np.isfinite(times_arr)) or not np.all(np.isfinite(pressures_arr)):
+            raise ValueError("稳压器压力表的值必须为有限值。")
+        if np.any(np.diff(times_arr) <= 0.0):
+            raise ValueError("稳压器压力表的时间必须严格递增。")
+
+        self._pressure_table_times = times_arr.copy()
+        self._pressure_table_values = pressures_arr.copy()
+        self.target_P = self.compute_target_pressure(self.current_time)
+
+    def clear_pressure_table(self):
+        """Return to the fixed absolute pressure target."""
+        self._pressure_table_times = None
+        self._pressure_table_values = None
+        self.target_P = self._fixed_target_P
+
+    def compute_target_pressure(self, time: Optional[float] = None) -> float:
+        """Return the current absolute pressure target [Pa]."""
+        if self._pressure_table_times is None:
+            return self._fixed_target_P
+
+        t_eval = self.current_time if time is None else float(time)
+        return float(np.interp(t_eval, self._pressure_table_times, self._pressure_table_values))
+
+
+# ==============================================================================
+# 1.2. Fixed-pressure pump volume for incompressible pressure networks
+# ==============================================================================
+
+class FixedPressurePumpVolume(IncompressibleFluidVolume):
+    """
+    Incompressible control volume with a fixed pressure rise.
+
+    Positive delta_p raises pressure in the channel index direction
+    (upstream -> pump -> downstream). The pressure rise is only consumed by
+    algebraic incompressible pressure-distribution updates; the inherited
+    enthalpy equation is unchanged.
+    """
+
+    def __init__(self,
+                 name: str,
+                 volume: float,
+                 length: float,
+                 flow_area: float,
+                 hydraulic_diam: float,
+                 initial_P: float = 1.013e5,
+                 initial_T: float = 600.0,
+                 material: Optional['FluidMaterial'] = None,
+                 delta_p: float = 0.0):
+        super().__init__(name, volume, length, flow_area, hydraulic_diam,
+                         initial_P, initial_T, material)
+        self.delta_p = float(delta_p)
+
+    def set_delta_p(self, delta_p: float):
+        """Update the fixed pressure rise [Pa]."""
+        self.delta_p = float(delta_p)
+
+    def get_pressure_rise(self) -> float:
+        """Return the fixed pressure rise [Pa]."""
+        return self.delta_p
+
+
+# ==============================================================================
 # 2. 基础物理单元：流动连接 (FlowJunction)
 # ==============================================================================
 
@@ -523,17 +644,23 @@ class FlowJunction:
         v_abs = abs(velocity)
 
         # 1. 基础局部阻力 (来自固定的几何突变、弯头等)
+        has_dynamic_loss = (
+            self.dynamic_loss_params
+            and self.dynamic_loss_params.get('model', 'none') != 'none'
+        )
         total_k_loss = self.k_loss
+        if has_dynamic_loss and total_k_loss < 0.0:
+            total_k_loss = 0.0
 
         # 2. 如果配置了动态阻力模型，则计算并叠加动态阻力
-        if self.dynamic_loss_params and self.dynamic_loss_params.get('model', 'none') != 'none':
+        if has_dynamic_loss:
             total_k_loss += self._compute_dynamic_k_loss()
 
         # 3. 计算最终压降
         dP_form = total_k_loss * 0.5 * density * (v_abs ** 2)
         return dP_form
 
-    def compute_pump_head(self) -> float:
+    def compute_pump_head(self, time: Optional[float] = None) -> float:
         """默认没有泵，返回 0.0"""
         # TODO: 后续添加泵模型
         return 0.0
@@ -587,6 +714,85 @@ class FlowJunction:
 # ==============================================================================
 # 2.1 基础物理单元：魔法接口 (MacroFlowJunction)
 # ==============================================================================
+
+class PumpJunction(FlowJunction):
+    """
+    Main pump junction that adds a pressure rise to the hydraulic momentum source.
+
+    Positive delta_p drives flow in the from_vol -> to_vol direction. The pressure
+    rise affects only the hydraulic momentum equation; energy transport remains
+    the inherited FlowJunction behavior.
+    """
+
+    is_pump_junction = True
+
+    def __init__(self,
+                 name: str,
+                 from_vol: 'FluidVolume',
+                 to_vol: 'FluidVolume',
+                 flow_area: Optional[float] = None,
+                 k_loss: float = 0.0,
+                 custom_length: Optional[float] = None,
+                 dynamic_loss_params: Optional[dict] = None,
+                 delta_p: float = 0.0):
+        super().__init__(
+            name=name,
+            from_vol=from_vol,
+            to_vol=to_vol,
+            flow_area=flow_area,
+            k_loss=k_loss,
+            custom_length=custom_length,
+            dynamic_loss_params=dynamic_loss_params,
+        )
+        self.delta_p = float(delta_p)
+        self.current_time = 0.0
+        self._pressure_table_times = None
+        self._pressure_table_values = None
+
+    def set_delta_p(self, delta_p: float):
+        """设置固定的泵压升 [Pa]"""
+        self.delta_p = float(delta_p)
+
+    def set_time(self, time: float):
+        """更新用于压力表插值的本地时间"""
+        self.current_time = float(time)
+
+    def set_pressure_table(self, times, pressures):
+        """
+        设置手动时间-压升表格。
+
+        时间单位为秒，压力单位为Pa。超出表格范围的值将通过np.interp钳位到最近的端点。
+        """
+        times_arr = np.asarray(times, dtype=float)
+        pressures_arr = np.asarray(pressures, dtype=float)
+
+        if times_arr.ndim != 1 or pressures_arr.ndim != 1:
+            raise ValueError("泵压力表时间和压力必须为一维数组。")
+        if times_arr.size == 0:
+            raise ValueError("泵压力表不能为空。")
+        if times_arr.size != pressures_arr.size:
+            raise ValueError("泵压力表时间和压力必须具有相同的长度。")
+        if not np.all(np.isfinite(times_arr)) or not np.all(np.isfinite(pressures_arr)):
+            raise ValueError("泵压力表值必须为有限值。")
+        if np.any(np.diff(times_arr) <= 0.0):
+            raise ValueError("泵压力表时间必须严格递增。")
+
+        self._pressure_table_times = times_arr.copy()
+        self._pressure_table_values = pressures_arr.copy()
+
+    def clear_pressure_table(self):
+        """清除压力表，恢复为固定的泵压升。"""
+        self._pressure_table_times = None
+        self._pressure_table_values = None
+
+    def compute_pump_head(self, time: Optional[float] = None) -> float:
+        """返回当前的泵压升 [Pa]。"""
+        if self._pressure_table_times is None:
+            return self.delta_p
+
+        t_eval = self.current_time if time is None else float(time)
+        return float(np.interp(t_eval, self._pressure_table_times, self._pressure_table_values))
+
 
 class MacroFlowJunction(FlowJunction):
     """
@@ -959,7 +1165,12 @@ class IncompressibleFluidChannel(FluidChannel):
 
             # P_{i+1} = P_i - (Sign * (Fric + Form) + Grav)
             # 注意: Gravity 始终向下，如果 junc 定义为向上(i->i+1)，则 Gravity 始终导致压降
-            next_P = current_P - (sign_flow * (dp_fric + dp_form) + dp_grav)
+            pressure_rise = 0.0
+            next_vol = self.volumes[i + 1]
+            if hasattr(next_vol, "get_pressure_rise"):
+                pressure_rise = float(next_vol.get_pressure_rise())
+
+            next_P = current_P - (sign_flow * (dp_fric + dp_form) + dp_grav) + pressure_rise
 
             self.volumes[i + 1].update_pressure_algebraic(next_P)
             current_P = next_P
@@ -998,7 +1209,11 @@ class IncompressibleFluidChannel(FluidChannel):
             sign_flow = np.sign(junc.W) if abs(junc.W) > 1e-10 else 1.0
 
             # 反向公式: P_i = P_{i+1} + (Sign * (Fric + Form) + Grav)
-            prev_P = current_P + (sign_flow * (dp_fric + dp_form) + dp_grav)
+            pressure_rise = 0.0
+            if hasattr(vol_curr, "get_pressure_rise"):
+                pressure_rise = float(vol_curr.get_pressure_rise())
+
+            prev_P = current_P + (sign_flow * (dp_fric + dp_form) + dp_grav) - pressure_rise
 
             vol_prev.update_pressure_algebraic(prev_P)
             current_P = prev_P

@@ -3,6 +3,7 @@ from typing import Optional
 
 from Solvers.HeatConduction.Mesh import Mesh2D
 from Components.basicComponents.Electord import Emitter, Collector
+from Components.tec_electric import joule_power_from_electric_field
 from Solvers.Couplers import TECCouple2D
 from Materials.Base import SolidMaterial
 
@@ -88,7 +89,7 @@ class TECPair:
         # --- 6. 计算中间变量 ---
         # 6.1. 上一时刻电极表面热流密度
         self._q_joule_e_old = np.zeros(self.n_rad_e * self.n_node)
-        self._q_joule_c_old = np.zeros(self.n_rad_e * self.n_node)
+        self._q_joule_c_old = np.zeros(self.n_rad_c * self.n_node)
 
     def get_gap_surface_temperatures(self):
         """
@@ -104,22 +105,38 @@ class TECPair:
         [通信接口 <- C++] 根据底层电学结果，分配焦耳热体积源项
         利用公式: Q_vol = (dU)^2 / (rho * L^2)
         """
-        safe_rho_e = np.maximum(rho_emit, 1e-12)
-        safe_rho_c = np.maximum(rho_coll, 1e-12)
+        self.set_joule_heating_fields(
+            E_emit=np.asarray(dU_emit, dtype=float) / self.L_node,
+            rho_emit=rho_emit,
+            E_coll=np.asarray(dU_coll, dtype=float) / self.L_node,
+            rho_coll=rho_coll,
+            alpha=alpha,
+        )
 
-        # 1. 计算 1D 轴向体积发热率 [W/m^3]
-        q_vol_e_1d = (dU_emit ** 2) / (safe_rho_e * self.L_node ** 2)
-        q_vol_c_1d = (dU_coll ** 2) / (safe_rho_c * self.L_node ** 2)
+    def set_joule_heating_fields(self, E_emit: np.ndarray, rho_emit: np.ndarray,
+                                  E_coll: np.ndarray, rho_coll: np.ndarray,
+                                  alpha: float = 1.0):
+        """
+        Apply axial electric fields [V/m] as per-cell Joule heat sources.
+        """
+        q_watts_e_flat, _ = joule_power_from_electric_field(
+            E_emit,
+            rho_emit,
+            self.emitter.vols_flat,
+            self.emitter.mesh.shape_nodes,
+        )
+        q_watts_c_flat, _ = joule_power_from_electric_field(
+            E_coll,
+            rho_coll,
+            self.collector.vols_flat,
+            self.collector.mesh.shape_nodes,
+        )
 
-        # 2. 将 1D 数组广播为 2D 矩阵 (x:径向, y:轴向)
-        q_vol_e_2d = np.ones((self.n_rad_e, 1)) * q_vol_e_1d[np.newaxis, :]
-        q_vol_c_2d = np.ones((self.n_rad_c, 1)) * q_vol_c_1d[np.newaxis, :]
+        if self._q_joule_e_old.shape != q_watts_e_flat.shape:
+            self._q_joule_e_old = np.zeros_like(q_watts_e_flat)
+        if self._q_joule_c_old.shape != q_watts_c_flat.shape:
+            self._q_joule_c_old = np.zeros_like(q_watts_c_flat)
 
-        # 3. 展平并乘以体积得到总功率 [W]，严格适配 Electord 的要求
-        q_watts_e_flat = q_vol_e_2d.flatten() * self.emitter.vols_flat
-        q_watts_c_flat = q_vol_c_2d.flatten() * self.collector.vols_flat
-
-        # 增加亚松弛保护
         q_watts_e_new = alpha * q_watts_e_flat + (1.0 - alpha) * self._q_joule_e_old
         q_watts_c_new = alpha * q_watts_c_flat + (1.0 - alpha) * self._q_joule_c_old
 
@@ -139,6 +156,7 @@ class TECPair:
 
         # 1. 获取网格面的面积 (Emitter 的外表面积)
         A_emit_surf = self.emitter.boundaries['right'].area
+        A_coll_surf = self.collector.boundaries['left'].area
 
         # 2. 亚松弛更新面热流密度 [W/m^2]
         q_e_new = alpha * q_e_flux + (1.0 - alpha) * self._q_e_old
@@ -155,6 +173,15 @@ class TECPair:
         Q_c_watts = q_c_new * A_emit_surf
 
         # 4. 严格调用 TECCouple2D 提供的专属设值接口
+        self.plasma_area_diagnostics = {
+            "basis": "ThermoCalc current density uses emitter area; collector electron power is converted on the same basis.",
+            "sideAreaE_m2": np.asarray(A_emit_surf, dtype=float).copy(),
+            "sideAreaC_m2": np.asarray(A_coll_surf, dtype=float).copy(),
+            "emitter_power_emitter_area_w": np.asarray(Q_e_watts, dtype=float).copy(),
+            "collector_power_emitter_area_w": np.asarray(Q_c_watts, dtype=float).copy(),
+            "collector_power_collector_area_w": np.asarray(q_c_new * A_coll_surf, dtype=float).copy(),
+            "collector_area_power_delta_w": np.asarray(q_c_new * (A_coll_surf - A_emit_surf), dtype=float).copy(),
+        }
         self.tec_gap.set_tec_sources(Q_emitter=Q_e_watts, Q_collector=Q_c_watts)
 
     def sync_and_step(self, dt: float):

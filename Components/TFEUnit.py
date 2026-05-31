@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Literal, List
 import math
 
+from Components.tec_electric import joule_power_from_electric_field
+
 
 @dataclass
 class TFEGeometry:
@@ -607,41 +609,66 @@ class TFEUnit(BaseComponent):
         :param rho_emit, rho_coll: 发射极/接收极的电阻率 [Ohm*m] (长度 n_axial)
         :param alpha: 亚松弛因子，提高松耦合电热迭代的稳定性
         """
+        node_lengths = np.diff(
+            np.asarray(getattr(self, 'common_y_faces', self.solids['emitter'].mesh.y_faces), dtype=float)
+        )
+        self.update_electric_field_sources(
+            E_emit=np.asarray(dU_emit, dtype=float) / node_lengths,
+            rho_emit=rho_emit,
+            E_coll=np.asarray(dU_coll, dtype=float) / node_lengths,
+            rho_coll=rho_coll,
+            alpha=alpha,
+        )
+
+    def update_electric_field_sources(self,
+                                      E_emit: np.ndarray, rho_emit: np.ndarray,
+                                      E_coll: np.ndarray, rho_coll: np.ndarray,
+                                      alpha: float = 1.0):
+        """
+        Apply axial electric fields [V/m] as Joule sources.
+
+        The field must already be computed on the axial node centers. This keeps
+        non-uniform-grid differencing outside the source mapping step.
+        """
         emitter = self.solids['emitter']
         collector = self.solids['collector']
 
-        # 计算单个轴向网格的高度 L_node
-        L_node = self.geom.height / self.mesh.n_axial
+        E_emit = np.asarray(E_emit, dtype=float)
+        E_coll = np.asarray(E_coll, dtype=float)
+        rho_emit = np.asarray(rho_emit, dtype=float)
+        rho_coll = np.asarray(rho_coll, dtype=float)
 
-        # 1. 缓存外部传入的电学宏观参数
-        self.electric_data.emitter_voltage[:] = dU_emit
+        self.electric_data.emitter_voltage[:] = E_emit
         self.electric_data.emitter_resistivity[:] = rho_emit
-        self.electric_data.collector_voltage[:] = dU_coll
+        self.electric_data.collector_voltage[:] = E_coll
         self.electric_data.collector_resistivity[:] = rho_coll
 
-        # 2. 计算 1D 轴向体积发热率 [W/m^3] (Q = U^2 / (rho * L^2))
-        safe_rho_e = np.maximum(rho_emit, 1e-12)  # 防止除零崩溃
-        safe_rho_c = np.maximum(rho_coll, 1e-12)
+        q_watts_e_flat, _ = joule_power_from_electric_field(
+            E_emit,
+            rho_emit,
+            emitter.vols_flat,
+            emitter.mesh.shape_nodes,
+        )
+        q_watts_c_flat, _ = joule_power_from_electric_field(
+            E_coll,
+            rho_coll,
+            collector.vols_flat,
+            collector.mesh.shape_nodes,
+        )
 
-        q_vol_e_1d = (dU_emit ** 2) / (safe_rho_e * L_node ** 2)
-        q_vol_c_1d = (dU_coll ** 2) / (safe_rho_c * L_node ** 2)
+        old_e = self.electric_data.emitter_joule_heat
+        old_c = self.electric_data.collector_joule_heat
+        if old_e.shape != q_watts_e_flat.shape:
+            old_e = np.zeros_like(q_watts_e_flat)
+        if old_c.shape != q_watts_c_flat.shape:
+            old_c = np.zeros_like(q_watts_c_flat)
 
-        # 3. 广播到 2D 矩阵并计算网格瓦特数 [W]
-        q_vol_e_2d = np.ones((emitter.nx, 1)) * q_vol_e_1d[np.newaxis, :]
-        q_vol_c_2d = np.ones((collector.nx, 1)) * q_vol_c_1d[np.newaxis, :]
+        q_watts_e_new = alpha * q_watts_e_flat + (1.0 - alpha) * old_e
+        q_watts_c_new = alpha * q_watts_c_flat + (1.0 - alpha) * old_c
 
-        q_watts_e_flat = q_vol_e_2d.flatten() * emitter.vols_flat
-        q_watts_c_flat = q_vol_c_2d.flatten() * collector.vols_flat
+        self.electric_data.emitter_joule_heat = q_watts_e_new.copy()
+        self.electric_data.collector_joule_heat = q_watts_c_new.copy()
 
-        # 4. 结合历史缓存进行亚松弛更新 (保护固体温度场免受电场突变的冲击)
-        q_watts_e_new = alpha * q_watts_e_flat + (1.0 - alpha) * self.electric_data.emitter_joule_heat
-        q_watts_c_new = alpha * q_watts_c_flat + (1.0 - alpha) * self.electric_data.collector_joule_heat
-
-        # 刷新内部热源缓存
-        self.electric_data.emitter_joule_heat[:] = q_watts_e_new
-        self.electric_data.collector_joule_heat[:] = q_watts_c_new
-
-        # 5. 调用电极自带的接口安全写入底层导热方程
         emitter.set_joule_heating(q_watts_e_new)
         collector.set_joule_heating(q_watts_c_new)
 
@@ -664,6 +691,7 @@ class TFEUnit(BaseComponent):
         # 2. 获取网格面的面积
         # (因为外部电路计算面热流 q 往往是基于 Emitter 外表面积的)
         A_emit_surf = self.solids['emitter'].boundaries['right'].area
+        A_coll_surf = self.solids['collector'].boundaries['left'].area
 
         # 3. 转换为绝对传输功率 [W]
         # (保证能量守恒：W/m^2 * m^2 = Watts)
@@ -671,6 +699,15 @@ class TFEUnit(BaseComponent):
         Q_c_watts = q_c_new * A_emit_surf
 
         # 4. 严格调用 TECCouple2D 提供的专属设值接口
+        self.plasma_area_diagnostics = {
+            "basis": "ThermoCalc current density uses emitter area; collector electron power is converted on the same basis.",
+            "sideAreaE_m2": np.asarray(A_emit_surf, dtype=float).copy(),
+            "sideAreaC_m2": np.asarray(A_coll_surf, dtype=float).copy(),
+            "emitter_power_emitter_area_w": np.asarray(Q_e_watts, dtype=float).copy(),
+            "collector_power_emitter_area_w": np.asarray(Q_c_watts, dtype=float).copy(),
+            "collector_power_collector_area_w": np.asarray(q_c_new * A_coll_surf, dtype=float).copy(),
+            "collector_area_power_delta_w": np.asarray(q_c_new * (A_coll_surf - A_emit_surf), dtype=float).copy(),
+        }
         self.couplers['tec_couple'].set_tec_sources(Q_emitter=Q_e_watts, Q_collector=Q_c_watts)
 
     # ==========================================
@@ -763,7 +800,12 @@ class TFEUnit(BaseComponent):
         self.neutronic_data._total_power_old = state['neutronic_total_power_old']
 
         for attr, value in state['electric'].items():
-            getattr(self.electric_data, attr)[:] = value
+            target = getattr(self.electric_data, attr)
+            value = np.asarray(value, dtype=float)
+            if target.shape == value.shape:
+                target[:] = value
+            else:
+                setattr(self.electric_data, attr, value.copy())
         for attr, value in state['plasma'].items():
             getattr(self.plasma_data, attr)[:] = value
 
@@ -861,7 +903,12 @@ class TFEUnit(BaseComponent):
         for attr in electric_attrs:
             key = f"{prefix}/electric/{attr}"
             if key in data:
-                getattr(self.electric_data, attr)[:] = data[key]
+                target = getattr(self.electric_data, attr)
+                value = np.asarray(data[key], dtype=float)
+                if target.shape == value.shape:
+                    target[:] = value
+                else:
+                    setattr(self.electric_data, attr, value.copy())
 
         # --- 4. 恢复等离子体数据 ---
         plasma_attrs = [

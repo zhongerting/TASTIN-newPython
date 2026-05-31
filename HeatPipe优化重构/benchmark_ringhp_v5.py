@@ -92,9 +92,9 @@ def run_benchmark():
     import CoolantLoop.test_coolant_loop_v5 as ring_case
 
     dt = env_float("BENCH_DT", 0.05)
-    n_steps = env_int("BENCH_N_STEPS", 20)
+    n_steps = env_int("BENCH_N_STEPS", 36000)
     inner_iter = env_int("BENCH_INNER_ITER", 1)
-    print_every = env_int("BENCH_PRINT_EVERY", 5)
+    print_every = env_int("BENCH_PRINT_EVERY", 50)
     top_n = env_int("BENCH_TOP", 12)
     case_name = env_str("BENCH_CASE_NAME", "ringhp_v5_baseline")
 
@@ -115,7 +115,7 @@ def run_benchmark():
         t_end=total_time,
         min_dt=dt,
         max_dt=dt,
-        safety_factor=1.0,
+        safety_factor=2.0,
         inner_iter=inner_iter,
         print_every=print_every,
         csv_path=csv_path,

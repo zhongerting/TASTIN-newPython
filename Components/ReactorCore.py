@@ -6,6 +6,7 @@ import numpy as np
 
 from Components.BaseComponent import BaseComponent
 from Components.TFEUnit import TFEUnit
+from Components.tec_electric import electric_field_from_node_potential
 from Solvers.Neutronics.PointReactor import PointReactor
 from Solvers.Couplers import GapCouple2D, SolidSolidCouple2D
 from Solvers.HeatConduction.HeatConduction import HeatConduction2D
@@ -111,6 +112,7 @@ class ReactorCore(BaseComponent):
                  name: str,
                  tfe_dict: Dict[str, TFEUnit],
                  tfe_multipliers: Dict[str, int],
+                 tec_multipliers: Optional[Dict[str, int]] = None,
                  tfe_power_factors: Optional[Dict[str, float]] = None,
                  mod_meshes: Optional[List[Mesh2D]] = None,
                  mod_material: Optional[Any] = None,
@@ -135,6 +137,7 @@ class ReactorCore(BaseComponent):
 
         self.tfes = tfe_dict
         self.tfe_multipliers = tfe_multipliers
+        self.tec_multipliers = dict(tec_multipliers) if tec_multipliers is not None else dict(tfe_multipliers)
         self.alpha_tec = alpha_tec
         self.enable_tec_coupled = enable_tec_coupled
         self.ring_mapping = ring_mapping
@@ -200,6 +203,24 @@ class ReactorCore(BaseComponent):
         for key in self.tfes.keys():
             if key not in self.tfe_multipliers:
                 raise ValueError(f"TFE '{key}' 必须在 tfe_multipliers 中给出复制数量。")
+            if key not in self.tec_multipliers:
+                raise ValueError(f"TFE '{key}' 必须在 tec_multipliers 中给出复制数量。")
+
+            tfe_multiplier = int(self.tfe_multipliers[key])
+            tec_multiplier = int(self.tec_multipliers[key])
+            if tfe_multiplier <= 0:
+                raise ValueError(f"TFE '{key}' 的 tfe_multipliers 必须为正整数。")
+            if tec_multiplier < 0:
+                raise ValueError(f"TFE '{key}' 的 tec_multipliers 不能为负数。")
+            if tec_multiplier > tfe_multiplier:
+                raise ValueError(
+                    f"TFE '{key}' 的 tec_multipliers ({tec_multiplier}) "
+                    f"不能大于热工/水力 tfe_multipliers ({tfe_multiplier})。"
+                )
+
+        for key in self.tec_multipliers.keys():
+            if key not in self.tfes:
+                raise ValueError(f"tec_multipliers 中存在未知的 TFE 键: '{key}'。")
 
     def _initialize_power_factors(self, tfe_power_factors: Optional[Dict[str, float]]):
         """
@@ -560,7 +581,7 @@ class ReactorCore(BaseComponent):
 
     def _build_thermo_calc(self):
         """构建 TEC 电路的虚拟分身映射。"""
-        self.total_virtual_elements = sum(self.tfe_multipliers.values())
+        self.total_virtual_elements = sum(self.tec_multipliers.values())
         self.n_nodes = self._get_reference_tfe().mesh.n_axial
 
         if self.total_virtual_elements <= 0 or not self.enable_tec_coupled:
@@ -572,6 +593,7 @@ class ReactorCore(BaseComponent):
                 n_elements=self.total_virtual_elements,
                 n_nodes=self.n_nodes
             )
+            self._configure_thermo_calc_geometry()
             logger.info(
                 f"ReactorCore '{self.name}': Built ThermoCalc circuit with "
                 f"{len(self.tfes)} physical TFE(s) representing "
@@ -584,6 +606,65 @@ class ReactorCore(BaseComponent):
             )
             self.thermo_calc = None
             self.enable_tec_coupled = False
+
+    def _configure_thermo_calc_geometry(self):
+        """
+        保持 ThermoCalc 轴向长度和侧面积与 TFE 热网格一致。
+
+        TEC 求解器接受逐节点的轴向长度和逐节点的侧面积，
+        因此这两个数组都从 TFE 热网格复制。这使得反射层节点
+        和有源区节点各自使用对应的物理段面积，而不是采用
+        单一的有源区标量近似。
+        """
+        if self.thermo_calc is None:
+            return
+
+        dl_e = np.zeros((self.total_virtual_elements, self.n_nodes), dtype=float)
+        dl_c = np.zeros((self.total_virtual_elements, self.n_nodes), dtype=float)
+        side_area_e = np.zeros((self.total_virtual_elements, self.n_nodes), dtype=float)
+        side_area_c = np.zeros((self.total_virtual_elements, self.n_nodes), dtype=float)
+
+        idx = 0
+        for tfe_name, multiplier in self.tec_multipliers.items():
+            multiplier = int(multiplier)
+            if multiplier <= 0:
+                continue
+            tfe = self.tfes[tfe_name]
+            if hasattr(tfe, 'common_y_faces'):
+                node_lengths = np.diff(np.asarray(tfe.common_y_faces, dtype=float))
+            else:
+                node_lengths = np.diff(np.asarray(tfe.solids['emitter'].mesh.y_faces, dtype=float))
+            if node_lengths.shape != (self.n_nodes,):
+                raise ValueError(
+                    f"TFE '{tfe_name}' axial node length shape {node_lengths.shape} "
+                    f"does not match ThermoCalc n_nodes {(self.n_nodes,)}."
+                )
+
+            emitter_area = np.asarray(
+                tfe.solids['emitter'].boundaries['right'].area,
+                dtype=float
+            )
+            collector_area = np.asarray(
+                tfe.solids['collector'].boundaries['left'].area,
+                dtype=float
+            )
+            if emitter_area.shape != (self.n_nodes,) or collector_area.shape != (self.n_nodes,):
+                raise ValueError(
+                    f"TFE '{tfe_name}' electrode side area shape "
+                    f"{emitter_area.shape}/{collector_area.shape} does not match "
+                    f"ThermoCalc n_nodes {(self.n_nodes,)}."
+                )
+
+            side_area_e[idx: idx + multiplier, :] = emitter_area
+            side_area_c[idx: idx + multiplier, :] = collector_area
+            dl_e[idx: idx + multiplier, :] = node_lengths
+            dl_c[idx: idx + multiplier, :] = node_lengths
+            idx += multiplier
+
+        self.thermo_calc._input_data.dlE = dl_e
+        self.thermo_calc._input_data.dlC = dl_c
+        self.thermo_calc._input_data.sideAreaE = side_area_e
+        self.thermo_calc._input_data.sideAreaC = side_area_c
 
     def _get_reference_tfe(self) -> TFEUnit:
         """返回一个代表性 TFE，用于读取统一的轴向网格。"""
@@ -678,7 +759,7 @@ class ReactorCore(BaseComponent):
     def _build_global_moderator_rings(self,
                                       mod_meshes: Optional[List[Mesh2D]],
                                       mod_material: Optional[Any]):
-        """建立全局慢化剂环。"""
+        """建立全局慢化剂环，并与TFE虚拟慢化剂建立热耦合。"""
         if mod_meshes is None or mod_material is None or self.ring_mapping is None:
             return
 
@@ -1179,10 +1260,14 @@ class ReactorCore(BaseComponent):
                 self._last_thermo_update_time = current_time
 
             idx = 0
-            for tfe_name, mult in self.tfe_multipliers.items():
+            for tfe_name, thermal_mult in self.tfe_multipliers.items():
+                tec_mult = int(self.tec_multipliers.get(tfe_name, 0))
+                if tec_mult <= 0:
+                    continue
                 tfe = self.tfes[tfe_name]
-                res = self.thermo_calc.get_tec_results(idx)
-                idx += mult
+                tec_idx = idx
+                res = self.thermo_calc.get_tec_results(tec_idx)
+                idx += tec_mult
 
                 if res is None:
                     continue
@@ -1192,29 +1277,48 @@ class ReactorCore(BaseComponent):
                 rho_e = res.get('rhoE', np.ones(self.n_nodes) * 1e-6)
                 rho_c = res.get('rhoC', np.ones(self.n_nodes) * 1e-6)
 
-                dU_e = np.abs(np.gradient(UE_abs))
-                dU_c = np.abs(np.gradient(UC_abs))
+                if hasattr(tfe, 'common_y_faces'):
+                    E_e = electric_field_from_node_potential(
+                        UE_abs,
+                        y_faces=np.asarray(tfe.common_y_faces, dtype=float),
+                    )
+                    E_c = electric_field_from_node_potential(
+                        UC_abs,
+                        y_faces=np.asarray(tfe.common_y_faces, dtype=float),
+                    )
+                else:
+                    input_data = self.thermo_calc._input_data
+                    E_e = electric_field_from_node_potential(
+                        UE_abs,
+                        node_lengths=np.asarray(input_data.dlE[tec_idx], dtype=float),
+                    )
+                    E_c = electric_field_from_node_potential(
+                        UC_abs,
+                        node_lengths=np.asarray(input_data.dlC[tec_idx], dtype=float),
+                    )
 
                 J_density = res.get('J', np.zeros(self.n_nodes)) * 1e4
                 phiE = res.get('phiE', np.zeros(self.n_nodes))
-                phiC = res.get('phiC', np.zeros(self.n_nodes))
-                Vd = res.get('Vd', np.zeros(self.n_nodes))
                 TE = res.get('TE', np.zeros(self.n_nodes))
 
                 q_e_flux = -1.0 * J_density * (phiE + 2.0 * 8.617e-5 * TE)
-                q_c_flux = 1.0 * J_density * (phiC + 2.0 * 8.617e-5 * TE + Vd)
+                q_c_flux = 1.0 * J_density * (
+                    phiE + 2.0 * 8.617e-5 * TE - (UE_abs - UC_abs)
+                )
 
-                tfe.update_electric_fields(
-                    dU_emit=dU_e,
+                electric_alpha = self.alpha_tec * float(tec_mult) / float(thermal_mult)
+
+                tfe.update_electric_field_sources(
+                    E_emit=E_e,
                     rho_emit=rho_e,
-                    dU_coll=dU_c,
+                    E_coll=E_c,
                     rho_coll=rho_c,
-                    alpha=self.alpha_tec
+                    alpha=electric_alpha
                 )
                 tfe.update_plasma_flux(
                     q_e_flux=q_e_flux,
                     q_c_flux=q_c_flux,
-                    alpha=self.alpha_tec
+                    alpha=electric_alpha
                 )
 
         if self.has_global_moderator:
@@ -1267,7 +1371,10 @@ class ReactorCore(BaseComponent):
             T_co_matrix = np.zeros((self.total_virtual_elements, self.n_nodes))
 
             idx = 0
-            for tfe_name, mult in self.tfe_multipliers.items():
+            for tfe_name, mult in self.tec_multipliers.items():
+                mult = int(mult)
+                if mult <= 0:
+                    continue
                 tfe = self.tfes[tfe_name]
                 T_e = tfe.solids['emitter'].boundaries['right'].T_surface
                 T_c = tfe.solids['collector'].boundaries['left'].T_surface

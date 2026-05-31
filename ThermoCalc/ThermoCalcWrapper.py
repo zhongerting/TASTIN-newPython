@@ -63,10 +63,10 @@ class ThermoCalcModel:
         self._input_data.crossAreaC = np.full(self.N_elem, 1.0786e-4)
 
         sideE_val = 0.00092855424159680002 * 25.0 / float(self.n_node)
-        self._input_data.sideAreaE = np.full(self.N_elem, sideE_val)
+        self._input_data.sideAreaE = np.full((self.N_elem, self.n_node), sideE_val)
 
         sideC_val = 0.00097592945800480005 * 25.0 / float(self.n_node)
-        self._input_data.sideAreaC = np.full(self.N_elem, sideC_val)
+        self._input_data.sideAreaC = np.full((self.N_elem, self.n_node), sideC_val)
 
         self._input_data.U_init = np.full(self.N_elem, 1.6)
         self._input_data.d_gap = np.full(self.N_elem, 0.5)
