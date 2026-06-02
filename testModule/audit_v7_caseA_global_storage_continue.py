@@ -27,6 +27,18 @@ DEFAULT_RESTART = (
 )
 TOTAL_POWER_W = 115000.0
 SIGMA_W_M2_K4 = 5.670374419e-8
+SOLID_CHAIN_CATEGORIES = (
+    "pellet",
+    "emitter",
+    "collector",
+    "inner_clad",
+    "outer_clad",
+    "virtual_moderator",
+    "global_moderator",
+    "barrel",
+    "reflector",
+    "other",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,6 +75,31 @@ def solid_category(build: Dict[str, Any], solid_name: str) -> str:
         if solid_name.startswith(f"{ring_name}_"):
             return "tfe"
     return "global_outer"
+
+
+def solid_chain_category(build: Dict[str, Any], solid_name: str) -> str:
+    tfe_suffixes = {
+        "_Pellet": "pellet",
+        "_Emitter": "emitter",
+        "_Collector": "collector",
+        "_InnerClad": "inner_clad",
+        "_OuterClad": "outer_clad",
+        "_Moderator": "virtual_moderator",
+    }
+    for ring_name in build["ring_multipliers"]:
+        if not solid_name.startswith(f"{ring_name}_"):
+            continue
+        for suffix, category in tfe_suffixes.items():
+            if solid_name.endswith(suffix):
+                return category
+        return "other"
+    if "_ModRing_" in solid_name:
+        return "global_moderator"
+    if solid_name.endswith("_Barrel"):
+        return "barrel"
+    if solid_name.endswith("_Reflector"):
+        return "reflector"
+    return "other"
 
 
 def capture_storage_state(build: Dict[str, Any]) -> Dict[str, Any]:
@@ -105,6 +142,8 @@ def finite_difference_storage_rates(
         "fluid_pipe_storage_w": 0.0,
         "fluid_tfe_channel_storage_w": 0.0,
     }
+    for category in SOLID_CHAIN_CATEGORIES:
+        rates[f"solid_chain_{category}_storage_w"] = 0.0
 
     for name, old in before["solids"].items():
         new = after["solids"][name]
@@ -116,6 +155,7 @@ def finite_difference_storage_rates(
         )
         rates["solid_storage_w"] += storage
         rates[f"solid_{solid_category(build, name)}_storage_w"] += storage
+        rates[f"solid_chain_{solid_chain_category(build, name)}_storage_w"] += storage
 
     for name, old in before["fluids"].items():
         new = after["fluids"][name]
@@ -197,6 +237,136 @@ def coolant_solid_to_fluid_w(build: Dict[str, Any]) -> float:
     return total
 
 
+def boundary_inflow_w(boundary: Any) -> float:
+    return float(np.sum(np.asarray(boundary.current_flux, dtype=float)))
+
+
+def boundary_outflow_w(boundary: Any) -> float:
+    return -boundary_inflow_w(boundary)
+
+
+def scaled_tfe_boundary_w(
+    build: Dict[str, Any],
+    solid_name: str,
+    boundary_name: str,
+    *,
+    outflow: bool,
+) -> float:
+    total = 0.0
+    for name, multiplier in build["ring_multipliers"].items():
+        boundary = build["tfes"][name].solids[solid_name].boundaries[boundary_name]
+        heat = boundary_outflow_w(boundary) if outflow else boundary_inflow_w(boundary)
+        total += heat * float(multiplier)
+    return total
+
+
+def scaled_tfe_joule_w(build: Dict[str, Any], attribute: str, multiplier_key: str) -> float:
+    total = 0.0
+    for name, multiplier in build[multiplier_key].items():
+        tfe = build["tfes"][name]
+        total += float(np.sum(np.asarray(getattr(tfe.electric_data, attribute), dtype=float))) * float(multiplier)
+    return total
+
+
+def scaled_tec_source_w(build: Dict[str, Any], source_name: str, multiplier_key: str) -> float:
+    total = 0.0
+    for name, multiplier in build[multiplier_key].items():
+        tfe = build["tfes"][name]
+        source = np.asarray(getattr(tfe.couplers["tec_couple"], source_name), dtype=float)
+        total += float(np.sum(source)) * float(multiplier)
+    return total
+
+
+def radial_heat_chain_snapshot(build: Dict[str, Any]) -> Dict[str, float]:
+    core = build["core"]
+    pellet_to_emitter_out = scaled_tfe_boundary_w(build, "pellet", "right", outflow=True)
+    pellet_to_emitter_in = scaled_tfe_boundary_w(build, "emitter", "left", outflow=False)
+    emitter_to_collector_out = scaled_tfe_boundary_w(build, "emitter", "right", outflow=True)
+    emitter_to_collector_in = scaled_tfe_boundary_w(build, "collector", "left", outflow=False)
+    collector_to_inner_clad_out = scaled_tfe_boundary_w(build, "collector", "right", outflow=True)
+    collector_to_inner_clad_in = scaled_tfe_boundary_w(build, "inner_clad", "left", outflow=False)
+    inner_clad_to_fluid = scaled_tfe_boundary_w(build, "inner_clad", "right", outflow=True)
+    fluid_to_outer_clad = scaled_tfe_boundary_w(build, "outer_clad", "left", outflow=False)
+    outer_clad_to_virtual_mod_out = scaled_tfe_boundary_w(build, "outer_clad", "right", outflow=True)
+    outer_clad_to_virtual_mod_in = scaled_tfe_boundary_w(build, "moderator", "left", outflow=False)
+    virtual_to_real_mod_out = scaled_tfe_boundary_w(build, "moderator", "right", outflow=True)
+
+    real_mod_source = 0.0
+    real_mod_to_barrel_out = 0.0
+    real_mod_to_barrel_in = 0.0
+    barrel_to_reflector_out = 0.0
+    barrel_to_reflector_in = 0.0
+    if getattr(core, "has_global_moderator", False):
+        real_mod_source = float(sum(np.sum(np.asarray(ring.Q_source, dtype=float)) for ring in core.mod_rings))
+        real_mod_to_barrel_out = boundary_outflow_w(core.mod_rings[-1].boundaries["right"])
+        real_mod_to_barrel_in = boundary_inflow_w(core.barrel.boundaries["left"])
+        barrel_to_reflector_out = boundary_outflow_w(core.barrel.boundaries["right"])
+        barrel_to_reflector_in = boundary_inflow_w(core.reflector.boundaries["left"])
+
+    emitter_joule = scaled_tfe_joule_w(build, "emitter_joule_heat", "ring_multipliers")
+    collector_joule = scaled_tfe_joule_w(build, "collector_joule_heat", "ring_multipliers")
+    emitter_electron_cooling = -scaled_tec_source_w(build, "Q_source_1", "ring_multipliers")
+    collector_electron_heating = scaled_tec_source_w(build, "Q_source_2", "ring_multipliers")
+    electric_count_emitter_joule = scaled_tfe_joule_w(build, "emitter_joule_heat", "tec_ring_multipliers")
+    electric_count_collector_joule = scaled_tfe_joule_w(build, "collector_joule_heat", "tec_ring_multipliers")
+    electric_count_emitter_electron_cooling = -scaled_tec_source_w(
+        build,
+        "Q_source_1",
+        "tec_ring_multipliers",
+    )
+    electric_count_collector_electron_heating = scaled_tec_source_w(
+        build,
+        "Q_source_2",
+        "tec_ring_multipliers",
+    )
+    return {
+        "chain_pellet_to_emitter_out_w": pellet_to_emitter_out,
+        "chain_pellet_to_emitter_in_w": pellet_to_emitter_in,
+        "chain_pellet_to_emitter_residual_w": pellet_to_emitter_out - pellet_to_emitter_in,
+        "chain_emitter_to_collector_emitter_out_w": emitter_to_collector_out,
+        "chain_emitter_to_collector_collector_in_w": emitter_to_collector_in,
+        "chain_collector_to_inner_clad_out_w": collector_to_inner_clad_out,
+        "chain_collector_to_inner_clad_in_w": collector_to_inner_clad_in,
+        "chain_collector_to_inner_clad_residual_w": collector_to_inner_clad_out - collector_to_inner_clad_in,
+        "chain_inner_clad_to_fluid_w": inner_clad_to_fluid,
+        "chain_fluid_to_outer_clad_w": fluid_to_outer_clad,
+        "chain_net_solid_to_fluid_w": inner_clad_to_fluid - fluid_to_outer_clad,
+        "chain_outer_clad_to_virtual_moderator_out_w": outer_clad_to_virtual_mod_out,
+        "chain_outer_clad_to_virtual_moderator_in_w": outer_clad_to_virtual_mod_in,
+        "chain_outer_clad_to_virtual_moderator_residual_w": (
+            outer_clad_to_virtual_mod_out - outer_clad_to_virtual_mod_in
+        ),
+        "chain_virtual_to_real_moderator_out_w": virtual_to_real_mod_out,
+        "chain_real_moderator_source_w": real_mod_source,
+        "chain_virtual_to_real_moderator_residual_w": real_mod_source - virtual_to_real_mod_out,
+        "chain_real_moderator_to_barrel_out_w": real_mod_to_barrel_out,
+        "chain_real_moderator_to_barrel_in_w": real_mod_to_barrel_in,
+        "chain_real_moderator_to_barrel_residual_w": real_mod_to_barrel_out - real_mod_to_barrel_in,
+        "chain_barrel_to_reflector_out_w": barrel_to_reflector_out,
+        "chain_barrel_to_reflector_in_w": barrel_to_reflector_in,
+        "chain_barrel_to_reflector_residual_w": barrel_to_reflector_out - barrel_to_reflector_in,
+        "chain_tec_emitter_joule_heat_w": emitter_joule,
+        "chain_tec_collector_joule_heat_w": collector_joule,
+        "chain_tec_total_joule_heat_w": emitter_joule + collector_joule,
+        "chain_tec_emitter_electron_cooling_w": emitter_electron_cooling,
+        "chain_tec_collector_electron_heating_w": collector_electron_heating,
+        "chain_tec_applied_heat_removed_w": (
+            emitter_electron_cooling - collector_electron_heating - emitter_joule - collector_joule
+        ),
+        "chain_tec_electric_count_emitter_joule_heat_w": electric_count_emitter_joule,
+        "chain_tec_electric_count_collector_joule_heat_w": electric_count_collector_joule,
+        "chain_tec_electric_count_total_joule_heat_w": electric_count_emitter_joule + electric_count_collector_joule,
+        "chain_tec_electric_count_emitter_electron_cooling_w": electric_count_emitter_electron_cooling,
+        "chain_tec_electric_count_collector_electron_heating_w": electric_count_collector_electron_heating,
+        "chain_tec_electric_count_applied_heat_removed_w": (
+            electric_count_emitter_electron_cooling
+            - electric_count_collector_electron_heating
+            - electric_count_emitter_joule
+            - electric_count_collector_joule
+        ),
+    }
+
+
 def outer_wall_radiation_w(build: Dict[str, Any]) -> float:
     boundary = build["core"].reflector.boundaries["right"]
     surface_temperature = np.asarray(boundary.T_surface, dtype=float)
@@ -258,6 +428,7 @@ def external_power_snapshot(build: Dict[str, Any]) -> Dict[str, float]:
             build,
             "ring_multipliers",
         ),
+        **radial_heat_chain_snapshot(build),
     }
 
 
@@ -329,6 +500,55 @@ def build_record(
     solid_equation_residual = q_core - q_rad - q_tec_thermal_model - q_solid_to_fluid - storage["solid_storage_w"]
     fluid_equation_residual = q_fluid_source - q_fluid - storage["fluid_storage_w"]
     fluid_solid_mapping_residual = q_solid_to_fluid - q_fluid_source
+    chain_balance = {
+        "chain_balance_pellet_residual_w": (
+            q_core
+            - avg["chain_pellet_to_emitter_out_w_avg"]
+            - storage["solid_chain_pellet_storage_w"]
+        ),
+        "chain_balance_emitter_residual_w": (
+            avg["chain_pellet_to_emitter_in_w_avg"]
+            + avg["chain_tec_emitter_joule_heat_w_avg"]
+            - avg["chain_emitter_to_collector_emitter_out_w_avg"]
+            - storage["solid_chain_emitter_storage_w"]
+        ),
+        "chain_balance_collector_residual_w": (
+            avg["chain_emitter_to_collector_collector_in_w_avg"]
+            + avg["chain_tec_collector_joule_heat_w_avg"]
+            - avg["chain_collector_to_inner_clad_out_w_avg"]
+            - storage["solid_chain_collector_storage_w"]
+        ),
+        "chain_balance_inner_clad_residual_w": (
+            avg["chain_collector_to_inner_clad_in_w_avg"]
+            - avg["chain_inner_clad_to_fluid_w_avg"]
+            - storage["solid_chain_inner_clad_storage_w"]
+        ),
+        "chain_balance_outer_clad_residual_w": (
+            avg["chain_fluid_to_outer_clad_w_avg"]
+            - avg["chain_outer_clad_to_virtual_moderator_out_w_avg"]
+            - storage["solid_chain_outer_clad_storage_w"]
+        ),
+        "chain_balance_virtual_moderator_residual_w": (
+            avg["chain_outer_clad_to_virtual_moderator_in_w_avg"]
+            - avg["chain_virtual_to_real_moderator_out_w_avg"]
+            - storage["solid_chain_virtual_moderator_storage_w"]
+        ),
+        "chain_balance_real_moderator_residual_w": (
+            avg["chain_real_moderator_source_w_avg"]
+            - avg["chain_real_moderator_to_barrel_out_w_avg"]
+            - storage["solid_chain_global_moderator_storage_w"]
+        ),
+        "chain_balance_barrel_residual_w": (
+            avg["chain_real_moderator_to_barrel_in_w_avg"]
+            - avg["chain_barrel_to_reflector_out_w_avg"]
+            - storage["solid_chain_barrel_storage_w"]
+        ),
+        "chain_balance_reflector_residual_w": (
+            avg["chain_barrel_to_reflector_in_w_avg"]
+            - q_rad
+            - storage["solid_chain_reflector_storage_w"]
+        ),
+    }
     return {
         "absolute_time_s": interval_end,
         "relative_time_s": interval_end - start_time,
@@ -347,6 +567,7 @@ def build_record(
             + fluid_equation_residual
             + fluid_solid_mapping_residual
         ),
+        **chain_balance,
         "fast_residual_without_storage_using_terminal_w": q_core - q_fluid - q_rad - p_terminal,
         "global_residual_using_thermal_model_tec_heat_w": model_residual,
         "global_residual_using_electric_count_tec_heat_w": physical_tec_residual,
@@ -411,6 +632,7 @@ def main() -> None:
             f"Ssolid={row['solid_storage_w']:.3f}W "
             f"Sfluid={row['fluid_storage_w']:.3f}W "
             f"Rmodel={row['global_residual_using_thermal_model_tec_heat_w']:.3f}W "
+            f"Rfsc={row['fluid_solid_mapping_residual_w']:.3f}W "
             f"Rtec={row['global_residual_using_electric_count_tec_heat_w']:.3f}W "
             f"Rterminal={row['global_residual_using_terminal_power_w']:.3f}W",
             flush=True,
@@ -445,6 +667,9 @@ def main() -> None:
             "coolant_solid_to_fluid_definition": "negative inner/outer clad coolant BoundaryRegion.current_flux scaled by thermal multipliers",
             "external_power_integration": "trapezoidal integration over every internal SystemManager step",
             "moderator_mapping_diagnostic": "instantaneous global moderator ring source minus thermal-multiplier-scaled representative TFE moderator outer-boundary outflow",
+            "radial_heat_chain_definition": "interval averages of BoundaryRegion.current_flux, with positive chain values directed radially outward; ordinary interfaces record both left-side outflow and right-side inflow",
+            "radial_storage_breakdown": "finite-difference solid storage split into pellet, emitter, collector, inner clad, outer clad, representative virtual moderator, global moderator, barrel, reflector, and other categories",
+            "radial_control_volume_residual": "layer inflow plus internal heat source minus layer outflow minus finite-difference storage; endpoint fluxes are integrated by internal-step trapezoids and remain a diagnostic rather than exact BDF quadrature",
             "thermal_model_residual_definition": "Qcore - Qfluid_external_net_out - Qradiation - Qtec_applied_removed_scaled_by_thermal_multiplier - dEsolid_dt - dEfluid_dt",
             "thermal_model_residual_decomposition": "solid_equation_residual + fluid_equation_residual + fluid_solid_mapping_residual",
             "electric_count_tec_residual_definition": "Qcore - Qfluid_external_net_out - Qradiation - Qtec_applied_removed_scaled_by_tec_multiplier - dEsolid_dt - dEfluid_dt",
