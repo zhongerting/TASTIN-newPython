@@ -122,6 +122,8 @@ test_core_assemble_v7_caseA.py
 
 排查 v7 CaseA 时先读 `testModule` 手册，不要从旧版 `test_core_assemble_v1.py` 到 `v6.py` 顺序通读。旧版本用于演进参考。
 
+V8 CaseA 位于 `testModule/test_core_assemble_v8_caseA.py`，用于把外圈拆为 `Ring3_TEC` 和 `Ring3_Open` 两个代表元件。它复用 V7 CaseA 几何和边界，但拥有独立水力拓扑与 restart；旧 V7 restart 必须通过 `testModule/migrate_v7_caseA_restart_to_v8.py` 迁移，不能直接加载。
+
 ### 5.2 集流环冷却回路路径
 
 `CoolantLoop/` 当前有两个生产模型：

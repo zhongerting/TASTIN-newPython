@@ -95,6 +95,12 @@ RingHP
 
 `BaseComponent` 与 `SystemManager` 的契约是“宏观组件负责暴露底层实体，系统管理器负责统一推进”。新增宏观组件时，必须完整返回内部固体和耦合器，并保证生命周期钩子可重复调用。
 
+### 未接电代表 TFE
+
+`TFEUnit.clear_tec_sources()` 用于显式关闭某个代表 TFE 的主动 TEC 热源，同时保留 `TECCouple2D` 的被动铯隙导热和辐射。该接口会清零电子冷却、电子加热、两极焦耳热、电流密度、电诊断缓存和 TEC 耦合器附加源。
+
+`ReactorCore.pre_step()` 会对 `tec_multipliers[name] == 0` 的代表 TFE 每步调用该接口。这样同一真实慢化剂圈可以同时包含接电和未接电代表元件，并由 `ring_mapping` 按热工倍率聚合慢化剂热流。
+
 ## 文件概览
 
 | 文件 | 主要内容 |

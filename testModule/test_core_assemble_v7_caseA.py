@@ -111,6 +111,11 @@ def build_v7_case_a_system(
     global_outer_heat_capacity_scale: Optional[float] = None,
     ring_multipliers: Optional[Sequence[int]] = None,
     tec_ring_multipliers: Optional[Sequence[int]] = None,
+    representative_names: Optional[Sequence[str]] = None,
+    representative_ring_mapping: Optional[Dict[str, int]] = None,
+    representative_power_factors: Optional[Dict[str, float]] = None,
+    physical_ring_count: Optional[int] = None,
+    core_name: str = "TASTIN_Core_V7_CaseA",
 ) -> Dict[str, Any]:
     if inlet_plenum_volume_m3 <= 0.0 or outlet_plenum_volume_m3 <= 0.0:
         raise ValueError("Plenum volumes must be positive.")
@@ -245,14 +250,20 @@ def build_v7_case_a_system(
         emissivity_outer=0.80,
     )
 
-    ring_names = ["Center", "Ring1", "Ring2", "Ring3"]
+    ring_names = (
+        list(representative_names)
+        if representative_names is not None
+        else ["Center", "Ring1", "Ring2", "Ring3"]
+    )
+    if not ring_names or len(set(ring_names)) != len(ring_names):
+        raise ValueError("representative_names must contain unique values.")
     multipliers = (
         list(ring_multipliers)
         if ring_multipliers is not None
         else list(CASE_A_RING_MULTIPLIERS)
     )
     if len(multipliers) != len(ring_names):
-        raise ValueError("ring_multipliers must contain four values.")
+        raise ValueError("ring_multipliers must match representative_names length.")
     if any(int(mult) <= 0 for mult in multipliers):
         raise ValueError("ring_multipliers values must be positive.")
     multipliers = [int(mult) for mult in multipliers]
@@ -262,7 +273,7 @@ def build_v7_case_a_system(
         else list(CASE_A_TEC_RING_MULTIPLIERS)
     )
     if len(tec_multipliers) != len(ring_names):
-        raise ValueError("tec_ring_multipliers must contain four values.")
+        raise ValueError("tec_ring_multipliers must match representative_names length.")
     if any(int(mult) < 0 for mult in tec_multipliers):
         raise ValueError("tec_ring_multipliers values must be non-negative.")
     tec_multipliers = [int(mult) for mult in tec_multipliers]
@@ -477,13 +488,30 @@ def build_v7_case_a_system(
 
     tfe_multipliers = {name: mult for name, mult in zip(ring_names, multipliers)}
     tfe_tec_multipliers = {name: mult for name, mult in zip(ring_names, tec_multipliers)}
-    tfe_power_factors = build_ring_power_factors(ring_names, multipliers)
-    ring_mapping = {name: i for i, name in enumerate(ring_names)}
+    tfe_power_factors = (
+        dict(representative_power_factors)
+        if representative_power_factors is not None
+        else build_ring_power_factors(ring_names, multipliers)
+    )
+    ring_mapping = (
+        dict(representative_ring_mapping)
+        if representative_ring_mapping is not None
+        else {name: i for i, name in enumerate(ring_names)}
+    )
+    if set(ring_mapping) != set(ring_names):
+        raise ValueError("representative_ring_mapping keys must match representative_names.")
+    n_physical_rings = (
+        int(physical_ring_count)
+        if physical_ring_count is not None
+        else len(ring_names)
+    )
+    if n_physical_rings <= 0:
+        raise ValueError("physical_ring_count must be positive.")
 
     mod_meshes = build_global_moderator_meshes(
         inner_radius=geom_params.r_moderator_outer,
         outer_radius=60.0e-3,
-        n_rings=len(ring_names),
+        n_rings=n_physical_rings,
         y_faces=common_y_faces,
         height=geom_params.height,
         n_axial=n_total,
@@ -520,7 +548,7 @@ def build_v7_case_a_system(
     )
 
     core = ReactorCore(
-        name="TASTIN_Core_V7_CaseA",
+        name=core_name,
         tfe_dict=tfes,
         tfe_multipliers=tfe_multipliers,
         tec_multipliers=tfe_tec_multipliers,

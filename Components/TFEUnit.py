@@ -759,6 +759,43 @@ class TFEUnit(BaseComponent):
         }
         self.couplers['tec_couple'].set_tec_sources(Q_emitter=Q_e_watts, Q_collector=Q_c_watts)
 
+    def clear_tec_sources(self):
+        """Clear active TEC sources while preserving passive gap heat transfer."""
+        for attr in (
+            'emitter_voltage',
+            'emitter_resistivity',
+            'collector_voltage',
+            'collector_resistivity',
+            'current_density',
+            'emitter_joule_heat',
+            'collector_joule_heat',
+        ):
+            getattr(self.electric_data, attr)[...] = 0.0
+
+        self.plasma_data.electron_cooling_flux[...] = 0.0
+        self.plasma_data.electron_heating_flux[...] = 0.0
+
+        emitter = self.solids['emitter']
+        collector = self.solids['collector']
+        emitter.set_joule_heating(np.zeros_like(emitter.Q_source, dtype=float))
+        collector.set_joule_heating(np.zeros_like(collector.Q_source, dtype=float))
+
+        tec_couple = self.couplers['tec_couple']
+        tec_couple.set_tec_sources(
+            Q_emitter=np.zeros_like(tec_couple.Q_source_1, dtype=float),
+            Q_collector=np.zeros_like(tec_couple.Q_source_2, dtype=float),
+        )
+
+        self.plasma_area_diagnostics = {
+            "basis": "TEC disabled for this representative TFE; passive gap heat transfer remains active.",
+            "sideAreaE_m2": np.asarray(emitter.boundaries['right'].area, dtype=float).copy(),
+            "sideAreaC_m2": np.asarray(collector.boundaries['left'].area, dtype=float).copy(),
+            "emitter_power_emitter_area_w": np.zeros_like(tec_couple.Q_source_1, dtype=float),
+            "collector_power_emitter_area_w": np.zeros_like(tec_couple.Q_source_2, dtype=float),
+            "collector_power_collector_area_w": np.zeros_like(tec_couple.Q_source_2, dtype=float),
+            "collector_area_power_delta_w": np.zeros_like(tec_couple.Q_source_2, dtype=float),
+        }
+
     # ==========================================
     # 系统管理与生命周期重载 (对接 SystemManager)
     # ==========================================

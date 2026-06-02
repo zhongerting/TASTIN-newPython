@@ -417,3 +417,57 @@ python testModule\audit_v7_caseA_global_storage_continue.py `
 - 真实慢化剂到套筒、套筒到反射层和反射层外边界辐射热流。
 
 脚本还将固体有限差分储能拆为芯块、发射极、接收极、内套管、外套管、虚拟慢化剂、真实慢化剂、套筒和反射层，并输出各层 `chain_balance_*_residual_w`。各层口径为“流入 + 内热源 - 流出 - 有限差分储能”。外部功率在每个内部 `SystemManager.step()` 上采用梯形积分，而固体由 BDF 推进，因此逐层残差用于定位误差集中区域，不等同于严格的 BDF 离散方程残差。严格闭合仍应结合普通接口两侧差、同步后的映射误差和流体逐控制体矩阵残差判断。
+
+## 15. 2026-06-02 V8 CaseA 外圈代表元件拆分
+
+V8 保持 V7 CaseA 的几何、水力边界、总热工元件数、四个真实慢化剂环和 `115000 W` 定功率口径，只把外圈代表元件拆分：
+
+| 代表 TFE | 热工倍率 | TEC 倍率 | 真实慢化剂环 |
+|---|---:|---:|---:|
+| `Center` | 1 | 1 | 0 |
+| `Ring1` | 6 | 6 | 1 |
+| `Ring2` | 12 | 12 | 2 |
+| `Ring3_TEC` | 15 | 15 | 3 |
+| `Ring3_Open` | 3 | 0 | 3 |
+
+`Ring3_Open` 保留铯隙被动导热和辐射，但电子冷却、电子加热、焦耳热、电流密度和电诊断缓存必须严格清零。组件层通过 `TFEUnit.clear_tec_sources()` 实现该契约，`ReactorCore.pre_step()` 每步对 `tec_multiplier == 0` 的代表件重新执行清零。
+
+旧 V7 restart 不能直接加载到 V8，因为水力拓扑由 `176/179` 个控制体/连接扩展到 `213/217`。首次运行应执行：
+
+```powershell
+python testModule\migrate_v7_caseA_restart_to_v8.py
+```
+
+迁移器按对象语义复制公共状态，并将原 `Ring3` 热工和水力状态复制给两个新外圈代表件。迁移完成后必须先刷新固体边界缓存，再向 ThermoCalc 下发电极表面温度；否则 C++ 电路会收到占位温度并产生非有限焦耳热。
+
+V8 正式长算入口：
+
+```powershell
+python testModule\run_v8_caseA_long_energy.py `
+  --restart-in testModule\v8_caseA_migrated\v8_caseA_migrated_latest_restart.npz `
+  --duration 20000 `
+  --record-interval 200 `
+  --restart-interval 200 `
+  --max-dt 0.8 `
+  --inner-iter 1
+```
+
+每 `200 s` 覆盖 latest restart，并向固定 CSV 续写完整径向热流链、分层储能、三种全局残差和 `Ring3_Open` 零源检查。restart 后再次启动时，运行器从 CSV 恢复统一记录起点，保持相对时间连续。
+
+V8 定向审计入口：
+
+```text
+test_v8_caseA_topology.py
+audit_v8_caseA_global_storage_continue.py
+audit_v8_caseA_interface_energy.py
+audit_v8_caseA_fluid_energy_network.py
+```
+
+首次短验证结果：五个代表 TFE、四个真实慢化剂环、`37/34` 倍率和 `Ring3_Open` 六项 TEC 零源检查均通过；`QTEC,thermal - QTEC,count = 0 W`。静态普通固固接口累计误差约 `5.29e-9 W`，同步慢化剂映射最大误差约 `7.11e-15 W`，流体逐控制体矩阵残差保持在 `1e-9 W` 附近。初始化阶段仍会重复输出既有 `Failed to converge after 100000 iterations.`，该电路收敛专项尚未修复。
+
+迁移后 `100 s` 受控延续结果：
+
+- `QTEC,thermal - QTEC,count` 全程为 `0 W`，V7 中约 `527 W` 的倍率混用差已消除。
+- 最后 `10 s` 的 `R_thermal_model = -1864.39 W`，其中固体区间残差 `-187.11 W`、流体方程残差 `-0.28 W`、流固时间层差 `-1677.01 W`。
+- 最终静态普通固固接口累计误差约 `5.19e-9 W`，同步慢化剂映射最大误差约 `3.55e-15 W`。
+- V8 不再被 TEC 倍率口径差掩盖；当前剩余项主要来自迁移后外圈热状态重新分化期间的流固时间层差。正式 `20000 s` 长算应继续记录其趋势，不得把某一时刻的全局抵消值直接视为严格闭合。

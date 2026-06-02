@@ -1253,6 +1253,10 @@ class ReactorCore(BaseComponent):
         1. TEC 电路计算并将热流/焦耳热下发到各个 TFE
         2. 从虚拟慢化剂抽取热量并注入全局慢化剂环
         """
+        for tfe_name, tfe in self.tfes.items():
+            if int(self.tec_multipliers.get(tfe_name, 0)) <= 0:
+                tfe.clear_tec_sources()
+
         if self.enable_tec_coupled and self.thermo_calc is not None:
             time_since_last_update = current_time - self._last_thermo_update_time
             if time_since_last_update >= self.thermo_update_interval:
