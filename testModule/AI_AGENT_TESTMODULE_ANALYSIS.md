@@ -316,3 +316,64 @@ test_single_tfe_energy_conservation_v7.py --mode tec --duration-s 1 --max-dt-s 0
 正式单 TFE `1 s` 结果：二维映射与 C++ 节点功率差为 `0 W`，TEC 转换闭合差为 `0.025015 W`，最终全局残差为 `0.089127 W`。后续若修改 TEC 电势离散或外层电路迭代阈值，必须继续运行该审计。
 
 v7 CaseA `1 s` smoke 和静态接口审计已运行。普通固固接口累计误差约 `5.24e-9 W`，慢化剂映射最大误差约 `1.82e-12 W`；但多 TEC 串联电路会重复输出 `Failed to converge after 100000 iterations.`，静态审计即时 TEC 闭合差约 `5.20 W`。该问题属于后续电路收敛专项，不得通过调整热源映射掩盖。
+
+## 12. 2026-06-02 v7 CaseA 全局储能连续审计
+
+`audit_v7_caseA_global_storage_continue.py` 用于在不中断推进的同一内存状态中记录全堆芯有限差分储能。它不修改生产推进顺序，并在每个内部 `SystemManager.step()` 上对外部功率执行梯形积分。
+
+全局审计同时输出三种残差：
+
+```text
+R_thermal_model =
+    Q_core
+  - Q_fluid_external_net_out
+  - Q_radiation
+  - Q_TEC_applied_removed_scaled_by_thermal_multiplier
+  - dE_solid/dt
+  - dE_fluid/dt
+
+R_TEC_count =
+    Q_core
+  - Q_fluid_external_net_out
+  - Q_radiation
+  - Q_TEC_applied_removed_scaled_by_TEC_multiplier
+  - dE_solid/dt
+  - dE_fluid/dt
+
+R_terminal =
+    Q_core
+  - Q_fluid_external_net_out
+  - Q_radiation
+  - P_terminal
+  - dE_solid/dt
+  - dE_fluid/dt
+```
+
+其中：
+
+- 固体有限差分储能使用 `sum(0.5 * (cap_old + cap_new) * (T_new - T_old)) / dt`。
+- 流体有限差分储能使用有限且非定压控制体上的 `sum(0.5 * (m_old + m_new) * (h_new - h_old)) / dt`。
+- 流体外部焓流使用固定压力边界控制面，并复用 `HydraulicNetwork` 的迎风供体与倍率行定义。
+- `R_thermal_model` 使用实际下发到代表热工网格的 TEC 净移热，并按热工倍率还原。
+- `R_TEC_count` 按电路中的 TEC 数量还原，`R_terminal` 使用端电功率。三者差值用于识别部分 TEC 配置、热源松弛和电路闭合误差。
+- `moderator_mapping_source_minus_boundary_out_w_avg` 记录全局慢化剂环源项与代表 TFE 慢化剂外流之间的即时差值，用于定位跨层映射时序滞后。
+
+注意：`ReactorCore.pre_step()` 当前使用 `electric_alpha = alpha_tec * tec_mult / thermal_mult`。该比例只改变热源缓存趋近目标值的速度，不改变最终目标幅值。对于热工倍率与 TEC 倍率不同的代表环，必须同时检查 `tec_thermal_model_minus_electric_count_w`，不能默认认为部分 TEC 配置已经在稳态幅值上做了平均。
+
+首次连续审计结果：
+
+- 从 `t=36940 s` restart 连续推进 `100 s`，每 `10 s` 记录一次。restart 后第一段存在一次性外层固体暖启动跳变，不应纳入稳态残差统计。
+- 进一步从新 restart 连续推进 `20 s`，每 `2 s` 记录一次。去掉第一段暖启动后，`global_residual_using_thermal_model_tec_heat_w` 为 `3.08-5.23 kW`。
+- `tec_thermal_model_minus_electric_count_w` 稳定约为 `525.5 W`，说明热工代表元件实际源项倍率与电路 TEC 数量倍率不同。
+- `moderator_mapping_source_minus_boundary_out_w_avg` 从约 `-2.90 kW` 变化到 `-0.62 kW`，说明全局慢化剂跨层映射存在明显时序滞后。
+- 当前不应把旧快速口径中的 `1%-2%` 直接视为导热泄漏，也不应直接启动过夜长算。后续应先修复部分 TEC 热源幅值平均和慢化剂映射时序，再重复本审计。
+
+推荐先运行：
+
+```powershell
+python testModule\audit_v7_caseA_global_storage_continue.py `
+  --restart-in <restart.npz> `
+  --duration 100 `
+  --record-interval 10 `
+  --max-dt 0.8
+```
