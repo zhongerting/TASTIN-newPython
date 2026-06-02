@@ -1327,6 +1327,10 @@ class ReactorCore(BaseComponent):
                     alpha=electric_alpha
                 )
 
+        for tfe in self.tfes.values():
+            if hasattr(tfe, 'pre_step'):
+                tfe.pre_step(dt, current_time)
+
         if self.has_global_moderator:
             for ring in self.mod_rings:
                 ring.use_external_source_buffer = True
@@ -1344,6 +1348,15 @@ class ReactorCore(BaseComponent):
                     mult = self.tfe_multipliers[tfe_name]
                     virtual_mod = tfe.solids['moderator']
 
+                    # TFEUnit.pre_step() may update the moderator outer-boundary
+                    # temperature. Refresh this cache before mapping its flux to
+                    # the global moderator ring, including immediately after a
+                    # restart.
+                    virtual_mod._update_properties()
+                    virtual_mod._compute_internal_resistance()
+                    virtual_mod._update_boundaries_state(current_time=current_time)
+                    virtual_mod._compute_fluxes(current_time)
+
                     q_flux_out = -virtual_mod.boundaries['right'].current_flux
                     q_watts_total += q_flux_out * mult
 
@@ -1355,10 +1368,6 @@ class ReactorCore(BaseComponent):
                 q_vol_2d = np.ones((nx, 1)) * q_vol_1d[np.newaxis, :]
                 q_watts_2d = q_vol_2d * vols_2d
                 ring.Q_source += q_watts_2d.flatten()
-
-        for tfe in self.tfes.values():
-            if hasattr(tfe, 'pre_step'):
-                tfe.pre_step(dt, current_time)
 
     def post_step(self, dt: float, current_time: float):
         """

@@ -895,3 +895,17 @@ joulePowerE / joulePowerC [W]
 ```
 
 `TFEUnit.update_joule_power_sources()` 和 `TECPair.set_joule_heating_axial_power()` 按每个轴向列内的二维控制体体积比例分配功率，并保持每列总功率不变。旧电场接口继续保留，用于兼容和诊断，不再作为 TEC 生产热源的权威路径。
+
+## 2026-06-02 全局慢化剂映射时间层修复
+
+`ReactorCore.pre_step()` 中的全局慢化剂源项转移必须按以下顺序执行：
+
+```text
+TFEUnit.pre_step()
+  -> 更新内部等效 moderator 的外边界温度
+  -> 刷新内部 moderator 的物性、热阻、边界状态和热流缓存
+  -> 读取 moderator 外流
+  -> 按 tfe_multipliers 聚合到全局 moderator rings
+```
+
+不得在 `TFEUnit.pre_step()` 之前读取内部 moderator 的 `BoundaryRegion.current_flux`。旧顺序会在正常推进中引入一步滞后，并在 restart 重建后把旧边界缓存作为首步源项注入全局慢化剂环。

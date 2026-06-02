@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration", type=float, default=100.0)
     parser.add_argument("--record-interval", type=float, default=10.0)
     parser.add_argument("--max-dt", type=float, default=0.8)
+    parser.add_argument("--inner-iter", type=int, default=1)
     parser.add_argument("--safety-factor", type=float, default=5000.0)
     parser.add_argument("--pipe-n-nodes", type=int, default=8)
     parser.add_argument("--target-voltage", type=float, default=27.2)
@@ -173,6 +174,29 @@ def external_fluid_enthalpy_net_out_w(build: Dict[str, Any]) -> float:
     return net_out
 
 
+def fluid_effective_source_w(build: Dict[str, Any]) -> float:
+    scale_map = build_volume_scale_map(build)
+    total = 0.0
+    for vol in build["system"].fluid_solver.volumes_obj:
+        scale = float(scale_map.get(id(vol), 1.0))
+        total += scale * (
+            float(getattr(vol, "Q_wall", 0.0))
+            + float(getattr(vol, "Q_vol", 0.0))
+            - float(getattr(vol, "implicit_coeff", 0.0)) * float(getattr(vol, "T", 0.0))
+        )
+    return total
+
+
+def coolant_solid_to_fluid_w(build: Dict[str, Any]) -> float:
+    total = 0.0
+    for name, multiplier in build["ring_multipliers"].items():
+        tfe = build["tfes"][name]
+        for coupler_name in ("iclad_coolant_fsc", "oclad_coolant_fsc"):
+            boundary = tfe.couplers[coupler_name].solid_bound
+            total += -float(np.sum(np.asarray(boundary.current_flux, dtype=float))) * float(multiplier)
+    return total
+
+
 def outer_wall_radiation_w(build: Dict[str, Any]) -> float:
     boundary = build["core"].reflector.boundaries["right"]
     surface_temperature = np.asarray(boundary.T_surface, dtype=float)
@@ -221,6 +245,8 @@ def external_power_snapshot(build: Dict[str, Any]) -> Dict[str, float]:
     return {
         "core_heat_w": q_core,
         "fluid_external_net_out_w": external_fluid_enthalpy_net_out_w(build),
+        "fluid_effective_source_w": fluid_effective_source_w(build),
+        "coolant_solid_to_fluid_w": coolant_solid_to_fluid_w(build),
         "outer_wall_radiation_w": outer_wall_radiation_w(build),
         "moderator_mapping_source_minus_boundary_out_w": moderator_mapping_source_minus_boundary_out_w(build),
         "terminal_electric_power_w": float(electric["tec_total_electric_power_w"] or 0.0),
@@ -269,7 +295,7 @@ def advance_interval(
             safety_factor=float(args.safety_factor),
         )
         dt = min(float(dt), float(args.max_dt), stop_time - float(system.global_time))
-        system.step(dt)
+        system.step(dt, inner_iter=int(args.inner_iter))
         next_power = external_power_snapshot(build)
         add_trapezoid_integral(integral, power, next_power, dt)
         power = next_power
@@ -290,6 +316,8 @@ def build_record(
     avg = {f"{key}_avg": float(value) / dt for key, value in integral.items()}
     q_core = avg["core_heat_w_avg"]
     q_fluid = avg["fluid_external_net_out_w_avg"]
+    q_fluid_source = avg["fluid_effective_source_w_avg"]
+    q_solid_to_fluid = avg["coolant_solid_to_fluid_w_avg"]
     q_rad = avg["outer_wall_radiation_w_avg"]
     p_terminal = avg["terminal_electric_power_w_avg"]
     q_tec_electric_count = avg["applied_tec_heat_removed_electric_count_w_avg"]
@@ -298,6 +326,9 @@ def build_record(
     model_residual = q_core - q_fluid - q_rad - q_tec_thermal_model - combined_storage
     physical_tec_residual = q_core - q_fluid - q_rad - q_tec_electric_count - combined_storage
     terminal_residual = q_core - q_fluid - q_rad - p_terminal - combined_storage
+    solid_equation_residual = q_core - q_rad - q_tec_thermal_model - q_solid_to_fluid - storage["solid_storage_w"]
+    fluid_equation_residual = q_fluid_source - q_fluid - storage["fluid_storage_w"]
+    fluid_solid_mapping_residual = q_solid_to_fluid - q_fluid_source
     return {
         "absolute_time_s": interval_end,
         "relative_time_s": interval_end - start_time,
@@ -308,6 +339,14 @@ def build_record(
         **storage,
         "tec_thermal_model_minus_electric_count_w": q_tec_thermal_model - q_tec_electric_count,
         "tec_terminal_minus_electric_count_heat_w": p_terminal - q_tec_electric_count,
+        "solid_equation_residual_w": solid_equation_residual,
+        "fluid_equation_residual_w": fluid_equation_residual,
+        "fluid_solid_mapping_residual_w": fluid_solid_mapping_residual,
+        "decomposed_thermal_model_residual_w": (
+            solid_equation_residual
+            + fluid_equation_residual
+            + fluid_solid_mapping_residual
+        ),
         "fast_residual_without_storage_using_terminal_w": q_core - q_fluid - q_rad - p_terminal,
         "global_residual_using_thermal_model_tec_heat_w": model_residual,
         "global_residual_using_electric_count_tec_heat_w": physical_tec_residual,
@@ -394,6 +433,7 @@ def main() -> None:
         "duration_s": float(system.global_time) - start_time,
         "record_interval_s": float(args.record_interval),
         "max_dt_s": float(args.max_dt),
+        "inner_iter": int(args.inner_iter),
         "ring_multipliers": build["ring_multipliers"],
         "tec_ring_multipliers": build["tec_ring_multipliers"],
         "latest": rows[-1],
@@ -401,9 +441,12 @@ def main() -> None:
             "solid_storage_definition": "sum(0.5 * (cap_old + cap_new) * (T_new - T_old)) / interval_dt",
             "fluid_storage_definition": "sum(0.5 * (mass_old + mass_new) * (h_new - h_old)) / interval_dt over finite non-fixed volumes",
             "fluid_boundary_definition": "net advective enthalpy outflow across fixed-pressure boundaries using HydraulicNetwork donor and multiplier rows",
+            "fluid_effective_source_definition": "sum(scale * (Q_wall + Q_vol - implicit_coeff * T)) over hydraulic volumes",
+            "coolant_solid_to_fluid_definition": "negative inner/outer clad coolant BoundaryRegion.current_flux scaled by thermal multipliers",
             "external_power_integration": "trapezoidal integration over every internal SystemManager step",
             "moderator_mapping_diagnostic": "instantaneous global moderator ring source minus thermal-multiplier-scaled representative TFE moderator outer-boundary outflow",
             "thermal_model_residual_definition": "Qcore - Qfluid_external_net_out - Qradiation - Qtec_applied_removed_scaled_by_thermal_multiplier - dEsolid_dt - dEfluid_dt",
+            "thermal_model_residual_decomposition": "solid_equation_residual + fluid_equation_residual + fluid_solid_mapping_residual",
             "electric_count_tec_residual_definition": "Qcore - Qfluid_external_net_out - Qradiation - Qtec_applied_removed_scaled_by_tec_multiplier - dEsolid_dt - dEfluid_dt",
             "terminal_residual_definition": "Qcore - Qfluid_external_net_out - Qradiation - Pterminal - dEsolid_dt - dEfluid_dt",
         },

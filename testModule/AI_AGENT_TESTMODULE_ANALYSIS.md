@@ -357,6 +357,7 @@ R_terminal =
 - `R_thermal_model` 使用实际下发到代表热工网格的 TEC 净移热，并按热工倍率还原。
 - `R_TEC_count` 按电路中的 TEC 数量还原，`R_terminal` 使用端电功率。三者差值用于识别部分 TEC 配置、热源松弛和电路闭合误差。
 - `moderator_mapping_source_minus_boundary_out_w_avg` 记录全局慢化剂环源项与代表 TFE 慢化剂外流之间的即时差值，用于定位跨层映射时序滞后。
+- `solid_equation_residual_w`、`fluid_equation_residual_w` 和 `fluid_solid_mapping_residual_w` 将 `R_thermal_model` 拆为固体区间闭合、流体区间闭合和流固映射区间差。三者之和记录为 `decomposed_thermal_model_residual_w`。
 
 注意：`ReactorCore.pre_step()` 当前使用 `electric_alpha = alpha_tec * tec_mult / thermal_mult`。该比例只改变热源缓存趋近目标值的速度，不改变最终目标幅值。对于热工倍率与 TEC 倍率不同的代表环，必须同时检查 `tec_thermal_model_minus_electric_count_w`，不能默认认为部分 TEC 配置已经在稳态幅值上做了平均。
 
@@ -375,5 +376,31 @@ python testModule\audit_v7_caseA_global_storage_continue.py `
   --restart-in <restart.npz> `
   --duration 100 `
   --record-interval 10 `
-  --max-dt 0.8
+  --max-dt 0.8 `
+  --inner-iter 1
 ```
+
+## 13. 2026-06-02 v7 CaseA 慢化剂映射时间层修复
+
+全局储能审计进一步确认，旧版 `ReactorCore.pre_step()` 在调用 `TFEUnit.pre_step()` 更新慢化剂外边界温度之前，就读取了内部等效 moderator 的 `BoundaryRegion.current_flux`。这会使用旧时间层缓存：
+
+- 正常连续推进中，`dt=0.1 s` 探针仍可观察到约 `100 W` 的慢化剂映射时序差。
+- 从 restart 重建后，首步曾把错误缓存 `+790.2 kW` 注入全局慢化剂环；真实边界在首步后立即翻转到约 `-12.0 kW`。
+- 首区间的巨大外层固体储能跳变主要集中在四个全局慢化剂环，不是外边界辐射损失。
+
+生产逻辑现已改为：先执行所有 `TFEUnit.pre_step()`，再刷新内部等效 moderator 的物性、热阻、边界状态和热流缓存，最后按 `tfe_multipliers` 聚合到全局慢化剂环。后续 restart 审计仍应单独检查第一段，不得默认忽略首段异常。
+
+补充检查：
+
+- 解析辐射功率与反射层实际 `BoundaryRegion.current_flux` 差约 `1.4e-11 W`。
+- 堆芯重构热功率与芯块 `Q_source` 均为 `115000 W`。
+- 修复后普通固固接口累计残差约 `5.27e-9 W`，流固边界放热与注入流体源项差约 `2.2e-10 W`，同步后的慢化剂映射最大误差约 `2.84e-14 W`。
+- 水力倍率行无不匹配，有限非定压控制体矩阵残差维持在 `1e-9 W` 量级。`audit_v7_caseA_fluid_energy_network.py` 中先汇总绝对焓能再相减的字段会受浮点消差影响；判断水力闭合时应优先使用逐控制体矩阵残差。
+
+修复后继续用 `max_dt=0.1 s` 运行分解审计，`R_thermal_model` 从约 `4.14 kW` 降到 `3.72 kW`。三项分解表明：
+
+- `solid_equation_residual_w` 约为 `-0.26` 至 `-0.33 kW`。
+- `fluid_equation_residual_w` 除首段外接近 `0 W`。
+- `fluid_solid_mapping_residual_w` 约为 `4.03` 至 `4.32 kW`，是当前主要剩余项。
+
+同一起点、单个 `0.1 s` 步长的 Picard 对照中，流固差随 `inner_iter=1 / 2 / 3 / 5 / 10` 依次约为 `3.84 / 3.23 / 2.65 / 1.80 / 0.68 kW`。`inner_iter=20` 时在第 `16` 次按默认温度阈值提前收敛，流固差约 `0.21 kW`。审计脚本提供 `--inner-iter` 用于受控对照；生产默认值仍保持 `1`，后续应评估共享区间换热量或正式 Picard 策略，不能仅靠提高默认迭代次数掩盖成本。

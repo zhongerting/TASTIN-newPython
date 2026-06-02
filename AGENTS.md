@@ -221,3 +221,7 @@ TEC 生产焦耳热当前以 C++ `VcalcFVM()` 输出的逐轴向节点功率 `jo
 `UE / UC / rhoE / rhoC` 和节点中心梯度函数继续保留为诊断数据，但不得重新作为生产焦耳热源。2026-06-02 单 TFE TEC `1 s` 基线中，二维映射与 C++ 节点功率差为 `0 W`，TEC 转换闭合差约 `0.0250 W`，最终全局残差约 `0.0891 W`。
 
 v7 CaseA 多 TEC 串联路径仍会重复报告 `Failed to converge after 100000 iterations.`。该问题属于后续电路收敛专项，不能视为焦耳热映射已经解决的范围。
+
+## 13. 2026-06-02 全局慢化剂映射顺序补充
+
+`ReactorCore.pre_step()` 必须先执行 `TFEUnit.pre_step()` 更新内部等效 moderator 外边界温度，再刷新该 moderator 的边界热流缓存，最后将外流按 `tfe_multipliers` 聚合到全局慢化剂环。不得直接复用旧时间层 `BoundaryRegion.current_flux`；该错误在 restart 后会放大为首步非物理源项脉冲。
