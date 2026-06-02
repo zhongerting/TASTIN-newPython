@@ -19,7 +19,7 @@ Components/ReactorCore.py 或 Components/TECCircuitManager.py
     -> thermionicEmission
 ```
 
-当前工作树中存在接口演进未闭合的问题。尤其不要把“逐节点侧面积”“`fixed_I` Python 模式”“功函数结果读取”“铯池温度运行时热更新”写成已经可用的能力。详见“事实等级”和“已知风险”。
+2026-06-01 已闭合逐节点侧面积、`phiE/phiC/Vd` 结果读取和铯池温度运行时热更新，并使用 Python 3.12 重新构建 `te_solver.cp312-win_amd64.pyd`。`fixed_I` 不在本轮实现范围内，包装层会明确拒绝该模式。
 
 ## 2. 首次接管阅读顺序
 
@@ -73,8 +73,8 @@ isFixedR == true -> resistanceFixedCircuitCalc()
 | `[2]` | `dlE` 发射极节点长度 `[m]` | `n_node` |
 | `[3]` | `dlC` 接收极节点长度 `[m]` | `n_node` |
 | `[4]` | `{crossAreaE, crossAreaC}` 电极横截面积 `[m^2]` | `2` |
-| `[5]` | `{sideAreaE}` 发射极侧面积 `[m^2]` | `1`，标量 |
-| `[6]` | `{sideAreaC}` 接收极侧面积 `[m^2]` | `1`，标量 |
+| `[5]` | `sideAreaE` 发射极侧面积 `[m^2]` | `n_node` |
+| `[6]` | `sideAreaC` 接收极侧面积 `[m^2]` | `n_node` |
 | `[7]` | `resistanceWire` 导线电阻 `[Ohm]` | `4` |
 | `[8]` | `{U_init, d_gap}` 初始总电压 `[V]`、极间距 `[mm]` | `2` |
 | `[9]` | `Tcs` 铯池温度 `[K]` | `n_node` |
@@ -82,7 +82,7 @@ isFixedR == true -> resistanceFixedCircuitCalc()
 | `[11]` | `{Itarget}` 目标电流 `[A]` | `1` |
 | `[12]` | `wireU` 导线电压初值 `[V]` | `4` |
 
-`initial()` 初始化电阻率、电阻和 `thermionicUnits`。`Icalc()` 反复执行 `Jcalc()`、`UwireCalc()` 和 `VcalcFVM()`，更新节点电流密度、电势与内部截面电流。当前头文件中 `sideAreaE` 和 `sideAreaC` 仍是 `double`。
+`initial()` 初始化电阻率、电阻和 `thermionicUnits`。`Icalc()` 反复执行 `Jcalc()`、`UwireCalc()` 和 `VcalcFVM()`，更新节点电流密度、电势与内部截面电流。`sideAreaE` 和 `sideAreaC` 当前都是长度为 `n_node` 的向量，所有编译范围内的电流积分和电势公式均按节点索引使用面积。
 
 ### 4.3 `thermionicEmission`
 
@@ -96,17 +96,17 @@ isFixedR == true -> resistanceFixedCircuitCalc()
 |---|---|---|
 | `ThermoCalcModel(n_elements, n_nodes)` | 创建 `te_solver.InputData()` 并填默认值 | 若 `te_solver` 未成功导入，实例化仍会失败 |
 | `set_temperatures(T_em, T_co)` | 校验 `(N_elem, n_node)`，保存副本；电路已构建时写入每根 `SingleTEC` | 当前绑定暴露了 `Temitter`、`Tcollector` |
-| `setup_circuit_mode(mode_str, target_value, I_guess=150.0)` | 接受 `fixed_R`、`fixed_U`、`fixed_I` 字符串 | `fixed_I` 与当前绑定不一致，见风险清单 |
-| `build()` | 把温度写入 `InputData`，调用 `te_solver.create_circuit()` | 当前侧面积维度不一致可能在这里触发故障 |
+| `setup_circuit_mode(mode_str, target_value, I_guess=150.0)` | 接受 `fixed_R`、`fixed_U`；对 `fixed_I` 明确抛出 `ValueError` | `fixed_I` 未暴露 |
+| `build()` | 把温度写入 `InputData`，调用 `te_solver.create_circuit()` | 绑定层在 `unchecked<>` 前执行完整形状校验 |
 | `calculate(verbose=False)` | 必要时自动 `build()`，再调用 `_circuit.calc()`；返回耗时 `[ms]` | 不是物理时间步长度 |
 | `get_global_results()` | 返回 `Iout`、`Uout`、`Rload` | 电路未构建时返回 `None` |
 | `get_tec_results(idx)` | 返回指定 TFE 的详细字典 | 包装层读取了绑定未暴露的字段，见风险清单 |
-| `set_tcs(tcs_val)` | 接受标量或 `(N_elem, n_node)`，更新 `_input_data.Tcs` | 构建后的热更新路径与当前绑定不一致 |
+| `set_tcs(tcs_val)` | 接受标量或 `(N_elem, n_node)`，更新 `_input_data.Tcs` | 构建后调用电路级 `set_tcs()` 逐 TEC 热更新 |
 | `set_rload(rload_val)` | 尝试更新输入结构；构建后尝试更新 C++ 电路负载 | 构建后的 `CircuitTECs.Rload` 属性已绑定；构建前输入结构没有对应可写绑定 |
 
 ## 6. `InputData` 字段、维度与默认值
 
-`bindings.cpp` 定义 `InputData`，`ThermoCalcWrapper.py` 负责填充。`create_circuit()` 使用 `unchecked<1>()` 和 `unchecked<2>()` 提取 NumPy 数据，没有完整的显式形状校验；调用方必须自行保证维度正确。
+`bindings.cpp` 定义 `InputData`，`ThermoCalcWrapper.py` 负责填充。`create_circuit()` 在进入 `unchecked<1>()` 和 `unchecked<2>()` 前对所有数组执行显式形状校验。
 
 | 字段 | 绑定层期望维度 | 单位 | 包装层默认值 |
 |---|---|---|---|
@@ -119,8 +119,8 @@ isFixedR == true -> resistanceFixedCircuitCalc()
 | `V_init` | `(N_elem, n_node)` | `V` | `0.2` |
 | `crossAreaE` | `(N_elem,)` | `m^2` | `6.667e-5` |
 | `crossAreaC` | `(N_elem,)` | `m^2` | `1.0786e-4` |
-| `sideAreaE` | 当前绑定读取 `(N_elem,)` | `m^2` | 包装层当前却创建 `(N_elem, n_node)`，每格 `0.00092855424159680002 * 25 / n_node` |
-| `sideAreaC` | 当前绑定读取 `(N_elem,)` | `m^2` | 包装层当前却创建 `(N_elem, n_node)`，每格 `0.00097592945800480005 * 25 / n_node` |
+| `sideAreaE` | `(N_elem, n_node)` | `m^2` | 每格 `0.00092855424159680002 * 25 / n_node` |
+| `sideAreaC` | `(N_elem, n_node)` | `m^2` | 每格 `0.00097592945800480005 * 25 / n_node` |
 | `U_init` | `(N_elem,)` | `V` | `1.6` |
 | `d_gap` | `(N_elem,)` | `mm` | `0.5` |
 | `Itarget` | `(N_elem,)` | `A` | `200.0` |
@@ -156,6 +156,7 @@ isFixedR == true -> resistanceFixedCircuitCalc()
 | `rhoE`、`rhoC` | `n_node` | 发射极、接收极电阻率 `[Ohm*m]` |
 | `IEsecSingle`、`ICsecSingle` | `n_node` | 发射极、接收极内部截面电流 `[A]` |
 | `Temitter`、`Tcollector`、`Tcs` | `n_node` | 温度输入，可由 Python 读写 |
+| `phiE`、`phiC`、`Vd` | `n_node` | 节点功函数和电弧降结果 |
 
 ### 7.2 包装层声明的 `get_tec_results()`
 
@@ -168,7 +169,7 @@ phiE, phiC, Vd,
 TE, TC
 ```
 
-其中 `TE` 和 `TC` 分别从绑定后的 `Temitter`、`Tcollector` 读取。`phiE`、`phiC`、`Vd` 虽存在于节点级 `thermionicEmission`，但当前 `bindings.cpp` 没有把它们汇总到 `SingleTEC`，也没有向 Python 暴露。调用 `get_tec_results()` 时需要重点验证这三个字段。
+其中 `TE` 和 `TC` 分别从绑定后的 `Temitter`、`Tcollector` 读取。`Jcalc()` 会把节点级 `thermionicEmission` 的 `phiE`、`phiC`、`Vd` 同步到 `SingleTEC` 向量，并由绑定层向 Python 暴露。
 
 ## 8. 两条上层集成路径
 
@@ -208,7 +209,7 @@ post_step()
     -> set_temperatures() 写回虚拟元件矩阵
 ```
 
-`_configure_thermo_calc_geometry()` 会从热网格复制逐节点 `dlE/dlC` 和逐节点 `sideAreaE/sideAreaC`。这描述的是 Python 上层意图，不代表当前 C++ 绑定已支持逐节点侧面积。
+`_configure_thermo_calc_geometry()` 会从热网格复制逐节点 `dlE/dlC` 和逐节点 `sideAreaE/sideAreaC`。当前 C++ 绑定和单 TEC 后端已支持这一输入。
 
 ## 9. 事实等级
 
@@ -216,19 +217,17 @@ post_step()
 
 - 模块调用链为 `ReactorCore / TECCircuitManager -> ThermoCalcWrapper -> bindings.cpp -> circuitTECs -> singleThermionicEnergyConversion -> thermionicEmission`。
 - 当前绑定枚举只有 `FixedVoltage` 和 `FixedResistance`。
-- 当前绑定层把 `sideAreaE/sideAreaC` 送入单根 TFE 时按每根元件一个标量读取。
-- 当前单根 TFE 的 `sideAreaE/sideAreaC` 是标量 `double`。
+- 当前绑定层把 `sideAreaE/sideAreaC` 作为 `(N_elem, n_axi)` 二维数组逐行送入单根 TFE。
+- 当前单根 TFE 的 `sideAreaE/sideAreaC` 是逐节点 `vector<double>`。
 - `dlE/dlC` 在单根 TFE 内是向量，当前 `VcalcFVM()` 会读取节点长度。
-- 当前 `SingleTEC` 绑定没有 `phiE`、`phiC`、`Vd`。
-- 当前 `CircuitTECs` 绑定没有 `set_tcs()` 方法或 `Tcs` 属性，但 `SingleTEC` 有 `Tcs` 属性。
+- 当前 `SingleTEC` 绑定暴露 `phiE`、`phiC`、`Vd`。
+- 当前 `CircuitTECs` 绑定提供 `set_tcs()`，并逐根更新 `SingleTEC.Tcs`。
 - 上层两条路径都依赖 `ThermoCalcModel`，`ReactorCore` 还会写入二维逐节点侧面积。
 
 ### B. 需要 Python 3.12 编译产物进一步验证
 
 - `te_solver.cp312-win_amd64.pyd` 是否确实由当前工作树源码构建。
-- 当前二维 `sideAreaE/sideAreaC` 传入 `unchecked<1>()` 后的实际失败形式。
-- `get_tec_results()` 读取 `phiE/phiC/Vd` 时的实际异常位置。
-- `set_tcs()` 在构建后的运行时热更新是否必然进入包装层的 `AttributeError` 分支。
+- 更长时 TEC 瞬态下，电子边界功率差与端功率、焦耳热之间的稳定离散误差门槛。
 - `set_rload()` 在目标运行环境中的构建前、构建后行为。
 - 定电压、定电阻模式在目标案例中的数值结果和收敛性。
 
@@ -243,12 +242,9 @@ post_step()
 
 | 风险 | 当前源码证据 | 处理原则 |
 |---|---|---|
-| 当前解释器与扩展 ABI 不匹配 | 当前 `python --version` 为 `3.9.13`，目录中的主扩展为 `te_solver.cp312-win_amd64.pyd` | 使用 Python 3.12 环境重新核验运行时接口 |
-| `fixed_I` 公共模式未闭合 | 包装层引用 `CalculationMode.FixedCurrent`，绑定枚举只有 `FixedVoltage`、`FixedResistance` | 不要宣称 Python 支持定电流模式 |
-| 侧面积维度冲突 | 包装层和 `ReactorCore` 写二维数组；绑定层 `get_scalar()` 按一维读取；单根 TFE 保存标量 | 不要宣称逐节点侧面积已经实现 |
-| 非均匀网格正确性未证明 | `dlE/dlC` 是向量，但逐节点侧面积未闭合，`VcalcFVM()` 的界面距离仍直接使用 `dl[i]` | 把指南视为历史资料；修改时补专项验证 |
-| 详细结果字段缺口 | 包装层读取 `tec.phiE/phiC/Vd`，当前 `SingleTEC` 未暴露 | 上层等离子体热流路径需要目标环境验证或后续修复 |
-| `set_tcs()` 热更新路径不一致 | 包装层查找 circuit 级 `set_tcs` 或 `Tcs`；当前 `CircuitTECs` 均未绑定 | 构建前更新输入可记录，构建后热更新不要当作已实现 |
+| 默认解释器与扩展 ABI 不匹配 | 默认 `python --version` 仍为 `3.9.13`，主扩展为 `te_solver.cp312-win_amd64.pyd` | TEC 测试和运行使用 Python 3.12 |
+| `fixed_I` 公共模式未实现 | 包装层明确拒绝 `fixed_I`；绑定枚举只有 `FixedVoltage`、`FixedResistance` | 不要宣称 Python 支持定电流模式 |
+| 非均匀网格完整数学验证仍有限 | `dlE/dlC` 和侧面积已逐节点化，但 `VcalcFVM()` 的界面距离仍沿用现有离散公式 | 修改电势离散时补专项守恒验证 |
 | `set_rload()` 构建前行为不完整 | 包装层尝试写 `_input_data.Rload/R_load`，当前 `InputData` 未绑定这些字段 | 构建后可写 `CircuitTECs.Rload`；构建前优先使用 `setup_circuit_mode('fixed_R', ...)` |
 | 原始指针生命周期风险 | `create_circuit()` 为每根 TFE `new` 对象；相关析构函数当前为空 | 若处理长时运行内存问题，专项检查所有权与释放逻辑 |
 
@@ -277,4 +273,11 @@ post_step()
 5. 若修改面积或网格，增加逐节点面积、非均匀长度、电荷守恒和结果回归检查。
 6. 若修改上层耦合，分别检查 `TECCircuitManager` 和 `ReactorCore` 路径，避免只修复其中一条。
 
-当前环境只能完成静态源码核对：`python` 为 3.9.13，无法直接导入 `te_solver.cp312-win_amd64.pyd` 做 Python 3.12 运行时验证。
+2026-06-01 已使用：
+
+```text
+C:\Users\HC Zhao\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe
+Python 3.12.13
+```
+
+重新构建并验证 `te_solver.cp312-win_amd64.pyd`。`testModule/test_thermocalc_interface.py` 覆盖形状拒绝、均匀与非均匀节点面积、`phiE/phiC/Vd`、构建前后温度和 `Tcs` 更新、`fixed_I` 显式拒绝。单 TFE TEC `1 s` 基线也已运行。

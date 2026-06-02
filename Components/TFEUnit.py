@@ -151,7 +151,8 @@ class TFEUnit(BaseComponent):
                  # --- [TEASA 新增] 轴向网格非均匀配置与接触热阻 ---
                  axial_length_allocation: Optional[List[float]] = None,
                  axial_node_allocation: Optional[List[int]] = None,
-                 axial_contact_resistance: float = 0.0):  # 外部传入的冷却剂流体实例
+                 axial_contact_resistance: float = 0.0,
+                 strict_adiabatic_single_tfe: bool = False):  # 外部传入的冷却剂流体实例
 
         super().__init__(name)
 
@@ -164,6 +165,7 @@ class TFEUnit(BaseComponent):
         self.power_fraction = power_fraction
         self.axial_power_profile = axial_power_profile
         self.axial_contact_resistance = axial_contact_resistance
+        self.strict_adiabatic_single_tfe = bool(strict_adiabatic_single_tfe)
 
         # 将四个间隙的配置存入一个内部字典，方便后续按名字调用和迭代
         self.gap_configs = {
@@ -364,22 +366,23 @@ class TFEUnit(BaseComponent):
             initial_temp=743.0
         )
 
-        # ---------------------------------------------------------
-        # (7) 等效慢化剂 (Moderator)
-        # ---------------------------------------------------------
-        # 严格使用 r_moderator_inner，保留 CO2 间隙的物理空间跳跃
-        delta_mod = self.geom.r_moderator_outer - self.geom.r_moderator_inner
-        mesh_mod = Mesh2D(x_dim=delta_mod, n_x=self.mesh.n_r_moderator,
-                          y_dim=H, n_y=Ny, y_faces=self.common_y_faces,
-                          geometry_type='cylindrical',
-                          inner_radius=self.geom.r_moderator_inner)  # [修正]
+        if not self.strict_adiabatic_single_tfe:
+            # ---------------------------------------------------------
+            # (7) 等效慢化剂 (Moderator)
+            # ---------------------------------------------------------
+            # 严格使用 r_moderator_inner，保留 CO2 间隙的物理空间跳跃
+            delta_mod = self.geom.r_moderator_outer - self.geom.r_moderator_inner
+            mesh_mod = Mesh2D(x_dim=delta_mod, n_x=self.mesh.n_r_moderator,
+                              y_dim=H, n_y=Ny, y_faces=self.common_y_faces,
+                              geometry_type='cylindrical',
+                              inner_radius=self.geom.r_moderator_inner)  # [修正]
 
-        self.solids['moderator'] = HeatConduction2D(
-            name=f"{self.name}_Moderator",
-            mesh=mesh_mod,
-            material=self.materials.get('ZrH'),
-            initial_temp=743.0
-        )
+            self.solids['moderator'] = HeatConduction2D(
+                name=f"{self.name}_Moderator",
+                mesh=mesh_mod,
+                material=self.materials.get('ZrH'),
+                initial_temp=743.0
+            )
 
         # ==========================================
         # 动态保真度气隙层 (当 mode == 'meshed' 时构建实体)
@@ -414,7 +417,7 @@ class TFEUnit(BaseComponent):
 
         # [D] CO2气隙
         cfg_co2 = self.gap_configs['co2_gap']
-        if cfg_co2.mode == 'meshed':
+        if not self.strict_adiabatic_single_tfe and cfg_co2.mode == 'meshed':
             d_co2 = self.geom.r_moderator_inner - self.geom.r_outer_clad_outer
             mesh_co2 = Mesh2D(x_dim=d_co2, n_x=cfg_co2.n_radial_nodes, y_dim=H, n_y=Ny, y_faces=self.common_y_faces,
                               geometry_type='cylindrical', inner_radius=self.geom.r_outer_clad_outer)
@@ -431,7 +434,6 @@ class TFEUnit(BaseComponent):
         s_collector = self.solids['collector']
         s_iclad = self.solids['inner_clad']
         s_oclad = self.solids['outer_clad']
-        s_mod = self.solids['moderator']
 
         # =========================================================
         # [Interface A] 芯块 -> 发射极 (裂变气隙)
@@ -535,9 +537,14 @@ class TFEUnit(BaseComponent):
                 correlation_func=nu_ringpipe_adapter, solid_node_capacitance=cap_outer
             )
 
+        if self.strict_adiabatic_single_tfe:
+            s_oclad.boundaries['right'].clear_conditions()
+            return
+
         # =========================================================
         # [Interface E] 外套管 -> 慢化剂 (CO2 气隙)
         # =========================================================
+        s_mod = self.solids['moderator']
         cfg_co2 = self.gap_configs['co2_gap']
         w_co2 = self.geom.r_moderator_inner - self.geom.r_outer_clad_outer
 

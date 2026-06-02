@@ -1,8 +1,10 @@
-# TASTIN-Python 总体概括与 Codex 接管导航
+# AGENTS.md - TASTIN-Python 总体概括与 Codex 接管导航
 
 > 面向新的 Codex 对话和开发者。  
 > 目标：先通过本文建立全局认识，再按任务定向阅读子模块说明；不要默认重新遍历整个代码仓库。  
 > 本文基于各模块说明整理，基线日期：2026-05-31。源码与文档冲突时，以当前源码为准，并在任务中同步修正文档。
+>
+> Codex 在本仓库内开始任务时，应将本文作为项目级首读指令，并按本文导航定向读取子模块说明。
 
 ## 1. 新对话的最小阅读协议
 
@@ -150,8 +152,8 @@ test_core_assemble_v7_caseA.py
 
 这些问题在进一步修改或运行前需要主动核验：
 
-1. `ThermoCalc` 当前存在 Python 包装、pybind11 绑定和 C++ 实现未完全闭合的问题。不要默认宣称 `fixed_I`、逐节点侧面积、`phiE/phiC/Vd` 结果读取或构建后 `Tcs` 热更新已经可用。
-2. 当前工作区说明记录：默认 `python` 为 3.9.13，而主要扩展为 `te_solver.cp312-win_amd64.pyd`。运行 ThermoCalc 前必须使用 ABI 匹配的 Python 3.12 环境重新验证。
+1. `ThermoCalc` 已于 2026-06-01 闭合逐节点侧面积、`phiE/phiC/Vd` 结果读取和构建后 `Tcs` 热更新，并重新构建 `te_solver.cp312-win_amd64.pyd`。`fixed_I` 仍不支持，包装层会明确拒绝该模式。
+2. 默认 `python` 仍为 3.9.13，而主要扩展为 `te_solver.cp312-win_amd64.pyd`。运行 ThermoCalc 必须使用 ABI 匹配的 Python 3.12 环境；本轮验证解释器记录在 `ThermoCalc/AI_AGENT_THERMOCALC_ANALYSIS.md`。
 3. `Correlations.h_single_crossflow_pipe()` 当前调用参数不足，直接使用会触发运行时 `TypeError`。
 4. `Materials/Fluids/NaK78.py` 仅部分实现；主用液态 NaK78 类是 `SodiumPotassium78`。不要仅按文件名推断模型使用的冷却剂。
 5. `Components/basicComponents/Electord.py` 的文件名拼写已被现有导入路径依赖，不要直接重命名。

@@ -39,6 +39,8 @@ namespace std {
 		double uFixedCircuitCalc();
 		// 启动阶段电阻计算函数
 		double resistanceFixedCircuitCalc();
+		// 运行时更新每根 TEC 的铯池温度
+		void setTcs(const vector<vector<double>>& values);
 
 	public:
 		vector<singleThermionicEnergyConversion*> TECs;

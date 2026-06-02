@@ -1,6 +1,7 @@
 #include "circuitTECs.h"
 #include "singleThermionicEnergyConversion.h"
 #include "thermionicEmission.h"
+#include <stdexcept>
 
 namespace std {
 	circuitTECs::circuitTECs() {
@@ -8,6 +9,17 @@ namespace std {
 	}
 	circuitTECs::~circuitTECs() {
 
+	}
+	void circuitTECs::setTcs(const vector<vector<double>>& values) {
+		if (values.size() != TECs.size()) {
+			throw invalid_argument("Tcs element count does not match circuit TEC count.");
+		}
+		for (size_t i = 0; i < TECs.size(); ++i) {
+			if (values[i].size() != TECs[i]->Tcs.size()) {
+				throw invalid_argument("Tcs axial node count does not match TEC node count.");
+			}
+			TECs[i]->Tcs = values[i];
+		}
 	}
 	// 串联电路计算
 	double circuitTECs::circuitCalc(double I) {

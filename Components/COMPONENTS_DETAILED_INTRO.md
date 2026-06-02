@@ -582,6 +582,18 @@ TFE 径向和轴向网格划分参数。
 
 `GapConfig(mode='simplified', h_eq=...)` 使用等效换热系数。`GapConfig(mode='meshed', material=..., n_radial_nodes=...)` 将气隙本身建成固体网格；此模式必须同时提供材料和正整数径向节点数。
 
+### 严格绝热单 TFE 模式
+
+`TFEUnit(..., strict_adiabatic_single_tfe=True)` 仅用于单根 TFE 能量守恒诊断。默认值为 `False`，现有堆芯行为不变。
+
+启用后：
+
+- 不创建内部等效 moderator 固体。
+- 不创建 CO2 间隙网格，也不注册外套管到 moderator 的耦合器。
+- 清空外套管右边界条件，使该边界逐节点严格为零热流。
+
+标准堆芯装配不得开启该选项。专题入口见 [`../testModule/SINGLE_TFE_ENERGY_CONSERVATION_GUIDE.md`](../testModule/SINGLE_TFE_ENERGY_CONSERVATION_GUIDE.md)。
+
 ### 最小 `TFEUnit` 模板
 
 下面模板可直接复制。`coolant_channel` 需要先按水力网络接口构造，通常为 `IncompressibleFluidChannel`。

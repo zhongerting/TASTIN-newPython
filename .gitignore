@@ -11,6 +11,11 @@ build/
 .idea/
 *.iml
 *.log
+*.err
+*.out
+*.png
+*.7z
+*.zip
 .vscode/
 
 # Simulation result artifacts
@@ -18,3 +23,8 @@ build/
 *.csv
 CoolantLoop/*.png
 testModule/*.png
+CoolantLoop/*_profiler_report.txt
+ThermoCalc/build_cp312/
+testModule/single_tfe_energy_conservation_v7*/
+testModule/tec_joule_fix_audit_tmp/
+testModule/v7_caseA_*/

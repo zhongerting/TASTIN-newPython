@@ -304,7 +304,7 @@ class BaseHeatConduction(ABC):
         sol = solve_ivp(
             fun=self.get_derivatives,
             t_span=t_span,
-            y0=self.T,
+            y0=self.T.copy(),
             method='BDF',
             **kwargs
         )

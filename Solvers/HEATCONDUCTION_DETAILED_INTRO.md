@@ -340,6 +340,14 @@ solid.link_source_buffer(external_buffer)
 
 时间推进由 `solve_ivp` 完成。代码默认使用 BDF 隐式方法，并在 2D 情况下可注入稀疏雅可比结构。
 
+`step()` 必须把温度初值副本传给积分器：
+
+```python
+y0=self.T.copy()
+```
+
+不能直接传 `self.T` 本体。`get_derivatives()` 会把积分器试探状态原地写回 `self.T`；若 `y0` 与 `self.T` 共享底层数组，试探点评估可能污染积分初值并制造伪储能。2026-06-01 的单 TFE 严格绝热守恒诊断曾由此出现 kW 到 MW 级残差。
+
 ### 5.2 `HeatConduction1D`
 
 `HeatConduction1D` 适用于一维固体导热。默认创建两个边界：

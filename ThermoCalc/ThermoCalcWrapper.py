@@ -119,7 +119,7 @@ class ThermoCalcModel:
         elif mode_str.lower() == 'fixed_u':
             self._input_data.mode = te_solver.CalculationMode.FixedVoltage
         elif mode_str.lower() == 'fixed_i':
-            self._input_data.mode = te_solver.CalculationMode.FixedCurrent
+            raise ValueError("fixed_I mode is not exposed by the ThermoCalc C++ binding.")
         else:
             raise ValueError(f"不支持的模式: {mode_str}")
 
@@ -231,15 +231,10 @@ class ThermoCalcModel:
 
         # --- 2. C++ 运行时热更新 (Hot Update) ---
         if self._circuit is not None:
-            # TEASA 防御性编程：根据你底层 PyBind11 的具体绑定方式进行尝试
-            if hasattr(self._circuit, 'set_tcs'):
-                self._circuit.set_tcs(self._input_data.Tcs)
-            elif hasattr(self._circuit, 'Tcs'):
-                # 如果 C++ 端直接将 Tcs 暴露为可写的 numpy array / memoryview 属性
-                self._circuit.Tcs = self._input_data.Tcs
-            else:
+            if not hasattr(self._circuit, 'set_tcs'):
                 raise AttributeError(
-                    "[ThermoCalcWrapper] The underlying C++ object lacks 'set_tcs' method or 'Tcs' property. Cannot update Tcs at runtime!")
+                    "[ThermoCalcWrapper] The underlying C++ object lacks 'set_tcs'. Cannot update Tcs at runtime!")
+            self._circuit.set_tcs(self._input_data.Tcs)
 
     def set_rload(self, rload_val: float):
         """

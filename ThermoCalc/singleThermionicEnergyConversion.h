@@ -33,6 +33,9 @@ namespace std {
 		vector<double> V00;
 		vector<double> J;
 		vector<double> JA;
+		vector<double> phiE;
+		vector<double> phiC;
+		vector<double> Vd;
 
 	public:
 		vector<double> rhoE;
@@ -58,8 +61,8 @@ namespace std {
 		vector<double> ICsecSingle;
 		
 	private:
-		double sideAreaE;
-		double sideAreaC;
+		vector<double> sideAreaE;
+		vector<double> sideAreaC;
 		double crossAreaE;
 		double crossAreaC;
 

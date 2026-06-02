@@ -22,8 +22,8 @@ namespace std {
 		crossAreaC = input[4][1];
 		// 5--发射极侧面积
 		// 6--接收极侧面积
-		sideAreaE = input[5][0];
-		sideAreaC = input[6][0];
+		sideAreaE = input[5];
+		sideAreaC = input[6];
 		// 7.0--发射极、接收极两端电阻
 		resistanceWire = input[7];
 		// 8.0--总电压，8.1--电极间距
@@ -67,6 +67,9 @@ namespace std {
 		// 分配其他变量内存
 		J.resize(n);
 		JA.resize(n);
+		phiE.resize(n);
+		phiC.resize(n);
+		Vd.resize(n);
 		UE.resize(n);
 		UC.resize(n);
 		currentWire.resize(2);
@@ -130,6 +133,9 @@ namespace std {
 			// thermionicEmission* T1 = new thermionicEmission(inputTemp);
 			Jtemp = thermionicUnits[i]->calc();
 			J[i] = Jtemp * factor + (1.- factor) * J[i];
+			phiE[i] = thermionicUnits[i]->phiE;
+			phiC[i] = thermionicUnits[i]->phiC;
+			Vd[i] = thermionicUnits[i]->Vd;
 			//delete T1;
 			//T1 = nullptr;
 		}
@@ -151,13 +157,13 @@ namespace std {
 			else {
 				coeI[i] = coeI[i + 1] + 0.5 * (resistanceC[i] + resistanceC[i + 1]);
 			}
-			IRall += J[i] * coeI[i] * sideAreaE * 10000.;
+			IRall += J[i] * coeI[i] * sideAreaE[i] * 10000.;
 		}
 		currentWire[1] = IRall / Rall;
 		// 接收极每段电流
 		vector<double> ICsec(n);
 		for (int i = 0; i < n; ++i) {
-			ICsec[i] = J[i] * 10000. * sideAreaE;
+			ICsec[i] = J[i] * 10000. * sideAreaE[i];
 		}
 		// 根据接收极电流计算接收极各点电压
 		double Itemp = currentWire[1];
@@ -168,11 +174,11 @@ namespace std {
 				UC[i] = -Itemp * (resistanceWire[2] + 0.5 * resistanceC[i]);
 			}
 			else if (i < n){
-				Itemp = Itemp - J[i - 1] * sideAreaE * 10000.;
+				Itemp = Itemp - J[i - 1] * sideAreaE[i - 1] * 10000.;
 				UC[i] = UC[i - 1] - Itemp * 0.5 * (resistanceC[i - 1] + resistanceC[i]);
 			}
 			else {
-				Itemp = Itemp - J[i - 1] * sideAreaE * 10000.;
+				Itemp = Itemp - J[i - 1] * sideAreaE[i - 1] * 10000.;
 				Utemp = UC[i - 1] - Itemp * (0.5 * resistanceC[i - 1] + resistanceWire[3]);
 			}
 		}
@@ -190,7 +196,7 @@ namespace std {
 			else {
 				coeI[i] = coeI[i + 1] + 0.5 * (resistanceE[i] + resistanceE[i + 1]);
 			}
-			IRall += J[i] * coeI[i] * sideAreaE * 10000.;
+			IRall += J[i] * coeI[i] * sideAreaE[i] * 10000.;
 		}
 		currentWire[0] = IRall / Rall;
 		// 根据发射极电流计算发射极各点电压
@@ -202,11 +208,11 @@ namespace std {
 				UE[i] = U + Itemp * (resistanceWire[2] + 0.5 * resistanceE[i]);
 			}
 			else if (i < n) {
-				Itemp = Itemp - J[i - 1] * sideAreaE * 10000.;
+				Itemp = Itemp - J[i - 1] * sideAreaE[i - 1] * 10000.;
 				UE[i] = UE[i - 1] + Itemp * 0.5 * (resistanceE[i - 1] + resistanceE[i]);
 			}
 			else {
-				Itemp = Itemp - J[i - 1] * sideAreaE * 10000.;
+				Itemp = Itemp - J[i - 1] * sideAreaE[i - 1] * 10000.;
 				Utemp = UE[i - 1] + Itemp * (0.5 * resistanceE[i - 1] + resistanceWire[3]);
 			}
 		}
@@ -261,7 +267,7 @@ namespace std {
 		}
 
 		for (int i = 0; i < int(Temitter.size()); ++i) {
-			JA[i] = J[i] * sideAreaE * 10000.;
+			JA[i] = J[i] * sideAreaE[i] * 10000.;
 		}
 
 		return I - Itarget;
@@ -274,7 +280,7 @@ namespace std {
 		vector<double> coeI(n, 0.);
 		// 计算总电流
 		for (int i = 0; i < n; ++i) {
-			Iall += J[i] * 10000. * sideAreaE;
+			Iall += J[i] * 10000. * sideAreaE[i];
 		}
 		// 计算发射极电流
 		Rall = resistanceWire[1] + resistanceWire[0];
@@ -289,7 +295,7 @@ namespace std {
 			else {
 				coeI[i] = coeI[i + 1] + 0.5 * (resistanceE[i] + resistanceE[i + 1]);
 			}
-			IRall += J[i] * coeI[i] * sideAreaE * 10000.;
+			IRall += J[i] * coeI[i] * sideAreaE[i] * 10000.;
 		}
 		currentWire[0] = IRall / Rall;
 		// 计算发射极两端电压
@@ -314,7 +320,7 @@ namespace std {
 				else {
 					coeI[i] = coeI[i + 1] + 0.5 * (resistanceC[i] + resistanceC[i + 1]);
 				}
-				IRall += J[i] * coeI[i] * sideAreaE * 10000.;
+				IRall += J[i] * coeI[i] * sideAreaE[i] * 10000.;
 			}
 			currentWire[1] = IRall / Rall;
 		}
@@ -345,7 +351,7 @@ namespace std {
 		int n = int(Temitter.size());
 
 		for (int i = 0; i < n; ++i) {
-			Iall += J[i] * 10000. * sideAreaE;
+			Iall += J[i] * 10000. * sideAreaE[i];
 		}
 
 		vector<double> result(n, 0.); 
@@ -355,13 +361,13 @@ namespace std {
 
 		// 1. 计算第一个节点的电流 (考虑半步长边界源项)
 		// 这里的逻辑与 VcalcDirect 完全一致
-		IEsec[0] = currentWire[0] - 0.5 * J[0] * 10000. * sideAreaE;
-		ICsec[0] = currentWire[1] - 0.5 * J[0] * 10000. * sideAreaE;
+		IEsec[0] = currentWire[0] - 0.5 * J[0] * 10000. * sideAreaE[0];
+		ICsec[0] = currentWire[1] - 0.5 * J[0] * 10000. * sideAreaE[0];
 
 		// 2. 累加计算后续节点的电流
 		for (int i = 1; i < n; ++i) {
-			IEsec[i] = IEsec[i - 1] - 0.5 * (J[i - 1] + J[i]) * 10000. * sideAreaE;
-			ICsec[i] = ICsec[i - 1] - 0.5 * (J[i - 1] + J[i]) * 10000. * sideAreaE;
+			IEsec[i] = IEsec[i - 1] - 0.5 * (J[i - 1] * sideAreaE[i - 1] + J[i] * sideAreaE[i]) * 10000.;
+			ICsec[i] = ICsec[i - 1] - 0.5 * (J[i - 1] * sideAreaE[i - 1] + J[i] * sideAreaE[i]) * 10000.;
 		}
 
 		IEsecSingle = IEsec;
@@ -386,30 +392,30 @@ namespace std {
 
 		b[0] = -3. / dlE[0] / dlE[0];
 		c[0] = 1. / dlE[0] / dlE[0];
-		d[0] = -sideAreaE * rhoE[0] / crossAreaE * J[0] * 10000. - 2. * terminalPointUE1 / dlE[0] / dlE[0];
+		d[0] = -sideAreaE[0] * rhoE[0] / crossAreaE * J[0] * 10000. - 2. * terminalPointUE1 / dlE[0] / dlE[0];
 
 		a[n - 1] = 1. / dlE[n - 1] / dlE[n - 1];
 		b[n - 1] = -3. / dlE[n - 1] / dlE[n - 1];
-		d[n - 1] = -sideAreaE * J[n - 1] * 10000.  * rhoE[n - 1] / crossAreaE - 2. * terminalPointUE2 / dlE[0] / dlE[0];
+		d[n - 1] = -sideAreaE[n - 1] * J[n - 1] * 10000.  * rhoE[n - 1] / crossAreaE - 2. * terminalPointUE2 / dlE[0] / dlE[0];
 	
 		bb[0] = -3. / dlC[0] / dlC[0];
 		cc[0] = 1. / dlC[0] / dlC[0];
-		dd[0] = sideAreaC * rhoC[0] / crossAreaC * J[0] * 10000. - 2. * terminalPointUC1 / dlC[0] / dlC[0];
+		dd[0] = sideAreaC[0] * rhoC[0] / crossAreaC * J[0] * 10000. - 2. * terminalPointUC1 / dlC[0] / dlC[0];
 
 		aa[n - 1] = 1. / dlC[n - 1] / dlC[n - 1];
 		bb[n - 1] = -3. / dlC[n - 1] / dlC[n - 1];
-		dd[n - 1] = sideAreaC * J[n - 1] * 10000. * rhoC[n - 1] / crossAreaC - 2. * terminalPointUC2 / dlC[0] / dlC[0];
+		dd[n - 1] = sideAreaC[n - 1] * J[n - 1] * 10000. * rhoC[n - 1] / crossAreaC - 2. * terminalPointUC2 / dlC[0] / dlC[0];
 
 		for (int i = 1; i < n - 1; ++i) {
 			a[i] = 1. / dlE[i] / dlE[i];
 			b[i] = -2. / dlE[i] / dlE[i];
 			c[i] = 1. / dlE[i] / dlE[i];
-			d[i] = sideAreaE * rhoE[i] / crossAreaE * 10000. * J[i];
+			d[i] = sideAreaE[i] * rhoE[i] / crossAreaE * 10000. * J[i];
 
 			aa[i] = 1. / dlC[i] / dlC[i];
 			bb[i] = -2. / dlC[i] / dlC[i];
 			cc[i] = 1. / dlC[i] / dlC[i];
-			dd[i] = sideAreaC * rhoC[i] / crossAreaC * 10000. * J[i];
+			dd[i] = sideAreaC[i] * rhoC[i] / crossAreaC * 10000. * J[i];
 		}
 
 		cp0[0] = c[0] / b[0];
@@ -453,13 +459,13 @@ namespace std {
 
 		// 1. 计算第一个节点的电流 (考虑半步长边界源项)
 		// 这里的逻辑与 VcalcDirect 完全一致
-		IEsec[0] = currentWire[0] - 0.5 * J[0] * 10000. * sideAreaE;
-		ICsec[0] = currentWire[1] - 0.5 * J[0] * 10000. * sideAreaE;
+		IEsec[0] = currentWire[0] - 0.5 * J[0] * 10000. * sideAreaE[0];
+		ICsec[0] = currentWire[1] - 0.5 * J[0] * 10000. * sideAreaE[0];
 
 		// 2. 累加计算后续节点的电流
 		for (int i = 1; i < n; ++i) {
-			IEsec[i] = IEsec[i - 1] - 0.5 * (J[i - 1] + J[i]) * 10000. * sideAreaE;
-			ICsec[i] = ICsec[i - 1] - 0.5 * (J[i - 1] + J[i]) * 10000. * sideAreaE;
+			IEsec[i] = IEsec[i - 1] - 0.5 * (J[i - 1] * sideAreaE[i - 1] + J[i] * sideAreaE[i]) * 10000.;
+			ICsec[i] = ICsec[i - 1] - 0.5 * (J[i - 1] * sideAreaE[i - 1] + J[i] * sideAreaE[i]) * 10000.;
 		}
 
 		IEsecSingle = IEsec;
@@ -523,7 +529,7 @@ namespace std {
 
 			// 节点 0 (Left Boundary)
 			// 方程: (G_L + G_face_0)*V0 - G_face_0*V1 = S0 + G_L*V_BC_Left
-			double S0 = J[0] * 10000.0 * sideAreaE;
+			double S0 = J[0] * 10000.0 * sideAreaE[0];
 			b[0] = Ge_bound_L + Ge_face[0];
 			c[0] = -Ge_face[0];
 			d[0] = S0 + Ge_bound_L * terminalPointUE1;
@@ -531,7 +537,7 @@ namespace std {
 			// 节点 1 到 n-2 (Internal)
 			// 方程: -G_L*V_{i-1} + (G_L + G_R)*Vi - G_R*V_{i+1} = Si
 			for (int i = 1; i < n - 1; ++i) {
-				double Si = J[i] * 10000.0 * sideAreaE;
+				double Si = J[i] * 10000.0 * sideAreaE[i];
 				a[i] = -Ge_face[i - 1];
 				b[i] = Ge_face[i - 1] + Ge_face[i];
 				c[i] = -Ge_face[i];
@@ -540,7 +546,7 @@ namespace std {
 
 			// 节点 n-1 (Right Boundary)
 			// 方程: -G_face_last*V_{n-2} + (G_face_last + G_R)*V_{n-1} = Sn + G_R*V_BC_Right
-			double Sn = J[n - 1] * 10000.0 * sideAreaE;
+			double Sn = J[n - 1] * 10000.0 * sideAreaE[n - 1];
 			a[n - 1] = -Ge_face[n - 2];
 			b[n - 1] = Ge_face[n - 2] + Ge_bound_R;
 			d[n - 1] = Sn + Ge_bound_R * terminalPointUE2;
@@ -580,14 +586,14 @@ namespace std {
 			// 源项 S = +J * Area (电流流入收集极)
 
 			// 节点 0
-			double S0 = -J[0] * 10000.0 * sideAreaE; // 注意：假设 sideAreaE ≈ sideAreaC，或者这里应用 sideAreaC
+			double S0 = -J[0] * 10000.0 * sideAreaE[0];
 			b[0] = Gc_bound_L + Gc_face[0];
 			c[0] = -Gc_face[0];
 			d[0] = S0 + Gc_bound_L * terminalPointUC1;
 
 			// 节点 1 到 n-2
 			for (int i = 1; i < n - 1; ++i) {
-				double Si = -J[i] * 10000.0 * sideAreaE;
+				double Si = -J[i] * 10000.0 * sideAreaE[i];
 				a[i] = -Gc_face[i - 1];
 				b[i] = Gc_face[i - 1] + Gc_face[i];
 				c[i] = -Gc_face[i];
@@ -595,7 +601,7 @@ namespace std {
 			}
 
 			// 节点 n-1
-			double Sn = -J[n - 1] * 10000.0 * sideAreaE;
+			double Sn = -J[n - 1] * 10000.0 * sideAreaE[n - 1];
 			a[n - 1] = -Gc_face[n - 2];
 			b[n - 1] = Gc_face[n - 2] + Gc_bound_R;
 			d[n - 1] = Sn + Gc_bound_R * terminalPointUC2;
@@ -629,13 +635,13 @@ namespace std {
 
 		// 1. 计算第一个节点的电流 (考虑半步长边界源项)
 		// 这里的逻辑与 VcalcDirect 完全一致
-		IEsec[0] = currentWire[0] - 0.5 * J[0] * 10000. * sideAreaE;
-		ICsec[0] = currentWire[1] - 0.5 * J[0] * 10000. * sideAreaE;
+		IEsec[0] = currentWire[0] - 0.5 * J[0] * 10000. * sideAreaE[0];
+		ICsec[0] = currentWire[1] - 0.5 * J[0] * 10000. * sideAreaE[0];
 
 		// 2. 累加计算后续节点的电流
 		for (int i = 1; i < n; ++i) {
-			IEsec[i] = IEsec[i - 1] - 0.5 * (J[i - 1] + J[i]) * 10000. * sideAreaE;
-			ICsec[i] = ICsec[i - 1] - 0.5 * (J[i - 1] + J[i]) * 10000. * sideAreaE;
+			IEsec[i] = IEsec[i - 1] - 0.5 * (J[i - 1] * sideAreaE[i - 1] + J[i] * sideAreaE[i]) * 10000.;
+			ICsec[i] = ICsec[i - 1] - 0.5 * (J[i - 1] * sideAreaE[i - 1] + J[i] * sideAreaE[i]) * 10000.;
 		}
 
 		IEsecSingle = IEsec;
@@ -656,10 +662,10 @@ namespace std {
 		b[0] = -3 * crossAreaE / rhoE[0] / dlE[0] / dlE[0];
 		b[n - 1] = -3 * crossAreaE / rhoE[n - 1] / dlE[n - 1] / dlE[n - 1];
 
-		dd[0] = sideAreaE * J[0] * 10000 - terminalPointUC1 * crossAreaC / (rhoC[0] * dlC[0] * dlC[0]) * 2;
-		dd[n - 1] = sideAreaE * J[n - 1] * 10000 - terminalPointUC2 * crossAreaC / (rhoC[n - 1] * dlC[n - 1] * dlC[n - 1]) * 2;
-		d[0] = -sideAreaE * J[0] * 10000 - terminalPointUE1 * crossAreaE / (rhoE[0] * dlE[0] * dlE[0]) * 2;
-		d[n - 1] = -sideAreaE * J[n - 1] * 10000 - terminalPointUE2 * crossAreaE / (rhoE[n - 1] * dlE[n - 1] * dlE[n - 1]) * 2;
+		dd[0] = sideAreaE[0] * J[0] * 10000 - terminalPointUC1 * crossAreaC / (rhoC[0] * dlC[0] * dlC[0]) * 2;
+		dd[n - 1] = sideAreaE[n - 1] * J[n - 1] * 10000 - terminalPointUC2 * crossAreaC / (rhoC[n - 1] * dlC[n - 1] * dlC[n - 1]) * 2;
+		d[0] = -sideAreaE[0] * J[0] * 10000 - terminalPointUE1 * crossAreaE / (rhoE[0] * dlE[0] * dlE[0]) * 2;
+		d[n - 1] = -sideAreaE[n - 1] * J[n - 1] * 10000 - terminalPointUE2 * crossAreaE / (rhoE[n - 1] * dlE[n - 1] * dlE[n - 1]) * 2;
 
 		cc[0] = crossAreaC / (rhoC[0] * dlC[0] * dlC[0]);
 		aa[n - 1] = crossAreaC / (rhoC[n - 1] * dlC[n - 1] * dlC[n - 1]);
@@ -672,12 +678,12 @@ namespace std {
 			bb[i] = -2 * crossAreaC / (rhoC[i] * dlC[i] * dlC[i]);
 			aa[i] = crossAreaC / (rhoC[i - 1] * dlC[i] * dlC[i]);
 			cc[i] = crossAreaC / (rhoC[i + 1] * dlC[i] * dlC[i]);
-			dd[i] = sideAreaE * J[i] * 10000;
+			dd[i] = sideAreaE[i] * J[i] * 10000;
 
 			b[i] = -2 * crossAreaE / (rhoE[i] * dlE[i] * dlE[i]);
 			a[i] = crossAreaE / (rhoE[i - 1] * dlE[i] * dlE[i]);
 			c[i] = crossAreaE / (rhoE[i + 1] * dlE[i] * dlE[i]);
-			d[i] = -sideAreaE * J[i] * 10000;
+			d[i] = -sideAreaE[i] * J[i] * 10000;
 		}
 
 		uu[0] = bb[0];
@@ -721,13 +727,13 @@ namespace std {
 
 		double Iall = 0.;
 		for (int i = 0; i < n; ++i) {
-			Iall += J[i] * 10000. * sideAreaE;
+			Iall += J[i] * 10000. * sideAreaE[i];
 		}
-		IEsec[0] = currentWire[0] - 0.5 * J[0] * 10000. * sideAreaE;
-		ICsec[0] = currentWire[1] - 0.5 * J[0] * 10000. * sideAreaE;
+		IEsec[0] = currentWire[0] - 0.5 * J[0] * 10000. * sideAreaE[0];
+		ICsec[0] = currentWire[1] - 0.5 * J[0] * 10000. * sideAreaE[0];
 		for (int i = 1; i < n; ++i) {
-			IEsec[i] = IEsec[i - 1] - 0.5 * (J[i - 1] + J[i]) * 10000. * sideAreaE;
-			ICsec[i] = ICsec[i - 1] - 0.5 * (J[i - 1] + J[i]) * 10000. * sideAreaE;
+			IEsec[i] = IEsec[i - 1] - 0.5 * (J[i - 1] * sideAreaE[i - 1] + J[i] * sideAreaE[i]) * 10000.;
+			ICsec[i] = ICsec[i - 1] - 0.5 * (J[i - 1] * sideAreaE[i - 1] + J[i] * sideAreaE[i]) * 10000.;
 		}
 
 		UE[0] = wireU[0] + 0.5 * (currentWire[0] + IEsec[0]) * 0.5 * resistanceE[0];

@@ -113,6 +113,7 @@ v7_caseA 续算通常按以下路径工作：
 | `test_core_assemble_v7.py` | 通用 v7：NaK78、非均匀流体通道和 TEC 电路 |
 | `test_core_assemble_v7_caseA.py` | 当前主要 CaseA 系统组装和加热瞬态入口 |
 | `test_core_assemble_v7_caseA_faststeady.py` | 外围固体热容缩放和 FastSteady 能量审计 |
+| `test_single_tfe_energy_conservation_v7.py` | 从 FastSteady 快照选择性提取中心通道，运行严格绝热单 TFE 能量守恒诊断；先读 `SINGLE_TFE_ENERGY_CONSERVATION_GUIDE.md` |
 
 ### 4.2 长时运行与续算
 
@@ -255,7 +256,7 @@ audit_v7_caseA_fluid_energy_network.py
 | 修改区域 | 优先运行的快速测试 | 再做的定向验证 |
 |---|---|---|
 | TEC 电势、电场、焦耳热、面积基准 | `test_tec_joule_nonuniform.py`、`test_tecboundary.py`、`test_TEC_with_heat.py` | `run_v7_caseA_multipliers_short.py`、`extract_v7_caseA_electric_node_power.py`、`audit_v7_caseA_interface_energy.py` |
-| TFE 或 TEC 电热耦合 | `test_tfe_thermal_flow.py`、`test_verify_solid_couplers.py` | `run_v7_caseA_multipliers_short.py`、`audit_v7_caseA_interface_energy.py` |
+| TFE 或 TEC 电热耦合 | `test_tfe_thermal_flow.py`、`test_verify_solid_couplers.py` | `test_single_tfe_energy_conservation_v7.py`、`run_v7_caseA_multipliers_short.py`、`audit_v7_caseA_interface_energy.py` |
 | 热管、翅片、集流环节点耦合 | `testHPwithFin.py`、`test_single_hp_fin_energy_conservation.py`、`test_single_hp_header_energy_audit.py` | `test_ringHP_buzzin.py`、`test_ringhp_node_coupling_energy_conservation.py` |
 | 水力网络、泵、稳压器、拓扑 | `test_phase_topology.py`、`test_fixed_pressure_pump_hydrodynamics.py`、`test_pump_junction_hydraulic_network.py`、`test_pressurizer_volume.py` | `test_pressurizer_pumped_closed_loop.py`、`audit_v7_caseA_fluid_energy_network.py` |
 | 流固换热和耦合器 | `test_simple_solid_fluid_couple.py`、`test_fluid_solid_couple.py`、`test_verify_solid_couplers.py` | `test_pipe_heat_transfer.py`、`audit_v7_caseA_interface_energy.py` |
@@ -277,6 +278,7 @@ audit_v7_caseA_fluid_energy_network.py
 | 审计界面能量 | `audit_v7_caseA_interface_energy.py` |
 | 审计流体能量网络 | `audit_v7_caseA_fluid_energy_network.py` |
 | 提取 TEC 节点电功率 | `extract_v7_caseA_electric_node_power.py` |
+| 运行严格绝热单 TFE 能量守恒基线 | 先读 `SINGLE_TFE_ENERGY_CONSERVATION_GUIDE.md`，再运行 `test_single_tfe_energy_conservation_v7.py` |
 | 检查 `SystemManager` restart 和生命周期 | `test_system_manager_lifecycle.py` |
 
 ## 9. 使用注意
@@ -286,3 +288,15 @@ audit_v7_caseA_fluid_energy_network.py
 3. `.json` 是摘要或审计输出，不替代 `.npz` 完整 restart。
 4. 审计脚本依赖同步后的内存状态。直接读取 restart 数组不能替代 `sync_for_audit()` 的耦合刷新流程。
 5. 修改核心求解器时，先跑影响地图中的窄测试，再进入 v7 CaseA smoke、审计和长时运行。
+
+## 10. 单 TFE 守恒基线状态
+
+2026-06-01 已完成严格绝热中心单 TFE 热工闭环和首次 TEC 基线。细节见 `SINGLE_TFE_ENERGY_CONSERVATION_GUIDE.md`。
+
+- `thermal-baseline --duration-s 10 --max-dt-s 0.1`：最后 `1 s` 平均相对残差约 `0.279%`。
+- 外套管热损失逐节点严格为 `0 W`。
+- 普通固固、流固映射和流体矩阵残差均低于 `1e-6 W` 门槛。
+- `tec --duration-s 1 --max-dt-s 0.01`：首次记录最后 `1 s` 平均相对残差约 `0.089%`，暂不固化 TEC 硬阈值。
+- TEC 模式必须使用 ABI 匹配的 Python 3.12 和重建后的 `ThermoCalc/te_solver.cp312-win_amd64.pyd`。
+
+本轮定位到 `HeatConduction.step()` 的 `solve_ivp(y0=self.T)` 初值别名问题。该入口已改为 `y0=self.T.copy()`；后续若调整固体积分器，必须保留这一约束。

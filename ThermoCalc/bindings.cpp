@@ -4,6 +4,8 @@
 
 #include <iostream>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace py = pybind11;
@@ -47,8 +49,8 @@ struct InputData {
     // ---------------------------------------------------------
     py::array_t<double> crossAreaE; // [4][0] 发射极横截面积
     py::array_t<double> crossAreaC; // [4][1] 接收极横截面积
-    py::array_t<double> sideAreaE;  // [5][0] 发射极侧面积
-    py::array_t<double> sideAreaC;  // [6][0] 接收极侧面积
+    py::array_t<double> sideAreaE;  // [5] 发射极逐节点侧面积
+    py::array_t<double> sideAreaC;  // [6] 接收极逐节点侧面积
     py::array_t<double> U_init;     // [8][0] 总电压初值
     py::array_t<double> d_gap;      // [8][1] 电极间距
     py::array_t<double> Itarget;    // [11][0] 目标电流 (虽然是 output 初始猜测，但也需要输入)
@@ -91,6 +93,47 @@ double get_scalar(const py::array_t<double>& arr, int i) {
     return r(i);
 }
 
+void require_1d(const char* name, const py::array_t<double>& arr, int n_rows) {
+    if (arr.ndim() != 1 || arr.shape(0) != n_rows) {
+        throw py::value_error(
+            string(name) + " must have shape (" + to_string(n_rows) + ",)."
+        );
+    }
+}
+
+void require_2d(const char* name, const py::array_t<double>& arr, int n_rows, int n_cols) {
+    if (arr.ndim() != 2 || arr.shape(0) != n_rows || arr.shape(1) != n_cols) {
+        throw py::value_error(
+            string(name) + " must have shape (" + to_string(n_rows) + ", "
+            + to_string(n_cols) + ")."
+        );
+    }
+}
+
+void validate_input(const InputData& data) {
+    if (data.N_elements <= 0) {
+        throw py::value_error("N_elements must be positive.");
+    }
+    if (data.n_axi <= 0) {
+        throw py::value_error("n_axi must be positive.");
+    }
+    require_2d("Temitter", data.Temitter, data.N_elements, data.n_axi);
+    require_2d("Tcollector", data.Tcollector, data.N_elements, data.n_axi);
+    require_2d("dlE", data.dlE, data.N_elements, data.n_axi);
+    require_2d("dlC", data.dlC, data.N_elements, data.n_axi);
+    require_2d("sideAreaE", data.sideAreaE, data.N_elements, data.n_axi);
+    require_2d("sideAreaC", data.sideAreaC, data.N_elements, data.n_axi);
+    require_2d("Tcs", data.Tcs, data.N_elements, data.n_axi);
+    require_2d("V_init", data.V_init, data.N_elements, data.n_axi);
+    require_2d("resistanceWire", data.resistanceWire, data.N_elements, 4);
+    require_2d("wireU", data.wireU, data.N_elements, 4);
+    require_1d("crossAreaE", data.crossAreaE, data.N_elements);
+    require_1d("crossAreaC", data.crossAreaC, data.N_elements);
+    require_1d("U_init", data.U_init, data.N_elements);
+    require_1d("d_gap", data.d_gap, data.N_elements);
+    require_1d("Itarget", data.Itarget, data.N_elements);
+}
+
 // -------------------------------------------------------------------------
 // 3. 工厂函数：构建电路
 // -------------------------------------------------------------------------
@@ -98,6 +141,7 @@ double get_scalar(const py::array_t<double>& arr, int i) {
 // 这是一个独立的 C++ 函数，负责“翻译” InputData 并创建对象树
 // 返回 circuitTECs 指针，所有权移交给 Python
 std::unique_ptr<circuitTECs> create_circuit(const InputData& data) {
+    validate_input(data);
     auto circuit = std::make_unique<circuitTECs>();
 
     // 预先分配内存，防止 realloc
@@ -117,9 +161,9 @@ std::unique_ptr<circuitTECs> create_circuit(const InputData& data) {
         // [4] 截面积 {E, C}
         input[4] = { get_scalar(data.crossAreaE, i), get_scalar(data.crossAreaC, i) };
 
-        // [5-6] 侧面积 {E}, {C}
-        input[5] = { get_scalar(data.sideAreaE, i) };
-        input[6] = { get_scalar(data.sideAreaC, i) };
+        // [5-6] 逐节点侧面积
+        input[5] = get_row_vector(data.sideAreaE, i);
+        input[6] = get_row_vector(data.sideAreaC, i);
 
         // [7] 导线电阻 (向量)
         input[7] = get_row_vector(data.resistanceWire, i);
@@ -220,6 +264,9 @@ PYBIND11_MODULE(te_solver, m) {
         .def_readwrite("UC", &singleThermionicEnergyConversion::UC)
         .def_readwrite("rhoE", &singleThermionicEnergyConversion::rhoE)
         .def_readwrite("rhoC", &singleThermionicEnergyConversion::rhoC)
+        .def_readwrite("phiE", &singleThermionicEnergyConversion::phiE)
+        .def_readwrite("phiC", &singleThermionicEnergyConversion::phiC)
+        .def_readwrite("Vd", &singleThermionicEnergyConversion::Vd)
         // >>>>> 新增：内部截面电流分布 <<<<<
         .def_readwrite("IEsecSingle", &singleThermionicEnergyConversion::IEsecSingle)
         .def_readwrite("ICsecSingle", &singleThermionicEnergyConversion::ICsecSingle)
@@ -241,6 +288,17 @@ PYBIND11_MODULE(te_solver, m) {
         .def_readwrite("Uout", &circuitTECs::Uout)
         .def_readwrite("isFixedU", &circuitTECs::isFixedU)
         .def_readwrite("isFixedR", &circuitTECs::isFixedR)
+        .def("set_tcs", [](circuitTECs& circuit, const py::array_t<double>& values) {
+            int n_elements = static_cast<int>(circuit.TECs.size());
+            int n_axi = n_elements == 0 ? 0 : static_cast<int>(circuit.TECs[0]->Tcs.size());
+            require_2d("Tcs", values, n_elements, n_axi);
+            vector<vector<double>> rows;
+            rows.reserve(n_elements);
+            for (int i = 0; i < n_elements; ++i) {
+                rows.push_back(get_row_vector(values, i));
+            }
+            circuit.setTcs(rows);
+        })
         // 核心计算函数
         .def("calc", &circuitTECs::circuitTECsCalc);
 
