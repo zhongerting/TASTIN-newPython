@@ -7,6 +7,7 @@ if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
 from Components.tec_electric import (
+    distribute_axial_power_by_volume,
     electric_field_from_node_potential,
     joule_power_from_electric_field,
 )
@@ -82,8 +83,49 @@ def test_plasma_flux_power_uses_emitter_area_basis():
     assert np.allclose(q_collector_if_collector_area - q_collector, q_c * (side_c - side_e))
 
 
+def test_distribute_axial_power_by_volume_conserves_each_column():
+    axial_power = np.array([3.0, 7.0, 11.0])
+    volumes = np.array([[1.0, 1.0, 3.0], [2.0, 3.0, 1.0]]).reshape(-1)
+
+    watts = distribute_axial_power_by_volume(axial_power, volumes, (2, 3)).reshape(2, 3)
+
+    assert np.allclose(np.sum(watts, axis=0), axial_power)
+    assert np.isclose(np.sum(watts), np.sum(axial_power))
+    assert np.allclose(watts[:, 0], np.array([1.0, 2.0]))
+    assert np.allclose(watts[:, 1], np.array([1.75, 5.25]))
+    assert np.allclose(watts[:, 2], np.array([8.25, 2.75]))
+
+
+def _assert_value_error(callback):
+    try:
+        callback()
+    except ValueError:
+        return
+    raise AssertionError("Expected ValueError")
+
+
+def test_distribute_axial_power_by_volume_rejects_invalid_inputs():
+    _assert_value_error(
+        lambda: distribute_axial_power_by_volume(np.array([1.0]), np.ones(4), (2, 2))
+    )
+    _assert_value_error(
+        lambda: distribute_axial_power_by_volume(np.ones(2), np.ones(3), (2, 2))
+    )
+    _assert_value_error(
+        lambda: distribute_axial_power_by_volume(np.array([1.0, np.nan]), np.ones(4), (2, 2))
+    )
+    _assert_value_error(
+        lambda: distribute_axial_power_by_volume(np.ones(2), np.array([1.0, 0.0, 1.0, 0.0]), (2, 2))
+    )
+    _assert_value_error(
+        lambda: distribute_axial_power_by_volume(np.ones(2), np.array([1.0, 1.0, -1.0, 1.0]), (2, 2))
+    )
+
+
 if __name__ == "__main__":
     test_uniform_linear_matches_legacy_total_joule()
     test_nonuniform_linear_gives_constant_field()
     test_nonuniform_quadratic_differs_from_uniform_index_gradient()
     test_plasma_flux_power_uses_emitter_area_basis()
+    test_distribute_axial_power_by_volume_conserves_each_column()
+    test_distribute_axial_power_by_volume_rejects_invalid_inputs()

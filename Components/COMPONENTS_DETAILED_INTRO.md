@@ -882,3 +882,16 @@ TEC 热流和焦耳热进入导热方程的路径不同：
 - `ReactorCore` 中的倍率会影响功率分配、慢化剂热源转移和总反馈统计，设置时应与物理代表单元一致。
 - `HPwithFin` 的翅片是准稳态降维模型，不会作为独立固体出现在 `get_solids()` 中。
 - `TFEUnit` 和 `ReactorCore` 都提供状态保存接口，长时间瞬态计算应优先使用这些接口实现断点续算。
+
+## 2026-06-02 TEC 焦耳热映射更新
+
+TEC 生产路径不再用节点电势的 `np.gradient()` 结果重新推导焦耳热。当前权威输入是 ThermoCalc C++ `VcalcFVM()` 输出的逐轴向节点功率：
+
+```text
+joulePowerE / joulePowerC [W]
+    -> distribute_axial_power_by_volume()
+    -> Electrode.set_joule_heating()
+    -> Electrode.Q_source [W]
+```
+
+`TFEUnit.update_joule_power_sources()` 和 `TECPair.set_joule_heating_axial_power()` 按每个轴向列内的二维控制体体积比例分配功率，并保持每列总功率不变。旧电场接口继续保留，用于兼容和诊断，不再作为 TEC 生产热源的权威路径。

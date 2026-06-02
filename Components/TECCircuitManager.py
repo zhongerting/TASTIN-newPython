@@ -5,7 +5,6 @@ import numpy as np
 
 from Components.BaseComponent import BaseComponent
 from Components.basicComponents.TECPair import TECPair
-from Components.tec_electric import electric_field_from_node_potential
 from ThermoCalc.ThermoCalcWrapper import ThermoCalcModel
 from profiler import TEASAProfiler
 
@@ -162,33 +161,11 @@ class TECCircuitManager(BaseComponent):
                 continue
 
             # 1. 提取绝对电势分布 [V] 和 电阻率 [Ohm*m]
-            UE_abs = res.get('UE', np.zeros(self.n_node))
-            UC_abs = res.get('UC', np.zeros(self.n_node))
-            rho_e = res.get('rhoE', np.ones(self.n_node) * 1e-6)
-            rho_c = res.get('rhoC', np.ones(self.n_node) * 1e-6)
-
-            # 2. Compute E=dU/dy on axial node centers before mapping Joule heat.
-            try:
-                dl_e = np.asarray(self.circuit._input_data.dlE[i], dtype=float)
-                dl_c = np.asarray(self.circuit._input_data.dlC[i], dtype=float)
-                if dl_e.shape != (self.n_node,) or dl_c.shape != (self.n_node,):
-                    raise ValueError(f"bad dl shape {dl_e.shape}/{dl_c.shape}")
-                E_e = electric_field_from_node_potential(UE_abs, node_lengths=dl_e)
-                E_c = electric_field_from_node_potential(UC_abs, node_lengths=dl_c)
-            except Exception as exc:
-                logger.warning(
-                    "TECCircuitManager '%s': falling back to uniform axial length for TEC '%s'. Detail: %s",
-                    self.name,
-                    tec_pair.name,
-                    exc,
-                )
-                uniform_lengths = np.full(self.n_node, tec_pair.L_node, dtype=float)
-                E_e = electric_field_from_node_potential(UE_abs, node_lengths=uniform_lengths)
-                E_c = electric_field_from_node_potential(UC_abs, node_lengths=uniform_lengths)
-
-            tec_pair.set_joule_heating_fields(E_emit=E_e, rho_emit=rho_e,
-                                              E_coll=E_c, rho_coll=rho_c,
-                                              alpha=alpha)
+            tec_pair.set_joule_heating_axial_power(
+                Q_emitter_axial=np.asarray(res['joulePowerE'], dtype=float),
+                Q_collector_axial=np.asarray(res['joulePowerC'], dtype=float),
+                alpha=alpha,
+            )
 
             # B. 等离子体面热流下发
             q_e, q_c = self._compute_plasma_fluxes(res)

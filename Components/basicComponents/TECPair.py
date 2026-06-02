@@ -3,7 +3,7 @@ from typing import Optional
 
 from Solvers.HeatConduction.Mesh import Mesh2D
 from Components.basicComponents.Electord import Emitter, Collector
-from Components.tec_electric import joule_power_from_electric_field
+from Components.tec_electric import distribute_axial_power_by_volume, joule_power_from_electric_field
 from Solvers.Couplers import TECCouple2D
 from Materials.Base import SolidMaterial
 
@@ -131,7 +131,29 @@ class TECPair:
             self.collector.vols_flat,
             self.collector.mesh.shape_nodes,
         )
+        self._apply_joule_heat_flat(q_watts_e_flat, q_watts_c_flat, alpha=alpha)
 
+    def set_joule_heating_axial_power(self,
+                                      Q_emitter_axial: np.ndarray,
+                                      Q_collector_axial: np.ndarray,
+                                      alpha: float = 1.0):
+        """Map authoritative ThermoCalc axial Joule powers [W] to the 2D electrode meshes."""
+        q_watts_e_flat = distribute_axial_power_by_volume(
+            Q_emitter_axial,
+            self.emitter.vols_flat,
+            self.emitter.mesh.shape_nodes,
+        )
+        q_watts_c_flat = distribute_axial_power_by_volume(
+            Q_collector_axial,
+            self.collector.vols_flat,
+            self.collector.mesh.shape_nodes,
+        )
+        self._apply_joule_heat_flat(q_watts_e_flat, q_watts_c_flat, alpha=alpha)
+
+    def _apply_joule_heat_flat(self,
+                               q_watts_e_flat: np.ndarray,
+                               q_watts_c_flat: np.ndarray,
+                               alpha: float):
         if self._q_joule_e_old.shape != q_watts_e_flat.shape:
             self._q_joule_e_old = np.zeros_like(q_watts_e_flat)
         if self._q_joule_c_old.shape != q_watts_c_flat.shape:

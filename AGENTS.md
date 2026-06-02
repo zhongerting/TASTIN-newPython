@@ -213,3 +213,11 @@ test_core_assemble_v7_caseA.py
 - 修复或新增需要所有新会话知晓的高风险约束。
 
 局部公式、类字段和详细 API 变化应优先更新对应模块手册，本文只保留接管时必须知道的全局信息和阅读分流。
+
+## 12. 2026-06-02 TEC 焦耳热映射补充
+
+TEC 生产焦耳热当前以 C++ `VcalcFVM()` 输出的逐轴向节点功率 `joulePowerE/C [W]` 为权威值。Python 层通过 `Components/tec_electric.py::distribute_axial_power_by_volume()` 将轴向功率按列内二维控制体体积比例分配到电极导热网格。
+
+`UE / UC / rhoE / rhoC` 和节点中心梯度函数继续保留为诊断数据，但不得重新作为生产焦耳热源。2026-06-02 单 TFE TEC `1 s` 基线中，二维映射与 C++ 节点功率差为 `0 W`，TEC 转换闭合差约 `0.0250 W`，最终全局残差约 `0.0891 W`。
+
+v7 CaseA 多 TEC 串联路径仍会重复报告 `Failed to converge after 100000 iterations.`。该问题属于后续电路收敛专项，不能视为焦耳热映射已经解决的范围。

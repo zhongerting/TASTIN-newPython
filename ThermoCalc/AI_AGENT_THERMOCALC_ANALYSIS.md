@@ -281,3 +281,20 @@ Python 3.12.13
 ```
 
 重新构建并验证 `te_solver.cp312-win_amd64.pyd`。`testModule/test_thermocalc_interface.py` 覆盖形状拒绝、均匀与非均匀节点面积、`phiE/phiC/Vd`、构建前后温度和 `Tcs` 更新、`fixed_I` 显式拒绝。单 TFE TEC `1 s` 基线也已运行。
+
+## 13. 2026-06-02 FVM 一致焦耳热输出
+
+`singleThermionicEnergyConversion::VcalcFVM()` 当前直接输出：
+
+```text
+joulePowerE[n_axi] [W]
+joulePowerC[n_axi] [W]
+```
+
+每个内部电阻面的耗散功率按 `0.5 / 0.5` 分配给相邻轴向热节点；两端半单元电阻的耗散功率全部分配给端点节点。绑定和 `ThermoCalcWrapper.get_tec_results()` 同时暴露四个端点电势，供审计重构面电导耗散。
+
+生产耦合层必须使用 `joulePowerE/C` 下发焦耳热。`UE / UC / rhoE / rhoC` 和 Python 节点梯度函数继续保留为诊断数据，不得再次作为生产焦耳热权威值。
+
+2026-06-02 已使用 Python `3.12.13` 重建本地扩展。单 TFE TEC `1 s` 审计中，二维映射与 C++ 节点功率总差为 `0 W`；TEC 转换闭合差由旧梯度口径的约 `0.280 W` 降为 `0.0250 W`。剩余量主要受当前外层电路电流停止条件影响，本轮未修改该阈值。
+
+v7 CaseA `1 s` smoke 和静态接口审计可以完成，但底层 TEC 会重复报告 `Failed to converge after 100000 iterations.`。静态接口审计的即时 TEC 闭合差约为 `5.20 W`。这不是二维热源映射误差；后续应单独检查多 TEC 串联电路的收敛条件、失败状态传播和告警限流。

@@ -267,6 +267,12 @@ PYBIND11_MODULE(te_solver, m) {
         .def_readwrite("phiE", &singleThermionicEnergyConversion::phiE)
         .def_readwrite("phiC", &singleThermionicEnergyConversion::phiC)
         .def_readwrite("Vd", &singleThermionicEnergyConversion::Vd)
+        .def_readwrite("joulePowerE", &singleThermionicEnergyConversion::joulePowerE)
+        .def_readwrite("joulePowerC", &singleThermionicEnergyConversion::joulePowerC)
+        .def_readwrite("terminalPointUE1", &singleThermionicEnergyConversion::terminalPointUE1)
+        .def_readwrite("terminalPointUE2", &singleThermionicEnergyConversion::terminalPointUE2)
+        .def_readwrite("terminalPointUC1", &singleThermionicEnergyConversion::terminalPointUC1)
+        .def_readwrite("terminalPointUC2", &singleThermionicEnergyConversion::terminalPointUC2)
         // >>>>> 新增：内部截面电流分布 <<<<<
         .def_readwrite("IEsecSingle", &singleThermionicEnergyConversion::IEsecSingle)
         .def_readwrite("ICsecSingle", &singleThermionicEnergyConversion::ICsecSingle)

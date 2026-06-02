@@ -95,6 +95,35 @@ def joule_power_from_electric_field(
     return q_watts_flat, q_vol_1d
 
 
+def distribute_axial_power_by_volume(
+    axial_power_w: np.ndarray,
+    volumes_flat: np.ndarray,
+    shape_nodes: Tuple[int, int],
+) -> np.ndarray:
+    """Distribute per-axial-node power to a 2D thermal mesh without changing totals."""
+    axial_power = np.asarray(axial_power_w, dtype=float)
+    volumes = np.asarray(volumes_flat, dtype=float)
+    nx, ny = shape_nodes
+
+    if axial_power.shape != (ny,):
+        raise ValueError(f"axial_power_w shape {axial_power.shape} does not match axial node count {(ny,)}")
+    if volumes.shape != (nx * ny,):
+        raise ValueError(f"volumes_flat shape {volumes.shape} does not match flattened mesh size {(nx * ny,)}")
+    if not np.all(np.isfinite(axial_power)):
+        raise ValueError("axial_power_w must contain only finite values")
+    if not np.all(np.isfinite(volumes)):
+        raise ValueError("volumes_flat must contain only finite values")
+    if np.any(volumes < 0.0):
+        raise ValueError("volumes_flat must not contain negative values")
+
+    volumes_2d = volumes.reshape(nx, ny)
+    column_volumes = np.sum(volumes_2d, axis=0)
+    if np.any(column_volumes <= 0.0):
+        raise ValueError("each axial column must have positive total volume")
+
+    return (volumes_2d / column_volumes[np.newaxis, :] * axial_power[np.newaxis, :]).reshape(-1)
+
+
 def joule_power_from_node_potential(
     potential: np.ndarray,
     resistivity: np.ndarray,

@@ -207,6 +207,12 @@ class ThermoCalcModel:
             "phiE": np.array(tec.phiE),
             "phiC": np.array(tec.phiC),
             "Vd": np.array(tec.Vd),
+            "joulePowerE": np.array(tec.joulePowerE),
+            "joulePowerC": np.array(tec.joulePowerC),
+            "terminalPointUE1": tec.terminalPointUE1,
+            "terminalPointUE2": tec.terminalPointUE2,
+            "terminalPointUC1": tec.terminalPointUC1,
+            "terminalPointUC2": tec.terminalPointUC2,
             "TE": np.array(tec.Temitter),
             "TC": np.array(tec.Tcollector)
         }

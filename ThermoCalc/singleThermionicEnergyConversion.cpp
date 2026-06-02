@@ -70,6 +70,8 @@ namespace std {
 		phiE.resize(n);
 		phiC.resize(n);
 		Vd.resize(n);
+		joulePowerE.resize(n);
+		joulePowerC.resize(n);
 		UE.resize(n);
 		UC.resize(n);
 		currentWire.resize(2);
@@ -453,6 +455,8 @@ namespace std {
 	vector<double> singleThermionicEnergyConversion::VcalcFVM() {
 		int n = int(Temitter.size());
 		vector<double> result(n, 0.0);
+		joulePowerE.assign(n, 0.0);
+		joulePowerC.assign(n, 0.0);
 
 		vector<double> IEsec(n, 0.);
 		vector<double> ICsec(n, 0.);
@@ -562,6 +566,14 @@ namespace std {
 			}
 			// 最后一个节点的电流 (流向右边界)
 			IEsec[n - 1] = Ge_bound_R * (UE[n - 1] - terminalPointUE2);
+
+			joulePowerE[0] += Ge_bound_L * pow(UE[0] - terminalPointUE1, 2);
+			for (int i = 0; i < n - 1; ++i) {
+				double facePower = Ge_face[i] * pow(UE[i] - UE[i + 1], 2);
+				joulePowerE[i] += 0.5 * facePower;
+				joulePowerE[i + 1] += 0.5 * facePower;
+			}
+			joulePowerE[n - 1] += Ge_bound_R * pow(UE[n - 1] - terminalPointUE2, 2);
 		}
 
 		// =============================================================
@@ -614,6 +626,14 @@ namespace std {
 				ICsec[i] = Gc_face[i] * (UC[i] - UC[i + 1]); // 注意方向定义
 			}
 			ICsec[n - 1] = Gc_bound_R * (UC[n - 1] - terminalPointUC2);
+
+			joulePowerC[0] += Gc_bound_L * pow(UC[0] - terminalPointUC1, 2);
+			for (int i = 0; i < n - 1; ++i) {
+				double facePower = Gc_face[i] * pow(UC[i] - UC[i + 1], 2);
+				joulePowerC[i] += 0.5 * facePower;
+				joulePowerC[i + 1] += 0.5 * facePower;
+			}
+			joulePowerC[n - 1] += Gc_bound_R * pow(UC[n - 1] - terminalPointUC2, 2);
 		}
 		// =============================================================
 		// 4. 计算最终电压差

@@ -156,8 +156,8 @@ def extract_node_rows(build: Dict[str, Any]) -> Tuple[List[Dict[str, float]], Di
         y_faces = np.asarray(getattr(tfe, "common_y_faces", emitter.mesh.y_faces), dtype=float)
         e_field = electric_field_from_node_potential(ue, y_faces=y_faces)
         c_field = electric_field_from_node_potential(uc, y_faces=y_faces)
-        q_vol_joule_e = e_field**2 / np.maximum(rho_e, 1.0e-12)
-        q_vol_joule_c = c_field**2 / np.maximum(rho_c, 1.0e-12)
+        cpp_joule_e = np.asarray(result["joulePowerE"], dtype=float)
+        cpp_joule_c = np.asarray(result["joulePowerC"], dtype=float)
 
         q_electron_e_flux = -1.0 * j_a_m2 * (phi_e + 2.0 * 8.617e-5 * te)
         q_electron_c_flux = 1.0 * j_a_m2 * (
@@ -187,6 +187,8 @@ def extract_node_rows(build: Dict[str, Any]) -> Tuple[List[Dict[str, float]], Di
             len(te),
             len(e_field),
             len(c_field),
+            len(cpp_joule_e),
+            len(cpp_joule_c),
             len(q_electron_e_flux),
             len(q_electron_c_flux),
             len(applied_q_e_flux),
@@ -232,8 +234,8 @@ def extract_node_rows(build: Dict[str, Any]) -> Tuple[List[Dict[str, float]], Di
             emitter_electron_removed = float(-emitter_electron_source)
             collector_electron_source = float(q_electron_c_flux[node] * area[node])
             boundary_heat_difference = emitter_electron_removed - collector_electron_source
-            emitter_joule = float(q_vol_joule_e[node] * emitter_node_volumes[node])
-            collector_joule = float(q_vol_joule_c[node] * collector_node_volumes[node])
+            emitter_joule = float(cpp_joule_e[node])
+            collector_joule = float(cpp_joule_c[node])
             total_joule = emitter_joule + collector_joule
             applied_emitter_electron_source = float(applied_q_e_flux[node] * area[node])
             applied_emitter_electron_removed = float(-applied_emitter_electron_source)

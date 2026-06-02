@@ -300,3 +300,19 @@ audit_v7_caseA_fluid_energy_network.py
 - TEC 模式必须使用 ABI 匹配的 Python 3.12 和重建后的 `ThermoCalc/te_solver.cp312-win_amd64.pyd`。
 
 本轮定位到 `HeatConduction.step()` 的 `solve_ivp(y0=self.T)` 初值别名问题。该入口已改为 `y0=self.T.copy()`；后续若调整固体积分器，必须保留这一约束。
+
+## 11. 2026-06-02 TEC FVM 焦耳热基线
+
+TEC 生产路径已改为使用 ThermoCalc C++ 输出的逐轴向节点焦耳热 `joulePowerE/C [W]`。Python 层只执行轴向列内二维体积加权分配，旧节点电势梯度法保留为诊断对照。
+
+验证入口：
+
+```text
+test_tec_joule_nonuniform.py
+test_thermocalc_interface.py
+test_single_tfe_energy_conservation_v7.py --mode tec --duration-s 1 --max-dt-s 0.01
+```
+
+正式单 TFE `1 s` 结果：二维映射与 C++ 节点功率差为 `0 W`，TEC 转换闭合差为 `0.025015 W`，最终全局残差为 `0.089127 W`。后续若修改 TEC 电势离散或外层电路迭代阈值，必须继续运行该审计。
+
+v7 CaseA `1 s` smoke 和静态接口审计已运行。普通固固接口累计误差约 `5.24e-9 W`，慢化剂映射最大误差约 `1.82e-12 W`；但多 TEC 串联电路会重复输出 `Failed to converge after 100000 iterations.`，静态审计即时 TEC 闭合差约 `5.20 W`。该问题属于后续电路收敛专项，不得通过调整热源映射掩盖。

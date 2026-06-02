@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Literal, List
 import math
 
-from Components.tec_electric import joule_power_from_electric_field
+from Components.tec_electric import distribute_axial_power_by_volume, joule_power_from_electric_field
 
 
 @dataclass
@@ -645,10 +645,12 @@ class TFEUnit(BaseComponent):
         rho_emit = np.asarray(rho_emit, dtype=float)
         rho_coll = np.asarray(rho_coll, dtype=float)
 
-        self.electric_data.emitter_voltage[:] = E_emit
-        self.electric_data.emitter_resistivity[:] = rho_emit
-        self.electric_data.collector_voltage[:] = E_coll
-        self.electric_data.collector_resistivity[:] = rho_coll
+        self.update_electric_field_diagnostics(
+            E_emit=E_emit,
+            rho_emit=rho_emit,
+            E_coll=E_coll,
+            rho_coll=rho_coll,
+        )
 
         q_watts_e_flat, _ = joule_power_from_electric_field(
             E_emit,
@@ -662,7 +664,47 @@ class TFEUnit(BaseComponent):
             collector.vols_flat,
             collector.mesh.shape_nodes,
         )
+        self._apply_joule_heat_flat(q_watts_e_flat, q_watts_c_flat, alpha=alpha)
 
+    def update_electric_field_diagnostics(self,
+                                          E_emit: np.ndarray, rho_emit: np.ndarray,
+                                          E_coll: np.ndarray, rho_coll: np.ndarray):
+        """Store electrode field and resistivity snapshots without deriving heat sources."""
+        E_emit = np.asarray(E_emit, dtype=float)
+        E_coll = np.asarray(E_coll, dtype=float)
+        rho_emit = np.asarray(rho_emit, dtype=float)
+        rho_coll = np.asarray(rho_coll, dtype=float)
+
+        self.electric_data.emitter_voltage[:] = E_emit
+        self.electric_data.emitter_resistivity[:] = rho_emit
+        self.electric_data.collector_voltage[:] = E_coll
+        self.electric_data.collector_resistivity[:] = rho_coll
+
+    def update_joule_power_sources(self,
+                                   Q_emitter_axial: np.ndarray,
+                                   Q_collector_axial: np.ndarray,
+                                   alpha: float = 1.0):
+        """Map authoritative ThermoCalc axial Joule powers [W] to the 2D electrode meshes."""
+        emitter = self.solids['emitter']
+        collector = self.solids['collector']
+        q_watts_e_flat = distribute_axial_power_by_volume(
+            Q_emitter_axial,
+            emitter.vols_flat,
+            emitter.mesh.shape_nodes,
+        )
+        q_watts_c_flat = distribute_axial_power_by_volume(
+            Q_collector_axial,
+            collector.vols_flat,
+            collector.mesh.shape_nodes,
+        )
+        self._apply_joule_heat_flat(q_watts_e_flat, q_watts_c_flat, alpha=alpha)
+
+    def _apply_joule_heat_flat(self,
+                               q_watts_e_flat: np.ndarray,
+                               q_watts_c_flat: np.ndarray,
+                               alpha: float):
+        emitter = self.solids['emitter']
+        collector = self.solids['collector']
         old_e = self.electric_data.emitter_joule_heat
         old_c = self.electric_data.collector_joule_heat
         if old_e.shape != q_watts_e_flat.shape:

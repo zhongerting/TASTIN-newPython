@@ -133,3 +133,44 @@ TEC 首次 `1 s` 基线只记录误差，不固化硬阈值。当前方向定义
 2. 用短时 `thermal-baseline` 运行检查储能项和全局残差。
 3. 修复 ThermoCalc 后先运行 `--mode tec --duration-s 0` 执行能力检查。
 4. 再运行短时 `tec` smoke，检查节点电子热流、焦耳热、端电功率和总残差。
+
+## 8. 2026-06-02 FVM 一致焦耳热基线
+
+TEC 模式当前使用 C++ `VcalcFVM()` 输出的逐轴向节点焦耳热功率：
+
+```text
+joulePowerE / joulePowerC [W]
+```
+
+Python 只按轴向列内控制体体积比例映射到二维电极网格。`tec_node_balance_latest.csv` 同时记录：
+
+- C++ 权威节点焦耳热。
+- 映射后二维焦耳热按轴向回聚合值。
+- 映射值与 C++ 值的差。
+- 旧节点梯度法焦耳热，仅用于修复前后对照。
+- `电子边界功率差 - 端电功率 - C++焦耳热`。
+
+2026-06-02 正式命令：
+
+```powershell
+python testModule\test_single_tfe_energy_conservation_v7.py `
+  --mode tec `
+  --duration-s 1 `
+  --max-dt-s 0.01 `
+  --output-dir testModule\single_tfe_energy_conservation_v7_tec_fvm_1s
+```
+
+结果：
+
+| 指标 | 数值 |
+| --- | ---: |
+| 二维映射与 C++ 节点功率总差 | `0 W` |
+| 旧梯度法相对 C++ 少计的焦耳热 | `0.254738 W` |
+| TEC 转换闭合差 | `0.025015 W` |
+| 最终全局残差 | `0.089127 W` |
+| 最终全局相对残差 | `0.00255%` |
+| 最后 `1 s` 平均相对残差 | `0.0814%` |
+| 普通固固接口累计绝对误差 | `1.07e-10 W` |
+| 流固接口累计绝对误差 | `2.97e-10 W` |
+
+剩余 TEC 转换闭合差主要与外层电路电流停止条件有关。本轮没有收紧该阈值。

@@ -16,7 +16,7 @@ for path in (str(CURRENT_DIR), str(ROOT_DIR)):
         sys.path.insert(0, path)
 
 from Components.TFEUnit import GapConfig, TFEGeometry, TFEMeshParams, TFEUnit
-from Components.tec_electric import electric_field_from_node_potential
+from Components.tec_electric import electric_field_from_node_potential, joule_power_from_electric_field
 from Materials.Fluids.Sodium import Sodium
 from Materials.Solids.BerylliumOxide import BerylliumOxide
 from Materials.Solids.GasGaps import CarbonDioxide, Cesium, Helium, Xenon
@@ -722,7 +722,7 @@ def _build_tec_model(tfe: TFEUnit):
     failures = []
     if "get_scalar(data.sideAreaE, i)" in bindings_source or "get_scalar(data.sideAreaC, i)" in bindings_source:
         failures.append("bindings.cpp still collapses sideAreaE/sideAreaC to one scalar per TFE")
-    for field in ("phiE", "phiC", "Vd"):
+    for field in ("phiE", "phiC", "Vd", "joulePowerE", "joulePowerC"):
         if f'.def_readwrite("{field}"' not in bindings_source:
             failures.append(f"SingleTEC binding does not expose {field}")
     if failures:
@@ -748,10 +748,14 @@ def _build_tec_model(tfe: TFEUnit):
         )
         model.calculate(verbose=False)
         results = model.get_tec_results(0)
-        for field in ("phiE", "phiC", "Vd"):
+        for field in ("phiE", "phiC", "Vd", "joulePowerE", "joulePowerC"):
             value = np.asarray(results[field], dtype=float)
             if value.shape != (N_AXIAL,):
                 raise RuntimeError(f"TEC field {field} has shape {value.shape}, expected {(N_AXIAL,)}.")
+            if not np.all(np.isfinite(value)):
+                raise RuntimeError(f"TEC field {field} contains non-finite values.")
+        if np.any(np.asarray(results["joulePowerE"]) < 0.0) or np.any(np.asarray(results["joulePowerC"]) < 0.0):
+            raise RuntimeError("TEC Joule power fields must be non-negative.")
         return model
     except Exception as exc:
         raise RuntimeError(f"TEC capability check failed at runtime: {type(exc).__name__}: {exc}") from exc
@@ -773,11 +777,15 @@ def _apply_tec_sources(model, tfe: TFEUnit) -> Dict[str, object]:
     q_c_flux = current_density_a_m2 * (
         phi_e + 2.0 * 8.617e-5 * emitter_temperature - (emitter_potential - collector_potential)
     )
-    tfe.update_electric_field_sources(
+    tfe.update_electric_field_diagnostics(
         E_emit=electric_field_from_node_potential(emitter_potential, y_faces=tfe.common_y_faces),
         rho_emit=np.asarray(results["rhoE"], dtype=float),
         E_coll=electric_field_from_node_potential(collector_potential, y_faces=tfe.common_y_faces),
         rho_coll=np.asarray(results["rhoC"], dtype=float),
+    )
+    tfe.update_joule_power_sources(
+        Q_emitter_axial=np.asarray(results["joulePowerE"], dtype=float),
+        Q_collector_axial=np.asarray(results["joulePowerC"], dtype=float),
         alpha=1.0,
     )
     tfe.update_plasma_flux(q_e_flux=q_e_flux, q_c_flux=q_c_flux, alpha=1.0)
@@ -875,12 +883,38 @@ def _write_tec_nodes(
     global_results: Dict[str, float],
 ):
     area = tfe.plasma_area_diagnostics
-    emitter_joule = np.asarray(tfe.electric_data.emitter_joule_heat, dtype=float)
-    collector_joule = np.asarray(tfe.electric_data.collector_joule_heat, dtype=float)
+    emitter = tfe.solids["emitter"]
+    collector = tfe.solids["collector"]
+    emitter_joule = np.asarray(tfe.electric_data.emitter_joule_heat, dtype=float).reshape(
+        emitter.mesh.shape_nodes
+    ).sum(axis=0)
+    collector_joule = np.asarray(tfe.electric_data.collector_joule_heat, dtype=float).reshape(
+        collector.mesh.shape_nodes
+    ).sum(axis=0)
+    cpp_emitter_joule = np.asarray(results["joulePowerE"], dtype=float)
+    cpp_collector_joule = np.asarray(results["joulePowerC"], dtype=float)
+    legacy_emitter_flat, _ = joule_power_from_electric_field(
+        tfe.electric_data.emitter_voltage,
+        tfe.electric_data.emitter_resistivity,
+        emitter.vols_flat,
+        emitter.mesh.shape_nodes,
+    )
+    legacy_collector_flat, _ = joule_power_from_electric_field(
+        tfe.electric_data.collector_voltage,
+        tfe.electric_data.collector_resistivity,
+        collector.vols_flat,
+        collector.mesh.shape_nodes,
+    )
+    legacy_emitter_joule = legacy_emitter_flat.reshape(emitter.mesh.shape_nodes).sum(axis=0)
+    legacy_collector_joule = legacy_collector_flat.reshape(collector.mesh.shape_nodes).sum(axis=0)
     emitter_electron = np.asarray(area["emitter_power_emitter_area_w"], dtype=float)
     collector_electron = np.asarray(area["collector_power_emitter_area_w"], dtype=float)
     electron_boundary_diff = -emitter_electron - collector_electron
     joule = emitter_joule + collector_joule
+    cpp_joule = cpp_emitter_joule + cpp_collector_joule
+    legacy_joule = legacy_emitter_joule + legacy_collector_joule
+    mapped_minus_cpp = joule - cpp_joule
+    legacy_minus_cpp = legacy_joule - cpp_joule
     node_current = np.asarray(results["J"], dtype=float) * 1.0e4 * np.asarray(area["sideAreaE_m2"])
     weights = np.abs(node_current)
     if float(np.sum(weights)) <= 0.0:
@@ -889,6 +923,7 @@ def _write_tec_nodes(
     terminal_alloc = terminal_power * weights / float(np.sum(weights))
     requested_closure = electron_boundary_diff - (terminal_alloc - joule)
     plus_joule_closure = electron_boundary_diff - (terminal_alloc + joule)
+    cpp_plus_joule_closure = electron_boundary_diff - (terminal_alloc + cpp_joule)
     _write_csv(
         output_dir / "tec_node_balance_latest.csv",
         (
@@ -907,9 +942,16 @@ def _write_tec_nodes(
                 "emitter_joule_power_w": emitter_joule[index],
                 "collector_joule_power_w": collector_joule[index],
                 "joule_power_w": joule[index],
+                "cpp_emitter_joule_power_w": cpp_emitter_joule[index],
+                "cpp_collector_joule_power_w": cpp_collector_joule[index],
+                "cpp_joule_power_w": cpp_joule[index],
+                "mapped_minus_cpp_joule_power_w": mapped_minus_cpp[index],
+                "legacy_gradient_joule_power_w": legacy_joule[index],
+                "legacy_gradient_minus_cpp_joule_power_w": legacy_minus_cpp[index],
                 "terminal_power_alloc_w": terminal_alloc[index],
                 "electron_diff_minus_terminal_less_joule_w": requested_closure[index],
                 "electron_diff_minus_terminal_plus_joule_w": plus_joule_closure[index],
+                "electron_diff_minus_terminal_plus_cpp_joule_w": cpp_plus_joule_closure[index],
             }
             for index in range(N_AXIAL)
         ),
@@ -926,8 +968,16 @@ def _write_tec_nodes(
         "emitter_joule_power_w": float(np.sum(emitter_joule)),
         "collector_joule_power_w": float(np.sum(collector_joule)),
         "joule_power_w": float(np.sum(joule)),
+        "cpp_emitter_joule_power_w": float(np.sum(cpp_emitter_joule)),
+        "cpp_collector_joule_power_w": float(np.sum(cpp_collector_joule)),
+        "cpp_joule_power_w": float(np.sum(cpp_joule)),
+        "mapped_minus_cpp_joule_power_w": float(np.sum(mapped_minus_cpp)),
+        "mapped_minus_cpp_joule_power_max_abs_node_w": float(np.max(np.abs(mapped_minus_cpp))),
+        "legacy_gradient_joule_power_w": float(np.sum(legacy_joule)),
+        "legacy_gradient_minus_cpp_joule_power_w": float(np.sum(legacy_minus_cpp)),
         "electron_diff_minus_terminal_less_joule_w": float(np.sum(requested_closure)),
         "electron_diff_minus_terminal_plus_joule_w": float(np.sum(plus_joule_closure)),
+        "electron_diff_minus_terminal_plus_cpp_joule_w": float(np.sum(cpp_plus_joule_closure)),
     }
 
 

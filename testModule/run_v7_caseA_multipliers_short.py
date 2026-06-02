@@ -24,7 +24,6 @@ from test_core_assemble_v7_caseA import (
     _case_a_reset_design_flows_after_restart,
 )
 from test_core_assemble_v7_caseA_faststeady import compute_faststeady_energy_audit
-from Components.tec_electric import electric_field_from_node_potential
 
 
 DEFAULT_RESTART = (
@@ -120,8 +119,6 @@ def collect_tec_stats(build: Dict[str, Any]) -> Dict[str, Any]:
         phi_e = np.asarray(res["phiE"], dtype=float)
         ue = np.asarray(res["UE"], dtype=float)
         uc = np.asarray(res["UC"], dtype=float)
-        rho_e = np.asarray(res["rhoE"], dtype=float)
-        rho_c = np.asarray(res["rhoC"], dtype=float)
 
         q_e_flux = -j_a_m2 * (phi_e + 2.0 * 8.617e-5 * te)
         q_c_flux = j_a_m2 * (phi_e + 2.0 * 8.617e-5 * te - (ue - uc))
@@ -131,17 +128,8 @@ def collect_tec_stats(build: Dict[str, Any]) -> Dict[str, Any]:
         collector_electron_source_if_sideAreaC = q_c_flux * area_c
         boundary_difference = emitter_electron_removed - collector_electron_source
 
-        tfe = build["tfes"][name]
-        n_nodes = len(j)
-        emitter_volumes = axial_node_volumes(tfe.solids["emitter"], n_nodes)
-        collector_volumes = axial_node_volumes(tfe.solids["collector"], n_nodes)
-        y_faces = np.asarray(getattr(tfe, "common_y_faces", tfe.solids["emitter"].mesh.y_faces), dtype=float)
-        e_field = electric_field_from_node_potential(ue, y_faces=y_faces)
-        c_field = electric_field_from_node_potential(uc, y_faces=y_faces)
-        q_vol_joule_e = e_field**2 / np.maximum(rho_e, 1.0e-12)
-        q_vol_joule_c = c_field**2 / np.maximum(rho_c, 1.0e-12)
-        emitter_joule = q_vol_joule_e * emitter_volumes
-        collector_joule = q_vol_joule_c * collector_volumes
+        emitter_joule = np.asarray(res["joulePowerE"], dtype=float)
+        collector_joule = np.asarray(res["joulePowerC"], dtype=float)
         total_joule = emitter_joule + collector_joule
 
         single_energy = {

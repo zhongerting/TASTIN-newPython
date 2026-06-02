@@ -1276,6 +1276,8 @@ class ReactorCore(BaseComponent):
                 UC_abs = res.get('UC', np.zeros(self.n_nodes))
                 rho_e = res.get('rhoE', np.ones(self.n_nodes) * 1e-6)
                 rho_c = res.get('rhoC', np.ones(self.n_nodes) * 1e-6)
+                joule_power_e = np.asarray(res['joulePowerE'], dtype=float)
+                joule_power_c = np.asarray(res['joulePowerC'], dtype=float)
 
                 if hasattr(tfe, 'common_y_faces'):
                     E_e = electric_field_from_node_potential(
@@ -1308,11 +1310,15 @@ class ReactorCore(BaseComponent):
 
                 electric_alpha = self.alpha_tec * float(tec_mult) / float(thermal_mult)
 
-                tfe.update_electric_field_sources(
+                tfe.update_electric_field_diagnostics(
                     E_emit=E_e,
                     rho_emit=rho_e,
                     E_coll=E_c,
-                    rho_coll=rho_c,
+                    rho_coll=rho_c
+                )
+                tfe.update_joule_power_sources(
+                    Q_emitter_axial=joule_power_e,
+                    Q_collector_axial=joule_power_c,
                     alpha=electric_alpha
                 )
                 tfe.update_plasma_flux(

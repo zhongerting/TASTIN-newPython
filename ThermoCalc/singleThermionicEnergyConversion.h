@@ -36,6 +36,8 @@ namespace std {
 		vector<double> phiE;
 		vector<double> phiC;
 		vector<double> Vd;
+		vector<double> joulePowerE;
+		vector<double> joulePowerC;
 
 	public:
 		vector<double> rhoE;
