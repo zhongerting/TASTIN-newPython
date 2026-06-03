@@ -155,7 +155,7 @@ V8 CaseA 位于 `testModule/test_core_assemble_v8_caseA.py`，用于把外圈拆
 这些问题在进一步修改或运行前需要主动核验：
 
 1. `ThermoCalc` 已于 2026-06-01 闭合逐节点侧面积、`phiE/phiC/Vd` 结果读取和构建后 `Tcs` 热更新，并重新构建 `te_solver.cp312-win_amd64.pyd`。`fixed_I` 仍不支持，包装层会明确拒绝该模式。
-2. 默认 `python` 仍为 3.9.13，而主要扩展为 `te_solver.cp312-win_amd64.pyd`。运行 ThermoCalc 必须使用 ABI 匹配的 Python 3.12 环境；本轮验证解释器记录在 `ThermoCalc/AI_AGENT_THERMOCALC_ANALYSIS.md`。
+2. 默认 `python` 仍为 3.9.13，而主要扩展为 `te_solver.cp312-win_amd64.pyd`。如果使用 Python 运行，请使用 `E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe`；运行 ThermoCalc 必须使用 ABI 匹配的 Python 3.12 环境；本轮验证解释器记录在 `ThermoCalc/AI_AGENT_THERMOCALC_ANALYSIS.md`。
 3. `Correlations.h_single_crossflow_pipe()` 当前调用参数不足，直接使用会触发运行时 `TypeError`。
 4. `Materials/Fluids/NaK78.py` 仅部分实现；主用液态 NaK78 类是 `SodiumPotassium78`。不要仅按文件名推断模型使用的冷却剂。
 5. `Components/basicComponents/Electord.py` 的文件名拼写已被现有导入路径依赖，不要直接重命名。
