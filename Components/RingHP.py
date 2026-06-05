@@ -102,7 +102,8 @@ class RingHP(BaseComponent):
                  header_correlation_func: Callable,
                  hp_crossflow_base_func: Callable,
                  C_D: float = 1.0, hp_L_aba: float = 0.0, hp_n_aba: int = 0,
-                 external_heat_config: Optional[Dict[str, Any]] = None):
+                 external_heat_config: Optional[Dict[str, Any]] = None,
+                 fin_emissivity: Optional[float] = None):
         super().__init__(name)
 
         n_nodes = fluid_channel.n_nodes
@@ -176,6 +177,7 @@ class RingHP(BaseComponent):
                     n_fin_height=n_fin_height,
                     fin_wrap_ratio=fin_wrap_ratio,
                     emissivity=emissivity,
+                    fin_emissivity=fin_emissivity,
                     up_view_factor=up_view_factor,
                     down_view_factor=down_view_factor,
                     T_env=T_space,

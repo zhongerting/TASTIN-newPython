@@ -227,9 +227,23 @@ Cp_mushy = Cp_solid + f*(Cp_liquid - Cp_solid) + H_sf/(2*dt_thaw)
 | 类 | 默认构造 | `T_melt` | `H_sf [J/kg]` | `dt_thaw` | 糊状区 |
 | --- | --- | --- | --- | --- | --- |
 | `SodiumHP` | `SodiumHP(name="Sodium_Wick_Fluid")` | `371.0 K` | `114.7e3` | `1.0 K` | `[370, 372] K` |
-| `PotassiumHP` | `PotassiumHP(name="Potassium_Wick_Fluid")` | `336.8 K` | `5.932e4` | `1.0 K` | `[335.8, 337.8] K` |
+| `PotassiumHP` | `PotassiumHP(name="Potassium_Wick_Fluid")` | `336.35 K` | `553.8 cal/mol = 5.926e4 J/kg` | `1.0 K` | `[335.35, 337.35] K` |
 
-两者还提供 `saturation_pressure(T)`、`vapor_viscosity(T)`、`latent_heat(T)` 和 `molar_mass`，供 `WickMaterial` 计算赝热导。
+两者还提供 `saturation_pressure(T)`、`vapor_viscosity(T)`、`latent_heat(T)` 和 `molar_mass`，供 `WickMaterial` 计算赝热导；`PotassiumHP` 另提供 `saturated_liquid_density(T)`、`vapor_density(T)`、`specific_volume_liquid_sat(T)`、`specific_volume_vapor_sat(T)`、`vapor_heat_capacity(T)`、`vapor_gas_constant()`、`vapor_heat_capacity_ratio()`、`vapor_ideal_cp()`、`vapor_ideal_cv()`、`vapor_sound_speed(T)`、`liquid_viscosity(T)`、`viscosity(T)` 和 `surface_tension(T)`。
+
+`PotassiumHP` 的基础常数及下列物性已按 2026-06-04/2026-06-05 用户提供数据逐项更新；每个公式的适用范围和参考文献已同步写入源码注释。2026-06-05 起，`molar_mass` 使用 NIST 分子量 `3.90983e-2 kg/mol`，替代此前 `39.1e-3 kg/mol` 的圆整值。
+
+`PotassiumHP.density()` 的固态钾密度已按 2026-06-04 用户提供公式更新：`rho_s=857.6/[1+2.39e-4*(T-300)] kg/m3`，来源建议适用范围为 `270-320 K`；液态/饱和液态钾密度已按用户最新提供公式更新：`rho_l_sat=890.29-2.113e-1*T kg/m3`，来源建议适用范围为 `623-1123 K`，高于常压沸点时应理解为相应饱和压力下的饱和液状态。`PotassiumHP.saturated_liquid_density()` 返回同一液态公式，`specific_volume_liquid_sat()` 返回其倒数。
+`PotassiumHP.conductivity()` 的固态钾导热系数已按 2026-06-04 用户提供公式更新：`lambda_s=102.5-1.04e-1*(T-298.2) W/(m*K)`，来源建议适用范围为 `270-336.8 K`；液态钾导热系数已按用户提供公式更新：`lambda_l=66.09-3.579e-2*T W/(m*K)`，来源建议适用范围为 `336.8-1000 K`。
+`PotassiumHP.heat_capacity()` 的固态钾定压比热已按 2026-06-04 用户提供 Shomate 公式更新：`tau=T/1000`，`cp_s=(-63.47410-3226.340*tau+14644.60*tau^2-16229.50*tau^3+16.29410*tau^-2)/3.90983e-2 J/(kg*K)`，来源建议适用范围为 `298-336.35 K`；液态钾定压比热也已按用户提供 Shomate 公式更新：`cp_l=(40.27113-30.54542*tau+26.49505*tau^2-5.727854*tau^3-0.063477*tau^-2)/3.90983e-2 J/(kg*K)`，来源建议适用范围为 `336.35-1039.54 K`。
+`PotassiumHP.saturation_pressure()` 已按 2026-06-05 用户提供宽温区公式更新为单一关系式：`ln(p_sat)=25.109-10488/T-0.448*ln(T)`，`p_sat` 单位为 `Pa`，来源建议适用范围为 `350-1000 K` 的钾气液共存线。该式替代此前低温式、NIST Antoine 式和平滑拼接方案；`900 K` 以上给出总饱和压力，若需单原子/双原子分压需额外引入蒸汽化学平衡。
+`PotassiumHP.vapor_density()` 已按 2026-06-04 用户最新提供饱和汽密度公式更新：`rho_v_sat=2.398e3*exp(-8.698e3/T) kg/m3`，来源建议适用范围为 `623-1123 K` 的饱和钾蒸汽；高于常压沸点时应理解为相应饱和压力下的饱和汽状态，固态区域、临界区、高精度状态方程或明显二聚体/多聚体效应工况不建议使用。`PotassiumHP.specific_volume_vapor_sat()` 返回该密度的倒数。
+`PotassiumHP.vapor_viscosity()` 已按 2026-06-05 用户提供饱和蒸汽粘度公式更新：`mu_v=5.450e-6+2.830e-8*T-5.600e-12*T^2 Pa*s`，来源建议适用范围为 `350-1000 K`，用于低压钾蒸汽气相流动阻力和动量输运；该式严禁直接用于液态钾。`900 K` 以上钾蒸汽中 `K2` 缔合体比例增加，本多项式为平均非理想性平滑拟合；强非平衡等离子体、电离区或超高压稠密区需额外碰撞积分修正。
+`PotassiumHP.vapor_heat_capacity()` 已按 2026-06-04 用户提供气相 Shomate 公式新增：`tau=T/1000`，`cp_v=(20.66122+0.391869*tau-0.417344*tau^2+0.145582*tau^3+0.003764*tau^-2)/3.90983e-2 J/(kg*K)`，来源建议适用范围为 `1039.54-1800 K`；低压或中低密度钾蒸汽可近似为单原子理想气体 `cp_v≈531.6 J/(kg*K)`，临界区、高压稠密蒸汽或明显二聚体/多聚体效应工况不建议使用。
+`PotassiumHP` 的气相校核接口已按 2026-06-05 用户提供公式新增：`vapor_gas_constant()=R_u/M_K=212.65 J/(kg*K)`，`vapor_heat_capacity_ratio()=5/3`，`vapor_ideal_cp()=5R_K/2≈531.6 J/(kg*K)`，`vapor_ideal_cv()=3R_K/2≈319.0 J/(kg*K)`，`vapor_sound_speed(T)=sqrt(gamma_K*R_K*T)≈18.83*sqrt(T) m/s`。这些接口仅适用于 `700-1800 K` 低压或中低密度单原子钾蒸汽工程校核；液态、两相区、临界区、高压稠密蒸汽不得直接使用，饱和两相流应采用两相声速模型。
+`PotassiumHP.liquid_viscosity()` 已按 2026-06-04 用户提供公式新增：`mu_l=4.293e-5*exp(1017.72/T) Pa*s`，来源建议适用范围为 `623-1123 K`；高于常压沸点时需保证系统压力维持液态或饱和液态。`PotassiumHP.viscosity()` 作为液态动力黏度别名返回同一结果。
+`PotassiumHP.surface_tension()` 已按 2026-06-04 用户提供公式新增：`sigma_l=1.3794e-1-6.927e-5*T N/m`，来源建议适用范围为 `623-1123 K`；高于常压沸点时需保证系统压力维持液态或饱和液态，固态、临界区或高精度界面稳定性计算不建议使用。
+`PotassiumHP.latent_heat()` 已按 2026-06-05 用户提供宽温区多项式更新为单一关系式：`h_fg=2.487169e6-396.5976*T-0.102412*T^2 J/kg`，来源建议适用范围为 `350-900 K` 的饱和线数据拟合，并以 Watson 关联式 `h_fg,b=1.966838e6 J/kg`、`T_b=1032 K`、`T_c=2223 K` 作为校核。该式替代此前低温线性式、高温推导式和平滑拼接方案；不适用于过热蒸汽、过冷液体、固态升华、临界区或高压稠密超临界钾。
 
 ### 5.5 `WickMaterial`
 

@@ -46,6 +46,7 @@ T_SPACE = 3.0
 T_INLET = 843.0
 P_OUTLET = 160000.0
 T_INIT = 863.0
+HP_INITIAL_TEMP = 800.0
 
 W_TOTAL = 2.2
 W_BRANCH_TOTAL = W_TOTAL / 3.0
@@ -93,11 +94,18 @@ R_VAPOR_HP = 0.0075
 L_EVA = 0.0605
 L_ABA = 0.0415
 L_CON = 0.47
+HP_N_EVA = 1
+HP_N_ABA = 1
+HP_N_CON = 12
+HP_N_WICK = 1
+HP_N_WALL = 2
 POROSITY = 0.966
 
 THIN_FIN = 0.0003
 FIN_HEIGHT = 22.65e-3
 N_FIN_HEIGHT = 15
+HP_EMISSIVITY = 0.85
+FIN_EMISSIVITY = 0.85
 
 DEFAULT_T_END = 50.0
 DEFAULT_PRINT_EVERY_TIME = 1.0
@@ -150,13 +158,13 @@ def build_ring_hp(name, fluid_channel, solid_header, hp_multipliers):
         hp_L_eva=L_EVA,
         hp_L_con=L_CON,
         hp_L_aba=L_ABA,
-        hp_n_eva=1,
-        hp_n_con=12,
-        hp_n_aba=1,
-        hp_n_wick=1,
-        hp_n_wall=2,
+        hp_n_eva=HP_N_EVA,
+        hp_n_con=HP_N_CON,
+        hp_n_aba=HP_N_ABA,
+        hp_n_wick=HP_N_WICK,
+        hp_n_wall=HP_N_WALL,
         porosity_hp=POROSITY,
-        HP_initial_temp=800.0,
+        HP_initial_temp=HP_INITIAL_TEMP,
         hp_wall_mat=mat_wall,
         hp_fluid_mat=mat_hp_fluid,
         hp_wick_mat=mat_wick,
@@ -164,7 +172,8 @@ def build_ring_hp(name, fluid_channel, solid_header, hp_multipliers):
         fin_height=FIN_HEIGHT,
         n_fin_height=N_FIN_HEIGHT,
         fin_wrap_ratio=(2.0 * THIN_FIN) / (2.0 * np.pi * R_OUT_HP),
-        emissivity=0.85,
+        emissivity=HP_EMISSIVITY,
+        fin_emissivity=FIN_EMISSIVITY,
         up_view_factor=0.0,
         down_view_factor=0.3,
         T_space=T_SPACE,

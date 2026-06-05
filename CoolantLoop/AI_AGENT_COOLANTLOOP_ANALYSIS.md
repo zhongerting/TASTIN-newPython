@@ -34,6 +34,12 @@
 | [`run_collector_ring_6segment_160s.py`](./run_collector_ring_6segment_160s.py) | 运行包装器 | 从初始态运行 6segment 到 `160 s`，每 `40 s` 保存断点并输出 profiler | 可直接运行 |
 | [`run_collector_ring_full_ringhp_200s_resume.py`](./run_collector_ring_full_ringhp_200s_resume.py) | 续算包装器 | 从 `60 s` 快照续算 full ringhp 到 `200 s` | 依赖指定输入快照 |
 | [`run_collector_ring_full_ringhp_500s_resume.py`](./run_collector_ring_full_ringhp_500s_resume.py) | 续算包装器 | 从 `200 s` 快照续算 full ringhp 到 `500 s` | 可接续前一个包装器 |
+| [`run_collector_ring_full_ringhp_1p3kgs_100s.py`](./run_collector_ring_full_ringhp_1p3kgs_100s.py) | 流量变体包装器 | 从初始态运行 full ringhp，总入口流量临时设为 `1.3 kg/s`，目标 `100 s` | 1.3 kg/s 短期测试入口；早期瞬态需小步长 |
+| [`run_collector_ring_full_ringhp_1p3kgs_inlet_init_steady.py`](./run_collector_ring_full_ringhp_1p3kgs_inlet_init_steady.py) | 稳态搜索包装器 | 从 `t=0` 构造 full ringhp，总入口流量 `1.3 kg/s`，流体和集流环固体初温默认设为入口温度；热管初温默认同入口温度，也可用 `--hp-init-temp 800` 复现早期完整环口径；默认前 `0.1 s` 小步长启动 | 1.3 kg/s 真初态到稳态首选入口 |
+| [`run_collector_ring_full_ringhp_geometry100hp_test.py`](./run_collector_ring_full_ringhp_geometry100hp_test.py) | 几何变体测试包装器 | 矩形集流环 `110 mm x 40 mm`、总热管数 `100`、热管 `0.1/0/0.5 m`、蒸汽半径 `7.5 mm`、吸液芯厚 `0.5 mm`、壁厚 `1 mm`、翅片 `20 mm x 0.4 mm` | 新结构错位检查和短计算测试 |
+| [`run_collector_ring_full_ringhp_geometry100hp_potassium_test.py`](./run_collector_ring_full_ringhp_geometry100hp_potassium_test.py) | 钾热管几何变体包装器 | 复用 `geometry100hp` 的矩形集流环、100 根热管和几何/流量/发射率参数；临时重建 `PotassiumHP` 与钾热管 `WickMaterial` | 钾热管独立 A/B 对比入口；不要加载钠热管 restart |
+| [`run_collector_ring_full_ringhp_steady_debug.py`](./run_collector_ring_full_ringhp_steady_debug.py) | 稳态调试包装器 | 默认从最新 full ringhp 快照短续算，输出 history、restart 和 `T_out_avg` 斜率判据 | 集流环+热管稳态调试首选 |
+| [`run_collector_ring_full_ringhp_energy_audit.py`](./run_collector_ring_full_ringhp_energy_audit.py) | 能量守恒审计包装器 | 从 full ringhp restart 续算并输出 `Q_loop - Q_rejection - dU/dt` 残差 | 集流环+热管整体能量守恒检查首选 |
 
 `model_*.py` 可直接运行其内置 `50 s` 默认案例，也可被包装器 import。需要自定义参数时，优先调用 `run_case(...)`；需要检查或改造对象时，再单独调用 `build_model()`。
 
@@ -80,7 +86,7 @@
 | `W_BRANCH_TOTAL` | `W_TOTAL / 3` | 三条热腿的初始分支流量 |
 | `DEFAULT_T_END` | `50.0 s` | 直接运行模型库时的默认终止时间 |
 
-材料路径为：冷却剂 `SodiumPotassium78`，壁材 `SS316`，热管工质 `SodiumHP`，吸液芯等效材料 `WickMaterial`。
+默认生产模型材料路径为：冷却剂 `SodiumPotassium78`，壁材 `SS316`，热管工质 `SodiumHP`，吸液芯等效材料 `WickMaterial`。钾热管独立包装器会在运行时临时替换为 `PotassiumHP` 和对应钾热管 `WickMaterial`，不修改默认模型库。
 
 ### 3.2 共享几何与离散
 
@@ -227,6 +233,12 @@ sys_mgr.load_global_state("restart_state.npz")
 | [`run_collector_ring_6segment_160s.py`](./run_collector_ring_6segment_160s.py) | `python run_collector_ring_6segment_160s.py` | 初始态 | `collector_ring_6segment_buffered_160s_history.csv`、每 `40 s` 检查点、最终 restart、三类 profiler 文件 |
 | [`run_collector_ring_full_ringhp_200s_resume.py`](./run_collector_ring_full_ringhp_200s_resume.py) | `python run_collector_ring_full_ringhp_200s_resume.py` | `collector_ring_full_ringhp_buffered_200s_resume_from50s_restart_t0060s.npz` | 到 `200 s` 的历史 CSV、每 `20 s` 检查点、最终 restart |
 | [`run_collector_ring_full_ringhp_500s_resume.py`](./run_collector_ring_full_ringhp_500s_resume.py) | `python run_collector_ring_full_ringhp_500s_resume.py` | 前一步生成的 `_restart_t0200s.npz` | 到 `500 s` 的历史 CSV、每 `100 s` 检查点、最终 restart |
+| [`run_collector_ring_full_ringhp_1p3kgs_100s.py`](./run_collector_ring_full_ringhp_1p3kgs_100s.py) | `python run_collector_ring_full_ringhp_1p3kgs_100s.py` | 初始态；仅在 wrapper 内临时覆盖 `W_TOTAL=1.3 kg/s`；默认 `max_dt=5e-3 s`、`safety_factor=0.1` | `1p3kgs_100s` history、每 `20 s` 检查点、最终 restart；已验证可到 `0.05 s`，完整 `100 s` 属长时运行 |
+| [`run_collector_ring_full_ringhp_1p3kgs_inlet_init_steady.py`](./run_collector_ring_full_ringhp_1p3kgs_inlet_init_steady.py) | `python run_collector_ring_full_ringhp_1p3kgs_inlet_init_steady.py` | 初始态；临时覆盖 `W_TOTAL=1.3 kg/s`、`T_INIT=T_INLET`，默认 `HP_INITIAL_TEMP=T_INLET`；若要参考 `test_full_collector_ring.py`，加 `--hp-init-temp 800`；默认 `startup_time=0.1 s`、`startup_max_dt=5e-3 s`、`startup_safety_factor=0.1`；支持 `--restart-from` 分段续算 | 到稳态或 `100 s` 上限；history、每 `20 s` 检查点、最终 restart；全入口温度已验证到 `0.1 s`；`--hp-init-temp 800` 已验证到 `0.2 s`，该口径启动瞬态需更长小步长 |
+| [`run_collector_ring_full_ringhp_geometry100hp_test.py`](./run_collector_ring_full_ringhp_geometry100hp_test.py) | `python run_collector_ring_full_ringhp_geometry100hp_test.py` | 初始态；临时覆盖矩形通道、100 根热管和新热管/翅片几何；默认 `W_TOTAL=1.3 kg/s`、`T_INIT=T_INLET`、`HP_INITIAL_TEMP=800 K`、`t_end=0.05 s` | 新几何 history 和 restart；已验证可到 `0.05 s`，运行中可能出现不致停的 BDF 警告 |
+| [`run_collector_ring_full_ringhp_geometry100hp_potassium_test.py`](./run_collector_ring_full_ringhp_geometry100hp_potassium_test.py) | `python run_collector_ring_full_ringhp_geometry100hp_potassium_test.py` | 初始态；复用 `geometry100hp` 覆盖参数，但热管工质临时替换为 `PotassiumHP(name="HP_Fluid_K")`，并重建钾热管 `WickMaterial_K` | 钾热管 history 和 restart；用于与钠热管几何变体 A/B 对比，restart 不能与钠热管算例混用 |
+| [`run_collector_ring_full_ringhp_steady_debug.py`](./run_collector_ring_full_ringhp_steady_debug.py) | `python run_collector_ring_full_ringhp_steady_debug.py --duration 1` | 默认选择最新 full ringhp restart，优先 `500 s` 快照 | 短续算 history、最终 restart 和末段 `T_out_avg` 斜率判稳摘要 |
+| [`run_collector_ring_full_ringhp_energy_audit.py`](./run_collector_ring_full_ringhp_energy_audit.py) | `python run_collector_ring_full_ringhp_energy_audit.py --duration 1` | 默认选择最新 full ringhp 稳态调试快照，回退到 `500 s` 快照 | 能量审计 CSV，最终 `Q_loop_flux`、辐射排热、储能率和残差摘要 |
 
 当前目录中可见 `200 s` 和 `500 s` 链路产出的检查点与日志；`200 s` 包装器声明的 `60 s` 输入快照当前不在目录清单中。重新执行该包装器前，应先确认该输入文件存在。
 
@@ -247,7 +259,8 @@ sys_mgr.load_global_state("restart_state.npz")
 
 | 现象 | 首读文件 | 重点 |
 |---|---|---|
-| 能量守恒或 `dU/dt` 异常 | `test_single_header_cell_one_hp.py`、`test_coolant_loop_v4_2.py`、`verify_dudt_long_tail_case.py` | 区分流体、header、热管和翅片储能；区分瞬态尾部与真实残差 |
+| 能量守恒或 `dU/dt` 异常 | `run_collector_ring_full_ringhp_energy_audit.py`、`test_single_header_cell_one_hp.py`、`test_coolant_loop_v4_2.py`、`verify_dudt_long_tail_case.py` | full ringhp 先用审计包装器；底层问题再区分流体、header、热管和翅片储能；区分瞬态尾部与真实残差 |
+| full ringhp 稳态判断 | `run_collector_ring_full_ringhp_steady_debug.py`、`model_collector_ring_full_ringhp.py` | 从最新 restart 短续算，先看 `T_out_avg` 末段斜率和流量闭合，再决定是否做长续算 |
 | 辐射散热异常 | `test_coolant_loop_v5_wall_radiation_only.py`、`test_coolant_loop_v5.py` | 壁面辐射、热管裸壁辐射、翅片辐射和面积口径 |
 | 流量分配异常 | 两个 `model_*.py`、`test_full_collector_ring.py` | `MacroFlowJunction` 倍数、环接口节点、代表侧和放大侧流量 |
 | 断点恢复异常 | 两个 `model_*.py`、三个 `run_*.py`、`../Solvers/SystemManager.py` | `.npz` 路径、保存字段、加载后的边界重施加和耦合刷新 |
@@ -265,7 +278,7 @@ sys_mgr.load_global_state("restart_state.npz")
 | `Solvers/Hydrodynamics` | `IncompressibleFluidChannel`、边界控制体、`FlowJunction`、`MacroFlowJunction` 和 `HydraulicNetwork` 组成流体网络 | [`../Solvers/AI_AGENT_SOLVERS_ANALYSIS.md`](../Solvers/AI_AGENT_SOLVERS_ANALYSIS.md)、[`../Solvers/HYDRODYNAMICS_DETAILED_INTRO.md`](../Solvers/HYDRODYNAMICS_DETAILED_INTRO.md) |
 | `Solvers/HeatConduction` | `Mesh2D`、`HeatConduction2D` 和动态辐射边界求解集流环壁面导热与散热 | [`../Solvers/HEATCONDUCTION_DETAILED_INTRO.md`](../Solvers/HEATCONDUCTION_DETAILED_INTRO.md) |
 | `Solvers/SystemManager.py` | 初始化、全局步进、自适应步长、耦合刷新、回滚和 `.npz` 断点续算 | [`../Solvers/SYSTEMMANAGER_DETAILED_INTRO.md`](../Solvers/SYSTEMMANAGER_DETAILED_INTRO.md) |
-| `Materials` | `SodiumPotassium78`、`SS316`、`SodiumHP`、`WickMaterial` 的温度相关物性 | [`../Materials/AI_AGENT_MATERIALS_ANALYSIS.md`](../Materials/AI_AGENT_MATERIALS_ANALYSIS.md) |
+| `Materials` | `SodiumPotassium78`、`SS316`、`SodiumHP`/`PotassiumHP`、`WickMaterial` 的温度相关物性 | [`../Materials/AI_AGENT_MATERIALS_ANALYSIS.md`](../Materials/AI_AGENT_MATERIALS_ANALYSIS.md) |
 
 ## 7. 维护约定
 
@@ -279,3 +292,23 @@ sys_mgr.load_global_state("restart_state.npz")
 6. 测试入口、独立分析脚本或上级首读文档。
 
 更新后至少逐项核对两个 `model_*.py` 的常量、`build_model()` 返回值和 `run_case()` 签名，并核对三个包装器中的文件名与恢复链路。
+
+## 8. 2026-06-04 geometry100hp emissivity scan note
+
+- `Components/HPwithFin.py` now supports separate bare heat-pipe emissivity (`emissivity`) and fin emissivity (`fin_emissivity`). If `fin_emissivity` is omitted, it falls back to `emissivity`.
+- `Components/RingHP.py` passes the optional `fin_emissivity` through to each representative `HPwithFin`.
+- `CoolantLoop/model_collector_ring_full_ringhp.py` exposes `HP_EMISSIVITY` and `FIN_EMISSIVITY`; `run_collector_ring_full_ringhp_geometry100hp_test.py` exposes them as `--hp-emissivity` and `--fin-emissivity`.
+- `CoolantLoop/scan_geometry100hp_emissivity.py` is an instantaneous diagnostic. It loads a restart, recomputes current fin/bare radiation for multiple emissivity pairs, and reports equivalent temperature drop. It does not advance time and must not be treated as a final steady-state result.
+- Screening from `collector_ring_full_ringhp_geometry100hp_resume_100s_restart_t0040s.npz` showed that fin emissivity is slightly more sensitive than bare heat-pipe emissivity, but the `40-100 s` outlet-temperature evolution is still dominated by stored thermal energy. Dynamic continuations found:
+  - `eps_hp=eps_fin=0.3`: `T_out_avg=759.838 K` at `70 s`, `DeltaT=83.162 K` (below the `85-95 K` target band).
+  - `eps_hp=eps_fin=0.6`: `T_out_avg=752.123 K` at `70 s`, `DeltaT=90.877 K`; `T_out_avg=748.730 K` at `100 s`, `DeltaT=94.270 K` (inside but near the upper edge).
+  - `eps_hp=eps_fin=0.85`: `T_out_avg=755.266 K` at `55 s`, `DeltaT=87.734 K`.
+  - `eps_hp=eps_fin=1.0`: `T_out_avg=754.309 K` at `55 s`, `DeltaT=88.691 K`.
+- For the current 100-heat-pipe geometry and `W_TOTAL=1.3 kg/s`, the best tested short-term candidate is `HP_EMISSIVITY=0.6`, `FIN_EMISSIVITY=0.6`. A formal from-zero long run should still test the `0.55-0.60` range because the `100 s` result is close to the `95 K` upper bound and was continued from the existing `40 s` transient restart.
+- Follow-up 200 s continuations were run in parallel with equal bare heat-pipe and fin emissivity (`eps_hp=eps_fin=eps`) from the existing transient restarts. At `200 s`, the outlet temperature and inlet-outlet drop were:
+  - `eps=0.40`: `T_out_avg=762.592 K`, `DeltaT=80.408 K` (below target).
+  - `eps=0.45`: `T_out_avg=757.854 K`, `DeltaT=85.146 K` (lower edge).
+  - `eps=0.50`: `T_out_avg=753.894 K`, `DeltaT=89.106 K` (center of target band).
+  - `eps=0.55`: `T_out_avg=750.740 K`, `DeltaT=92.260 K` (inside target band).
+  - `eps=0.60`: `T_out_avg=748.199 K`, `DeltaT=94.801 K` (upper edge).
+  The `160-200 s` outlet-temperature changes were small for `eps=0.50-0.60`; `eps=0.50` is the most balanced tested value for the requested `85-95 K` drop. Radiation diagnostics at `200 s` gave `Q_bare/Q_fin` pairs of approximately `17.50/23.33 kW` for `eps=0.50`, `18.47/24.52 kW` for `eps=0.55`, and `19.31/25.54 kW` for `eps=0.60`; fin radiation remains about `1.32x` bare heat-pipe radiation when both emissivities are adjusted together.

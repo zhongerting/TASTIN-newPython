@@ -32,7 +32,8 @@ class HPwithFin(BaseComponent):
                  up_view_factor: float = 1.0,
                  down_view_factor: float = 1.0,
                  T_env: float = 3.0,
-                 initial_temp: float = 298.15):
+                 initial_temp: float = 298.15,
+                 fin_emissivity: float = None):
         super().__init__(name)
 
         # ===== 1. 保存翅片与环境参数 =====
@@ -46,6 +47,7 @@ class HPwithFin(BaseComponent):
         self.R_contact_sq = 0.0
 
         self.emissivity = emissivity
+        self.fin_emissivity = emissivity if fin_emissivity is None else fin_emissivity
         self.T_space = T_env
         self.k_fin_mat = wall_mat
         self.sigma = 5.670374419e-8
@@ -69,6 +71,7 @@ class HPwithFin(BaseComponent):
         # 外侧半周完全向太空辐射，内侧半周按 up/down 角系数之和折算。
         self.F_avg = (1.0 + self.inner_view_factor) / 2.0
         self.effective_emissivity = self.emissivity * self.F_avg
+        self.effective_fin_emissivity = self.fin_emissivity * self.F_avg
 
         # ===== 2. 构造热管二维网格 =====
         # 轴向由蒸发段、绝热段、冷凝段拼接而成。
@@ -407,7 +410,7 @@ class HPwithFin(BaseComponent):
         d.fill(0.0)
         rad_deriv[:, :] = (
             4.0
-            * self.effective_emissivity
+            * self.effective_fin_emissivity
             * self.sigma
             * P_active[:, np.newaxis]
             * dx
@@ -503,7 +506,7 @@ class HPwithFin(BaseComponent):
         rad_term = scratch['rad_term']
 
         for _ in range(max_iter):
-            rad_term[:, :] = self.effective_emissivity * self.sigma * (
+            rad_term[:, :] = self.effective_fin_emissivity * self.sigma * (
                 T_active ** 2 + self.T_space ** 2
             ) * (T_active + self.T_space)
             rad_term *= P_active[:, np.newaxis] * dx
@@ -535,7 +538,7 @@ class HPwithFin(BaseComponent):
 
         T[active] = T_active
         Q_fin_radiation_array[active] = np.sum(
-            self.effective_emissivity
+            self.effective_fin_emissivity
             * self.sigma
             * P_active[:, np.newaxis]
             * dx
@@ -594,7 +597,7 @@ class HPwithFin(BaseComponent):
         T_seg_safe = np.maximum(T, 1.0e-3)
         A_seg = P[:, np.newaxis] * dx
         lambda_fallback = np.sum(
-            self.effective_emissivity
+            self.effective_fin_emissivity
             * self.sigma
             * A_seg
             * (T_seg_safe + T_space_safe)
