@@ -6,6 +6,20 @@
 >
 > Codex 在本仓库内开始任务时，应将本文作为项目级首读指令，并按本文导航定向读取子模块说明。
 
+## 0. Python 运行环境
+
+在本仓库中运行 Python 脚本时，必须使用以下 Conda 环境中的解释器：
+
+```text
+E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe
+```
+
+PowerShell 示例：
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" path\to\script.py
+```
+
 ## 1. 新对话的最小阅读协议
 
 处理本仓库任务时，按以下顺序建立上下文：

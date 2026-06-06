@@ -4,6 +4,20 @@ TASTIN-Python 是空间核电源热离子反应堆的多物理场瞬态仿真程
 
 当前仓库没有统一生产入口：根目录 `main.py` 仍为空。实际运行通常从 `testModule/` 或 `CoolantLoop/` 的用例脚本进入。
 
+## Python 运行环境
+
+在本仓库中运行 Python 脚本时，请使用以下 Conda 环境中的解释器：
+
+```text
+E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe
+```
+
+PowerShell 示例：
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" path\to\script.py
+```
+
 ## 主要入口
 
 | 用例层 | 用途 | 首读文档 |
