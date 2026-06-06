@@ -106,6 +106,9 @@ FIN_HEIGHT = 22.65e-3
 N_FIN_HEIGHT = 15
 HP_EMISSIVITY = 0.85
 FIN_EMISSIVITY = 0.85
+HP_CROSSFLOW_C = 0.65
+HP_CROSSFLOW_K_CAL = 1.0
+HP_CROSSFLOW_WAKE_FACTOR = 1.0
 
 DEFAULT_T_END = 50.0
 DEFAULT_PRINT_EVERY_TIME = 1.0
@@ -181,6 +184,9 @@ def build_ring_hp(name, fluid_channel, solid_header, hp_multipliers):
         hp_crossflow_base_func=lambda *args: 10.0,
         C_D=1.0,
         external_heat_config=None,
+        hp_crossflow_c=HP_CROSSFLOW_C,
+        hp_crossflow_k_cal=HP_CROSSFLOW_K_CAL,
+        hp_crossflow_wake_factor=HP_CROSSFLOW_WAKE_FACTOR,
     )
 
 

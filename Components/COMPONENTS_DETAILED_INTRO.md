@@ -441,6 +441,7 @@ TFE 径向和轴向网格划分参数。
 - 把一个流体控制体伪装成单节点流体通道。
 - 让 `FluidSolidCouple` 能复用在“一个控制体对应一根代表热管”的场景。
 - 将单根代表热管耦合源项按 `N_hp` 放大回真实热管数量。
+- 对热管蒸发段换热，向 `FluidSolidCouple` 提供膜温物性、热管外径特征长度和最小通流截面速度。
 
 ### `RingHP`
 
@@ -464,8 +465,27 @@ TFE 径向和轴向网格划分参数。
 | `hp_*` | 热管几何、网格和材料参数 |
 | `fin_*` | 翅片几何参数 |
 | `header_correlation_func` | 集流环换热关联式 |
-| `hp_crossflow_base_func` | 热管蒸发段横掠换热关联式 |
+| `hp_crossflow_base_func` | 旧预留参数；当前热管蒸发段换热不再使用固定 h 简化 |
+| `hp_crossflow_c` | 液态金属横掠单圆柱关联式系数，默认 `0.65` |
+| `hp_crossflow_k_cal` | 总校准系数，默认 `1.0` |
+| `hp_crossflow_wake_factor` | 串列尾流修正系数，默认 `1.0` |
 | `external_heat_config` | 外热流配置 |
+
+热管蒸发段与冷却剂的换热采用液态金属横掠单圆柱模型：
+
+```text
+T_f = (T_bulk + T_wall) / 2
+u_max = u_bulk * A_flow / (A_flow - D_hp * L_eva)
+Re_D = rho(T_f) * u_max * D_hp / mu(T_f)
+Pr = mu(T_f) * cp(T_f) / k(T_f)
+Pe_D = Re_D * Pr
+Nu_D = hp_crossflow_k_cal * hp_crossflow_wake_factor * hp_crossflow_c * sqrt(max(Pe_D, 1))
+h = Nu_D * k(T_f) / D_hp
+Q_single = h * pi * D_hp * L_eva * (T_wall - T_bulk)
+Q_total = N_hp * Q_single
+```
+
+`Q_total = N_hp * Q_single` 是当前串联热管在一个流体控制体内的集总近似；它保持总源项放大口径，但不会解析控制体内逐根热管的沿程冷却剂升温。
 
 主要接口：
 

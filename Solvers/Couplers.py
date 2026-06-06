@@ -301,6 +301,9 @@ class FluidSolidCouple:
 
         T_f = np.asarray(self.fluid.temperature_vector, dtype=float)
         P_f = self.fluid.pressure_vector
+        if hasattr(self.solid_bound, "compute_net_flux_for_solver"):
+            self.solid_bound.compute_net_flux_for_solver()
+        T_wall = np.asarray(self.solid_bound.T_surface, dtype=float)
         rho = self.fluid.density_vector
         vel = self.fluid.velocity_vector  # 特征流速
 
@@ -309,6 +312,31 @@ class FluidSolidCouple:
         mu = self.fluid.material.viscosity(T_f, P_f)
         k_f = self.fluid.material.conductivity(T_f, P_f)
         Cp_f = self.fluid.material.heat_capacity(T_f, P_f)
+        Pr = self.fluid.material.prandtl_number(T_f, P_f)
+
+        get_heat_transfer_state = getattr(self.fluid, "get_heat_transfer_state", None)
+        if callable(get_heat_transfer_state):
+            heat_transfer_state = get_heat_transfer_state(T_wall)
+            if heat_transfer_state is not None:
+                T_prop = np.asarray(heat_transfer_state.get("temperature", T_f), dtype=float)
+                rho = np.asarray(heat_transfer_state.get("density", rho), dtype=float)
+                vel = np.asarray(heat_transfer_state.get("velocity", vel), dtype=float)
+                mu = np.asarray(
+                    heat_transfer_state.get("viscosity", self.fluid.material.viscosity(T_prop, P_f)),
+                    dtype=float,
+                )
+                k_f = np.asarray(
+                    heat_transfer_state.get("conductivity", self.fluid.material.conductivity(T_prop, P_f)),
+                    dtype=float,
+                )
+                Cp_f = np.asarray(
+                    heat_transfer_state.get("heat_capacity", self.fluid.material.heat_capacity(T_prop, P_f)),
+                    dtype=float,
+                )
+                Pr = np.asarray(
+                    heat_transfer_state.get("prandtl", mu * Cp_f / np.maximum(k_f, 1e-30)),
+                    dtype=float,
+                )
 
         # 防止粘度为 0 (除零保护)
         mu = np.maximum(mu, 1e-10)
@@ -318,7 +346,6 @@ class FluidSolidCouple:
         Re = (rho * np.abs(vel) * self.fluid.d_h) / mu
 
         # Pr = mu * Cp / k
-        Pr = self.fluid.material.prandtl_number(T_f, P_f)
 
         # === C. 计算换热系数 (Correlation) ===
         # 调用预留的接口计算 Nu
@@ -425,6 +452,10 @@ class FluidSolidCouple:
             "delta_implicit": delta_implicit,
             "max_lambda": float(np.max(relaxed_lambda)) if relaxed_lambda.size else 0.0,
             "max_explicit": float(np.max(np.abs(explicit_arr))) if explicit_arr.size else 0.0,
+            "max_h": float(np.max(h_vals)) if np.asarray(h_vals).size else 0.0,
+            "max_Re": float(np.max(Re)) if np.asarray(Re).size else 0.0,
+            "max_Pr": float(np.max(Pr)) if np.asarray(Pr).size else 0.0,
+            "max_Nu": float(np.max(Nu)) if np.asarray(Nu).size else 0.0,
         }
 
         # 缓存当前时间步的耦合系数，用于稳定性分析和下次迭代的松弛计算

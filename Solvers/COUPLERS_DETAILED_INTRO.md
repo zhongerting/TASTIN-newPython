@@ -218,6 +218,14 @@ FluidSolidCouple(
 Nu = correlation_func(Re, Pr, P_D_ratio)
 ```
 
+兼容流体对象可以额外实现：
+
+```python
+state = fluid.get_heat_transfer_state(T_wall)
+```
+
+若该方法存在且返回字典，`FluidSolidCouple` 会用其中的 `temperature`、`density`、`velocity`、`viscosity`、`conductivity`、`heat_capacity` 和 `prandtl` 计算 `Re`、`Pr`、`Nu` 和 `h`。没有该方法时仍使用原始流体体温、体密度和通道速度，现有普通管道耦合行为不变。
+
 ### 6.2 网格一致性
 
 流体节点数必须与固体边界节点数一致：
@@ -267,8 +275,8 @@ Q_solid = h * A * (T_fluid - T_wall)
 `execute(interface_relaxation=1.0)` 的核心流程：
 
 ```text
-1. 读取流体温度、压力、密度、速度
-2. 从流体材料计算 mu、k、Cp、Pr
+1. 读取流体温度、压力和固体壁面温度
+2. 默认从流体材料计算密度、速度、mu、k、Cp、Pr；若流体提供 `get_heat_transfer_state(T_wall)`，则使用该换热状态
 3. 计算 Re
 4. 调用 correlation_func 得到 Nu
 5. 计算 h = Nu * k / D_h

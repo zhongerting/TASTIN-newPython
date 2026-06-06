@@ -29,12 +29,28 @@ class SingleVolumeProxy:
     3. 保持流体等效热容仍与原始控制体体积一致。
     """
 
-    def __init__(self, vol, channel, vol_idx: int, L_eva: float, N_hp: float):
+    def __init__(self,
+                 vol,
+                 channel,
+                 vol_idx: int,
+                 L_eva: float,
+                 N_hp: float,
+                 hp_diameter: float,
+                 header_flow_area: float):
         self.vol = vol
         self.channel = channel
         self.idx = vol_idx
         self.n_nodes = 1
         self.N_hp = N_hp
+        self.header_flow_area = float(header_flow_area)
+        self.hp_diameter = float(hp_diameter)
+        self.hp_projected_area = self.hp_diameter * L_eva
+        self.min_flow_area = self.header_flow_area - self.hp_projected_area
+
+        if self.min_flow_area <= 0.0:
+            raise ValueError(
+                "Heat-pipe projected area must be smaller than the collector-ring flow area."
+            )
 
         # 用蒸发段长度定义换热特征长度 A = perimeter * L。
         self.node_length = L_eva
@@ -43,7 +59,7 @@ class SingleVolumeProxy:
         # 这样既满足耦合器接口，又不会改变流体本体热容。
         self.area = vol.vol / L_eva
 
-        self.d_h = channel.d_h
+        self.d_h = self.hp_diameter
         self.material = channel.material
 
     @property
@@ -61,6 +77,29 @@ class SingleVolumeProxy:
     @property
     def velocity_vector(self):
         return np.array([self.channel.velocity_vector[self.idx]])
+
+    def get_heat_transfer_state(self, T_wall):
+        T_bulk = np.array([self.vol.T], dtype=float)
+        P = np.array([self.vol.P], dtype=float)
+        T_wall = np.asarray(T_wall, dtype=float)
+        T_film = 0.5 * (T_bulk + T_wall)
+
+        rho = self.material.density(T_film, P)
+        mu = self.material.viscosity(T_film, P)
+        k = self.material.conductivity(T_film, P)
+        cp = self.material.heat_capacity(T_film, P)
+        u_bulk = np.array([self.channel.velocity_vector[self.idx]], dtype=float)
+        u_max = u_bulk * self.header_flow_area / self.min_flow_area
+
+        return {
+            "temperature": T_film,
+            "density": rho,
+            "velocity": u_max,
+            "viscosity": mu,
+            "conductivity": k,
+            "heat_capacity": cp,
+            "prandtl": mu * cp / np.maximum(k, 1e-30),
+        }
 
     def add_coupling_source_distribution(self, explicit_arr, implicit_arr):
         # Coupler 返回的是“单根代表热管”的源项，
@@ -103,7 +142,10 @@ class RingHP(BaseComponent):
                  hp_crossflow_base_func: Callable,
                  C_D: float = 1.0, hp_L_aba: float = 0.0, hp_n_aba: int = 0,
                  external_heat_config: Optional[Dict[str, Any]] = None,
-                 fin_emissivity: Optional[float] = None):
+                 fin_emissivity: Optional[float] = None,
+                 hp_crossflow_c: float = 0.65,
+                 hp_crossflow_k_cal: float = 1.0,
+                 hp_crossflow_wake_factor: float = 1.0):
         super().__init__(name)
 
         n_nodes = fluid_channel.n_nodes
@@ -123,6 +165,16 @@ class RingHP(BaseComponent):
         self.hp_L_eva = float(hp_L_eva)
         self.hp_n_con = int(hp_n_con)
         self.n_header_nodes = int(n_nodes)
+        self.hp_crossflow_c = float(hp_crossflow_c)
+        self.hp_crossflow_k_cal = float(hp_crossflow_k_cal)
+        self.hp_crossflow_wake_factor = float(hp_crossflow_wake_factor)
+
+        if self.hp_crossflow_c <= 0.0:
+            raise ValueError(f"[{name}] hp_crossflow_c must be positive.")
+        if self.hp_crossflow_k_cal <= 0.0:
+            raise ValueError(f"[{name}] hp_crossflow_k_cal must be positive.")
+        if self.hp_crossflow_wake_factor <= 0.0:
+            raise ValueError(f"[{name}] hp_crossflow_wake_factor must be positive.")
 
         # 防呆：确保集流环壁温度场、边界和热容信息都已初始化。
         self.solid_header.initialize_state()
@@ -211,17 +263,25 @@ class RingHP(BaseComponent):
 
                 # ===== D. 建立流体控制体与热管蒸发段耦合 =====
                 vol = self.fluid_channel.volumes[i]
-                proxy = SingleVolumeProxy(vol, self.fluid_channel, i, hp_L_eva, N_hp)
+                hp_diameter = 2.0 * hp_r_out
+                proxy = SingleVolumeProxy(
+                    vol,
+                    self.fluid_channel,
+                    i,
+                    hp_L_eva,
+                    N_hp,
+                    hp_diameter=hp_diameter,
+                    header_flow_area=header_flow_area,
+                )
 
-                # 这里仍保留当前工程中的简化换热模型。
-                # TODO: 实现基于横掠管束的 Nu 换热相关式，参考张文文师兄论文来写
-                def constant_h_corr(Re, Pr, dummy=1.1, proxy_ref=proxy):
-                    k_f = proxy_ref.material.conductivity(
-                        np.array([proxy_ref.vol.T]),
-                        np.array([proxy_ref.vol.P]),
-                    )[0]
-                    target_h = 10000.0
-                    return (target_h * proxy_ref.d_h) / k_f
+                def liquid_metal_crossflow_corr(Re, Pr, dummy=1.1):
+                    Pe = np.maximum(np.asarray(Re, dtype=float) * np.asarray(Pr, dtype=float), 1.0)
+                    return (
+                        self.hp_crossflow_k_cal
+                        * self.hp_crossflow_wake_factor
+                        * self.hp_crossflow_c
+                        * np.sqrt(Pe)
+                    )
 
                 hp_peri_single = 2.0 * np.pi * hp_r_out
                 cap_hp = hp.hp.get_boundary_node_capacitance('outer_eva')
@@ -231,7 +291,7 @@ class RingHP(BaseComponent):
                     fluid=proxy,
                     solid_boundary_region=hp.hp.boundaries['outer_eva'],
                     heated_perimeter=hp_peri_single,
-                    correlation_func=constant_h_corr,
+                    correlation_func=liquid_metal_crossflow_corr,
                     solid_node_capacitance=cap_hp
                 )
                 self.coupler_hps.append(coupler_hp)
