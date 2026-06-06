@@ -124,7 +124,7 @@ InletBoundary
   -> OutletBoundary
 ```
 
-跨热腿与环、环与出口支路的连接使用 `MacroFlowJunction(multiplier=2)`。诊断流量时要区分 `junc.W` 与 `junc.get_mass_flow_for(...)` 的口径，不要把代表侧和物理放大侧直接混用。
+跨热腿与环、环与出口支路的连接使用 `MacroFlowJunction(multiplier=2)`。诊断流量时要区分 `junc.W` 与 `junc.get_mass_flow_for(...)` 的口径，不要把代表侧和物理放大侧直接混用。当前对称建模口径是：程序只建一个物理集流环，动量方程和热管管束压降按单环流量计算；宏观端质量和能量按 2 倍代表两个对称集流环。
 
 `build_model()` 返回字典的关键对象：
 
@@ -161,7 +161,7 @@ InletBoundary
   -> OutletBoundary
 ```
 
-`HP_MULTIPLIERS_RING = [6, 7, 6, 7] * 6`。跨热腿与环、环与 manifold 的连接同样使用 `MacroFlowJunction(multiplier=2)`。
+`HP_MULTIPLIERS_RING = [6, 7, 6, 7] * 6`。跨热腿与环、环与 manifold 的连接同样使用 `MacroFlowJunction(multiplier=2)`。`ring_closure` 使用 `RingHP.outlet_dynamic_loss_params` 承接最后一个环节点的热管管束压降；不要只读取 `outlet_k_loss` 判断热管阻力。
 
 `build_model()` 返回字典的关键对象：
 
@@ -319,3 +319,10 @@ sys_mgr.load_global_state("restart_state.npz")
   - `eps=0.55`: `T_out_avg=750.740 K`, `DeltaT=92.260 K` (inside target band).
   - `eps=0.60`: `T_out_avg=748.199 K`, `DeltaT=94.801 K` (upper edge).
   The `160-200 s` outlet-temperature changes were small for `eps=0.50-0.60`; `eps=0.50` is the most balanced tested value for the requested `85-95 K` drop. Radiation diagnostics at `200 s` gave `Q_bare/Q_fin` pairs of approximately `17.50/23.33 kW` for `eps=0.50`, `18.47/24.52 kW` for `eps=0.55`, and `19.31/25.54 kW` for `eps=0.60`; fin radiation remains about `1.32x` bare heat-pipe radiation when both emissivities are adjusted together.
+
+## 9. 2026-06-06 tube-bank pressure-drop note
+
+- `RingHP` no longer uses the old fixed heat-pipe obstruction estimate `C_D * A_proj/A_flow * N_eff` for nodes with heat pipes. It configures `dynamic_loss_params["model"] == "inline_tube_bank_euler"` on the corresponding ring junctions.
+- The model uses the inline tube-bank Euler-number relation `Eu = 0.67 * (S_T/d - 1)^(-0.5) * Re^(-0.15)` and converts it to the solver's `K_eq` with `K_eq = Eu * N_hp * (A_flow/A_min)^2`.
+- For `geometry100hp`, use `A_flow = 0.110 * 0.040 = 0.0044 m2`, `d = 0.018 m`, `L_eva = 0.100 m`, so `S_T = A_flow/L_eva = 0.044 m` and `S_T/d = 2.44`. This value is tied to the same minimum-area definition used for `v_max`; do not substitute `110/18` or `40/18`.
+- `HP_MULTIPLIERS_RING` is interpreted as the node's streamwise tube-row count for pressure drop and as the node heat-pipe multiplier for heat transfer. With the current `geometry100hp` distribution, `N_hp` is `4` or `5` by node.

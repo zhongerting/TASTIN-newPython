@@ -338,6 +338,7 @@ def build_model():
             to_vol=ring_nodes["O1"],
             flow_area=AREA_RING,
             k_loss=ring_hps[0].outlet_k_loss,
+            dynamic_loss_params=ring_hps[0].outlet_dynamic_loss_params,
         ),
         FlowJunction(
             name="J_S2_I2_to_S3_I2",
@@ -345,6 +346,7 @@ def build_model():
             to_vol=ring_nodes["I2"],
             flow_area=AREA_RING,
             k_loss=ring_hps[1].outlet_k_loss,
+            dynamic_loss_params=ring_hps[1].outlet_dynamic_loss_params,
         ),
         FlowJunction(
             name="J_S3_O2_to_S4_O2",
@@ -352,6 +354,7 @@ def build_model():
             to_vol=ring_nodes["O2"],
             flow_area=AREA_RING,
             k_loss=ring_hps[2].outlet_k_loss,
+            dynamic_loss_params=ring_hps[2].outlet_dynamic_loss_params,
         ),
         FlowJunction(
             name="J_S4_I3_to_S5_I3",
@@ -359,6 +362,7 @@ def build_model():
             to_vol=ring_nodes["I3"],
             flow_area=AREA_RING,
             k_loss=ring_hps[3].outlet_k_loss,
+            dynamic_loss_params=ring_hps[3].outlet_dynamic_loss_params,
         ),
         FlowJunction(
             name="J_S5_O3_to_S6_O3",
@@ -366,6 +370,7 @@ def build_model():
             to_vol=ring_nodes["O3"],
             flow_area=AREA_RING,
             k_loss=ring_hps[4].outlet_k_loss,
+            dynamic_loss_params=ring_hps[4].outlet_dynamic_loss_params,
         ),
         FlowJunction(
             name="J_S6_I1_to_S1_I1",
@@ -373,6 +378,7 @@ def build_model():
             to_vol=ring_nodes["I1"],
             flow_area=AREA_RING,
             k_loss=ring_hps[5].outlet_k_loss,
+            dynamic_loss_params=ring_hps[5].outlet_dynamic_loss_params,
         ),
     ]
 

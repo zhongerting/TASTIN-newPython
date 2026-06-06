@@ -193,7 +193,9 @@ class RingHP(BaseComponent):
         self.hp_units: List[HPwithFin] = []
         self.coupler_hps: List[FluidSolidCouple] = []
         self._outlet_k_loss = 0.0
+        self._outlet_dynamic_loss_params: Dict[str, Any] = {}
         self._hp_k_loss_distribution = np.zeros(n_nodes, dtype=float)
+        self._hp_dynamic_loss_params: List[Dict[str, Any]] = [{} for _ in range(n_nodes)]
         self._hp_presence_mask = np.zeros(n_nodes, dtype=bool)
         self._hp_external_heat_enabled = np.zeros(n_nodes, dtype=bool)
         self._hp_multipliers = np.asarray(hp_multipliers, dtype=float)
@@ -202,6 +204,7 @@ class RingHP(BaseComponent):
         for i in range(n_nodes):
             N_hp = hp_multipliers[i]
             K_loss_val = 0.0
+            dynamic_loss_params: Dict[str, Any] = {}
 
             if N_hp > 0:
                 self._hp_presence_mask[i] = True
@@ -245,25 +248,32 @@ class RingHP(BaseComponent):
 
                 self.hp_units.append(hp)
 
-                # ===== C. 估算热管阵列对集流环流动的阻塞形阻 =====
-                A_proj_single = 2.0 * hp_r_out * hp_L_eva
+                # ===== C. 配置热管顺排管束对集流环流动的动态局部阻力 =====
+                hp_diameter = 2.0 * hp_r_out
+                A_proj_single = hp_diameter * hp_L_eva
                 A_proj_total = A_proj_single
 
                 if A_proj_total >= header_flow_area * 0.99:
                     raise ValueError(f"[{name}] 节点 {i} 的代表热管投影面积将集流环通道几乎完全堵塞。")
 
-                sigma = (header_flow_area - A_proj_total) / header_flow_area
-                if sigma <= 0.0:
-                    raise ValueError(f"[{name}] 节点 {i} 的孔隙率 sigma 非法：{sigma}。")
+                min_flow_area = header_flow_area - A_proj_total
+                pitch_ratio = (header_flow_area / hp_L_eva) / hp_diameter
+                if min_flow_area <= 0.0 or pitch_ratio <= 1.0:
+                    raise ValueError(
+                        f"[{name}] 节点 {i} 的热管顺排压降几何非法："
+                        f"A_min={min_flow_area}, S_T/d={pitch_ratio}。"
+                    )
 
-                # 单排简化阻力模型。
-                N_eff = 1 + 0.3 * (N_hp - 1)
-                # 基于形阻系数、投影面积比和有效排数计算局部阻力损失系数
-                K_loss_val = C_D * (A_proj_single / header_flow_area) * N_eff
+                dynamic_loss_params = {
+                    'model': 'inline_tube_bank_euler',
+                    'D_out': hp_diameter,
+                    'L_pipe': hp_L_eva,
+                    'N_rows': float(N_hp),
+                    'pitch_ratio': float(pitch_ratio),
+                }
 
                 # ===== D. 建立流体控制体与热管蒸发段耦合 =====
                 vol = self.fluid_channel.volumes[i]
-                hp_diameter = 2.0 * hp_r_out
                 proxy = SingleVolumeProxy(
                     vol,
                     self.fluid_channel,
@@ -299,10 +309,13 @@ class RingHP(BaseComponent):
             # 不论该节点是否有热管，都要把出口局部阻力分配到对应 Junction。
             if i < n_nodes - 1:
                 self.fluid_channel.internal_junctions[i].k_loss = K_loss_val
+                self.fluid_channel.internal_junctions[i].dynamic_loss_params = copy.deepcopy(dynamic_loss_params)
             else:
                 self._outlet_k_loss = K_loss_val
+                self._outlet_dynamic_loss_params = copy.deepcopy(dynamic_loss_params)
 
             self._hp_k_loss_distribution[i] = K_loss_val
+            self._hp_dynamic_loss_params[i] = copy.deepcopy(dynamic_loss_params)
 
     @staticmethod
     def _build_external_heat_source(shape: tuple, external_heat_config: Dict[str, Any]) -> CompositeHeatSource:
@@ -490,13 +503,23 @@ class RingHP(BaseComponent):
 
     @property
     def outlet_k_loss(self) -> float:
-        """返回最后一个控制体出口对应的局部阻力系数。"""
+        """返回最后一个控制体出口对应的基础局部阻力系数。"""
         return self._outlet_k_loss
 
     @property
+    def outlet_dynamic_loss_params(self) -> Dict[str, Any]:
+        """返回最后一个控制体出口对应的动态局部阻力参数。"""
+        return copy.deepcopy(self._outlet_dynamic_loss_params)
+
+    @property
     def hp_k_loss_distribution(self) -> np.ndarray:
-        """返回各流体节点对应的热管阵列局部阻力系数分布。"""
+        """返回各流体节点对应的基础局部阻力系数分布。"""
         return np.array(self._hp_k_loss_distribution, copy=True)
+
+    @property
+    def hp_dynamic_loss_params(self) -> List[Dict[str, Any]]:
+        """返回各流体节点对应的动态局部阻力参数。"""
+        return copy.deepcopy(self._hp_dynamic_loss_params)
 
     def get_total_heat_rejection(self) -> float:
         """返回所有代表热管当前的总向外散热量。"""
@@ -557,6 +580,7 @@ class RingHP(BaseComponent):
             'hp_multipliers': np.array(self._hp_multipliers, copy=True),
             'hp_external_heat_enabled': np.array(self._hp_external_heat_enabled, copy=True),
             'hp_k_loss_distribution': np.array(self._hp_k_loss_distribution, copy=True),
+            'hp_dynamic_loss_params': copy.deepcopy(self._hp_dynamic_loss_params),
             'gross_heat_rejection': self.get_total_heat_rejection(),
             'gross_heat_rejection_scaled': self.get_total_heat_rejection_scaled(),
         }

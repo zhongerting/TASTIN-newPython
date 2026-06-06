@@ -208,7 +208,11 @@ dP_form = K * 0.5 * rho * v^2
 
 ### 3.6 动态局部阻力模型
 
-当前内置的动态模型是 `single_crossflow_pipe`，用于描述单根横掠管对流道的阻塞和绕流阻力。
+当前内置的动态模型包括 `single_crossflow_pipe` 和 `inline_tube_bank_euler`。动态阻力由 `dynamic_loss_params["model"]` 启用，并在水力 Picard 迭代中按当前流量刷新。
+
+#### 3.6.1 `single_crossflow_pipe`
+
+`single_crossflow_pipe` 用于描述单根横掠管对流道的阻塞和绕流阻力。
 
 主要计算过程：
 
@@ -235,6 +239,23 @@ K_eq = C_D * (A_proj / A_flow) * (A_flow / A_min)^2
 ```
 
 若投影面积接近堵塞流道，返回极大的阻力系数 `1e5`。
+
+#### 3.6.2 `inline_tube_bank_euler`
+
+`inline_tube_bank_euler` 用于顺排横掠管束压降。当前 `RingHP` 用它描述集流环内热管蒸发段造成的附加局部阻力，公式为：
+
+```text
+A_proj = D_out * L_pipe
+A_min = A_flow - A_proj
+S_T = A_flow / L_pipe
+v_max = |W| / (rho * A_min)
+Re_D = rho * v_max * D_out / mu
+Eu = 0.67 * (S_T / D_out - 1)^(-0.5) * Re_D^(-0.15)
+K_eq = Eu * N_rows * (A_flow / A_min)^2
+Delta p = K_eq * 0.5 * rho * v_nominal^2
+```
+
+`dynamic_loss_params` 可显式传入 `pitch_ratio = S_T/D_out`；否则按 `A_flow / L_pipe / D_out` 计算。`N_rows` 表示该连接件所在控制体内沿流向串联的管排数。若 `A_min <= 0`、投影面积接近堵塞流道或 `S_T/D_out <= 1`，模型返回极大的阻力系数 `1e5`。
 
 ### 3.7 `PumpJunction`
 

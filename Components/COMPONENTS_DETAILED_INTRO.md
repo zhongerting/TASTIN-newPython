@@ -487,6 +487,20 @@ Q_total = N_hp * Q_single
 
 `Q_total = N_hp * Q_single` 是当前串联热管在一个流体控制体内的集总近似；它保持总源项放大口径，但不会解析控制体内逐根热管的沿程冷却剂升温。
 
+热管造成的集流环局部压降与换热模型分开处理。`RingHP` 会为含热管的流体节点和末节点闭合连接配置 `dynamic_loss_params["model"] == "inline_tube_bank_euler"`，按顺排管束欧拉数模型动态刷新等效 `K`：
+
+```text
+A_min = A_flow - D_hp * L_eva
+S_T = A_flow / L_eva
+v_max = |W| / (rho * A_min)
+Re_D = rho * v_max * D_hp / mu
+Eu = 0.67 * (S_T / D_hp - 1)^(-0.5) * Re_D^(-0.15)
+K_eq = Eu * N_hp * (A_flow / A_min)^2
+Delta p_hp = K_eq * 0.5 * rho * v_nom^2
+```
+
+这里 `N_hp` 取该流体节点中沿流向串联的热管数量，也就是 `hp_multipliers[i]`。`hp_k_loss_distribution` 仅表示基础固定局部阻力；当前热管管束阻力应从 `hp_dynamic_loss_params` 或水力网络的 `effective_K_loss_vec` 诊断。
+
 主要接口：
 
 - `get_solids()`：返回集流环壁面和所有存在的热管固体。

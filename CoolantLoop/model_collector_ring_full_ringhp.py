@@ -377,6 +377,7 @@ def build_model():
         to_vol=ring_channel.volumes[0],
         flow_area=AREA_RING,
         k_loss=ring_hp.outlet_k_loss,
+        dynamic_loss_params=ring_hp.outlet_dynamic_loss_params,
     )
 
     # -----------------------------------------------------

@@ -1,3 +1,4 @@
+import math
 import numpy as np
 from typing import List, Optional, Tuple, TYPE_CHECKING, Union
 from dataclasses import dataclass, field
@@ -573,6 +574,42 @@ class FlowJunction:
             K_eq = C_D * (A_proj / A_flow) * (area_ratio ** 2)
 
             return K_eq
+
+        if loss_model == 'inline_tube_bank_euler':
+            eps = 1.0e-10
+            D_out = float(self.dynamic_loss_params.get('D_out', 0.015))
+            L_pipe = float(self.dynamic_loss_params.get('L_pipe', self.length))
+            N_rows = float(self.dynamic_loss_params.get('N_rows', 1.0))
+
+            A_flow = max(float(self.area), eps)
+            A_proj = D_out * L_pipe
+            if A_proj >= A_flow * 0.99:
+                return 1.0e5
+
+            A_min = A_flow - A_proj
+            if A_min <= eps:
+                return 1.0e5
+
+            pitch_ratio = self.dynamic_loss_params.get('pitch_ratio', None)
+            if pitch_ratio is None:
+                if L_pipe <= eps:
+                    return 0.0
+                pitch_ratio = (A_flow / L_pipe) / D_out
+            pitch_ratio = float(pitch_ratio)
+            if pitch_ratio <= 1.0:
+                return 1.0e5
+
+            rho = max(float(self.from_vol.rho), eps)
+            mu = max(float(self.from_vol.mu), eps)
+            v_nominal = abs(float(self.vel))
+            if v_nominal < eps or N_rows <= 0.0:
+                return 0.0
+
+            area_ratio = A_flow / A_min
+            v_max = v_nominal * area_ratio
+            Re_D = max((rho * v_max * D_out) / mu, eps)
+            Eu = 0.67 * (pitch_ratio - 1.0) ** (-0.5) * Re_D ** (-0.15)
+            return Eu * N_rows * (area_ratio ** 2)
 
         return 0.0
 

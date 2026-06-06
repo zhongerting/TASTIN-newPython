@@ -797,6 +797,8 @@ class HydraulicNetwork:
             dynamic_k_loss = 0.0
             if model == 'single_crossflow_pipe':
                 dynamic_k_loss = self._compute_single_crossflow_pipe_k_loss(j, params, W_current)
+            elif model == 'inline_tube_bank_euler':
+                dynamic_k_loss = self._compute_inline_tube_bank_euler_k_loss(j, params, W_current)
             else:
                 compute_dynamic = getattr(junc, '_compute_dynamic_k_loss', None)
                 if callable(compute_dynamic):
@@ -846,6 +848,47 @@ class HydraulicNetwork:
 
         area_ratio = A_flow / A_min
         return C_D * (A_proj / A_flow) * (area_ratio ** 2)
+
+    def _compute_inline_tube_bank_euler_k_loss(self, j_idx: int, params: dict, W_current: np.ndarray) -> float:
+        """Vector-path dynamic loss for inline crossflow tube-bank pressure drop."""
+        eps = 1.0e-10
+        A_flow = max(float(self.A_junc_vec[j_idx]), eps)
+        D_out = float(params.get('D_out', 0.015))
+        L_pipe = float(params.get('L_pipe', self.L_junc_vec[j_idx]))
+        N_rows = float(params.get('N_rows', 1.0))
+
+        A_proj = D_out * L_pipe
+        if A_proj >= A_flow * 0.99:
+            return 1.0e5
+
+        A_min = A_flow - A_proj
+        if A_min <= eps:
+            return 1.0e5
+
+        pitch_ratio = params.get('pitch_ratio', None)
+        if pitch_ratio is None:
+            if L_pipe <= eps:
+                return 0.0
+            pitch_ratio = (A_flow / L_pipe) / D_out
+        pitch_ratio = float(pitch_ratio)
+        if pitch_ratio <= 1.0:
+            return 1.0e5
+
+        W = float(W_current[j_idx])
+        if abs(W) < eps or N_rows <= 0.0:
+            return 0.0
+
+        idx_from = self.idx_from_vec[j_idx]
+        idx_to = self.idx_to_vec[j_idx]
+        alpha = 0.5 * (1.0 + math.tanh(W / 1.0e-6))
+        rho = max(alpha * self.rho_vec[idx_from] + (1.0 - alpha) * self.rho_vec[idx_to], eps)
+        mu = max(alpha * self.mu_vec[idx_from] + (1.0 - alpha) * self.mu_vec[idx_to], eps)
+
+        area_ratio = A_flow / A_min
+        v_max = abs(W) / (rho * A_min)
+        Re_D = max((rho * v_max * D_out) / mu, eps)
+        Eu = 0.67 * (pitch_ratio - 1.0) ** (-0.5) * Re_D ** (-0.15)
+        return Eu * N_rows * (area_ratio ** 2)
 
     def _compute_dynamic_k_loss_from_object(self, j_idx: int, W_current: np.ndarray, compute_dynamic) -> float:
         """Fallback for custom FlowJunction dynamic-loss models."""
