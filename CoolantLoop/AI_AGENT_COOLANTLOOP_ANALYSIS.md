@@ -38,6 +38,7 @@
 | [`run_collector_ring_full_ringhp_1p3kgs_inlet_init_steady.py`](./run_collector_ring_full_ringhp_1p3kgs_inlet_init_steady.py) | 稳态搜索包装器 | 从 `t=0` 构造 full ringhp，总入口流量 `1.3 kg/s`，流体和集流环固体初温默认设为入口温度；热管初温默认同入口温度，也可用 `--hp-init-temp 800` 复现早期完整环口径；默认前 `0.1 s` 小步长启动 | 1.3 kg/s 真初态到稳态首选入口 |
 | [`run_collector_ring_full_ringhp_geometry100hp_test.py`](./run_collector_ring_full_ringhp_geometry100hp_test.py) | 几何变体测试包装器 | 矩形集流环 `110 mm x 40 mm`、总热管数 `100`、热管 `0.1/0/0.5 m`、蒸汽半径 `7.5 mm`、吸液芯厚 `0.5 mm`、壁厚 `1 mm`、翅片 `20 mm x 0.4 mm` | 新结构错位检查和短计算测试 |
 | [`run_collector_ring_full_ringhp_geometry100hp_potassium_test.py`](./run_collector_ring_full_ringhp_geometry100hp_potassium_test.py) | 钾热管几何变体包装器 | 复用 `geometry100hp` 的矩形集流环、100 根热管和几何/流量/发射率参数；临时重建 `PotassiumHP` 与钾热管 `WickMaterial` | 钾热管独立 A/B 对比入口；不要加载钠热管 restart |
+| [`model_collector_ring_full_ringhp_geometry100hp_potassium_mixed.py`](./model_collector_ring_full_ringhp_geometry100hp_potassium_mixed.py) | 钾热管混合节点独立算例 | 固化 `geometry100hp`、100 根钾热管、总流量 `1.3 kg/s`、`eps_hp=eps_fin=0.6`、集流环壁面 `eps=0.05`、`T_space=200 K`；入口/出口均有小体积无热管混合节点 | 后续闭式回路和入口/出口混合节点策略的首选基线 |
 | [`run_collector_ring_full_ringhp_steady_debug.py`](./run_collector_ring_full_ringhp_steady_debug.py) | 稳态调试包装器 | 默认从最新 full ringhp 快照短续算，输出 history、restart 和 `T_out_avg` 斜率判据 | 集流环+热管稳态调试首选 |
 | [`run_collector_ring_full_ringhp_energy_audit.py`](./run_collector_ring_full_ringhp_energy_audit.py) | 能量守恒审计包装器 | 从 full ringhp restart 续算并输出 `Q_loop - Q_rejection - dU/dt` 残差 | 集流环+热管整体能量守恒检查首选 |
 
@@ -326,3 +327,16 @@ sys_mgr.load_global_state("restart_state.npz")
 - The model uses the inline tube-bank Euler-number relation `Eu = 0.67 * (S_T/d - 1)^(-0.5) * Re^(-0.15)` and converts it to the solver's `K_eq` with `K_eq = Eu * N_hp * (A_flow/A_min)^2`.
 - For `geometry100hp`, use `A_flow = 0.110 * 0.040 = 0.0044 m2`, `d = 0.018 m`, `L_eva = 0.100 m`, so `S_T = A_flow/L_eva = 0.044 m` and `S_T/d = 2.44`. This value is tied to the same minimum-area definition used for `v_max`; do not substitute `110/18` or `40/18`.
 - `HP_MULTIPLIERS_RING` is interpreted as the node's streamwise tube-row count for pressure drop and as the node heat-pipe multiplier for heat transfer. With the current `geometry100hp` distribution, `N_hp` is `4` or `5` by node.
+
+## 10. 2026-06-06 geometry100hp potassium mixing-node case
+
+- `model_collector_ring_full_ringhp_geometry100hp_potassium_mixed.py` is a standalone case for the 100-potassium-heat-pipe geometry with inlet/outlet mixing nodes. It should be preferred over temporary runtime overrides when reproducing the `eps_hp=eps_fin=0.6`, ring-wall `eps=0.05`, `T_space=200 K` condition.
+- Topology:
+  ```text
+  inlet_boundary -> inlet_buffer -> MacroFlowJunction x3
+    -> single-ring hot_leg x3 -> inlet_mix_node x3 -> ring nodes [0, 8, 16]
+  ring nodes [4, 12, 20] -> outlet_mix_node x3 -> single-ring manifold x3
+    -> MacroFlowJunction x3 -> outlet_buffer -> outlet_boundary
+  ```
+- The `MacroFlowJunction(multiplier=2)` is now placed between the macro header/buffer and the single-ring inlet/outlet pipe. Thus the inlet/outlet buffers see total physical flow, while each hot leg, mixing node, manifold, and ring channel sees the single modeled ring flow.
+- The mixing nodes use `MIX_NODE_VOLUME_FACTOR = 0.10` times one ring-node volume, have no heat pipes, and initially add no local loss. They are intended to separate inlet/outlet injection and extraction from the heat-pipe-bearing ring control volumes.
