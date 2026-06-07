@@ -40,6 +40,7 @@
 | [`run_collector_ring_full_ringhp_geometry100hp_potassium_test.py`](./run_collector_ring_full_ringhp_geometry100hp_potassium_test.py) | 钾热管几何变体包装器 | 复用 `geometry100hp` 的矩形集流环、100 根热管和几何/流量/发射率参数；临时重建 `PotassiumHP` 与钾热管 `WickMaterial` | 钾热管独立 A/B 对比入口；不要加载钠热管 restart |
 | [`model_collector_ring_full_ringhp_geometry100hp_potassium_mixed.py`](./model_collector_ring_full_ringhp_geometry100hp_potassium_mixed.py) | 钾热管混合节点独立算例 | 固化 `geometry100hp`、100 根钾热管、总流量 `1.3 kg/s`、`eps_hp=eps_fin=0.6`、集流环壁面 `eps=0.05`、`T_space=200 K`；入口/出口均有小体积无热管混合节点 | 后续闭式回路和入口/出口混合节点策略的首选基线 |
 | [`model_collector_ring_6segment_geometry100hp_potassium_mixed.py`](./model_collector_ring_6segment_geometry100hp_potassium_mixed.py) | 6 段钾热管混合节点独立算例 | 将 `geometry100hp` 拆为 6 个非闭合 `1/6 RingHP` 段，段间插入 3 个入口混合体和 3 个出口混合体；100 根钾热管按 `17/16/17/16/17/17` 分配，单段 3 个控制体 | 当前入口/出口连接混合体方案的首选实现；避免把混合体建成带热管的环节点 |
+| [`run_collector_ring_6segment_geometry100hp_potassium_anisotropic_wick_test.py`](./run_collector_ring_6segment_geometry100hp_potassium_anisotropic_wick_test.py) | 吸液芯各向异性导热 A/B 测试包装器 | 从 6 段钾热管混合节点算例构建系统，运行前对所有代表热管调用 `set_wick_conductivity_mode(True)`；默认从 `500 s` restart 跑到 `501 s` 并统计 BDF warning | 用于验证“轴向赝热导、径向结构导热”是否降低 BDF warning 和改变稳态温差；不是生产默认模型 |
 | [`run_collector_ring_full_ringhp_steady_debug.py`](./run_collector_ring_full_ringhp_steady_debug.py) | 稳态调试包装器 | 默认从最新 full ringhp 快照短续算，输出 history、restart 和 `T_out_avg` 斜率判据 | 集流环+热管稳态调试首选 |
 | [`run_collector_ring_full_ringhp_energy_audit.py`](./run_collector_ring_full_ringhp_energy_audit.py) | 能量守恒审计包装器 | 从 full ringhp restart 续算并输出 `Q_loop - Q_rejection - dU/dt` 残差 | 集流环+热管整体能量守恒检查首选 |
 
@@ -354,3 +355,15 @@ sys_mgr.load_global_state("restart_state.npz")
 - Each segment has three coolant control volumes. Heat-pipe multipliers are `A1=[5,6,6]`, `A2=[5,5,6]`, `A3=[5,6,6]`, `A4=[5,5,6]`, `A5=[5,6,6]`, `A6=[5,6,6]`, giving segment totals `17/16/17/16/17/17` and total heat-pipe count `100`.
 - The mixing volumes are not heat-pipe-bearing ring nodes. Inlet mixing volumes use `AREA_HOT_LEG * (2*DH_HOT_LEG)` and outlet mixing volumes use `AREA_MANIFOLD * (2*DH_MANIFOLD)`. Links from mixing volumes into/out of RingHP segments use `AREA_RING`; no additional local loss is added initially.
 - `MacroFlowJunction(multiplier=2)` is only used between macro buffers and single-ring branches. A smoke run to `0.005 s` verified `W_in_total=1.300000 kg/s`, `W_ring_in_total=0.650000 kg/s`, and near-even inlet branch flows of about `0.2167 kg/s` each.
+
+## 12. 2026-06-07 anisotropic wick conductivity test wrapper
+
+- `run_collector_ring_6segment_geometry100hp_potassium_anisotropic_wick_test.py` is a diagnostic wrapper for the 6-segment potassium case. It monkey-patches only the constructed model instance: after `build_model()`, each representative heat-pipe solid receives `hp.set_wick_conductivity_mode(True)`.
+- The anisotropic wick mode keeps axial conductivity as `WickMaterial.conductivity_axial()` including pseudothermal conductivity, while radial conductivity uses `WickMaterial.conductivity_radial()`, currently structural conductivity only. The base production case remains isotropic by default.
+- Default command:
+  ```powershell
+  & "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" CoolantLoop\run_collector_ring_6segment_geometry100hp_potassium_anisotropic_wick_test.py
+  ```
+  This loads `collector_ring_6segment_geometry100hp_potassium_mixed_500s_resume_restart.npz`, runs to `501 s`, captures BDF RuntimeWarnings, and prints final `T_out_avg`, inlet-outlet temperature drop, flow closure, and top wick-conductivity diagnostics.
+- For A/B control, pass `--isotropic-control`. For long re-equilibration, pass e.g. `--t-end 650 --print-every-time 10 --restart-save-every 25`. Do not treat anisotropic results as production defaults until the warning rate, final temperature drop, and representative heat-pipe axial/radial temperature distributions have been compared.
+- A 2026-06-07 `500->501 s` short A/B run confirmed the wrapper path and diagnostics. In anisotropic mode, representative high-temperature heat pipes used `k_axial≈3.8e7 W/(m*K)` but `k_radial_model≈88 W/(m*K)`; in isotropic control, `k_radial_model≈k_axial`. The BDF warning is intermittent over 1 s windows, so absence or presence in one short run is not by itself a production decision criterion.
