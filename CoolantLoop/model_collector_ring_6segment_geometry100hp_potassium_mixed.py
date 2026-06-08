@@ -100,6 +100,13 @@ HP_TIME_INTEGRATOR = "theta_implicit"
 HP_THETA_IMPLICIT_VALUE = 0.6
 HP_IMPLICIT_BOUNDARY_LINEARIZATION = True
 
+K_INLET_HEADER_TO_HOT_LEG = 1.5
+K_HOT_LEG_TO_INLET_MIX = 1.0
+K_INLET_MIX_TO_RING_SEGMENT = 0.5
+K_RING_SEGMENT_TO_OUTLET_MIX = 0.7
+K_OUTLET_MIX_TO_MANIFOLD = 1.0
+K_MANIFOLD_TO_OUTLET_HEADER = 1.1
+
 if sum(sum(spec[3]) for spec in SEGMENT_SPECS) != HP_TOTAL_COUNT:
     raise ValueError("Segment heat-pipe multipliers must sum to HP_TOTAL_COUNT.")
 
@@ -130,6 +137,14 @@ def build_sector_solid(name):
         T_env=T_SPACE,
     )
     return solid
+
+
+def pressure_drop_along_flow(junction):
+    """Return pressure drop in the actual mass-flow direction for diagnostics."""
+    dp_from_to = float(junction.from_vol.P - junction.to_vol.P)
+    if float(junction.W) < 0.0:
+        return -dp_from_to
+    return dp_from_to
 
 
 def build_mix_node(name, kind):
@@ -274,14 +289,14 @@ def build_model():
             from_vol=mix_nodes[start_key],
             to_vol=channel.volumes[0],
             flow_area=AREA_RING,
-            k_loss=0.0,
+            k_loss=K_INLET_MIX_TO_RING_SEGMENT,
         )
         exit_link = FlowJunction(
             name=f"J_{sector_name}_to_{end_key}",
             from_vol=channel.volumes[-1],
             to_vol=mix_nodes[end_key],
             flow_area=AREA_RING,
-            k_loss=ring_hp.outlet_k_loss,
+            k_loss=ring_hp.outlet_k_loss + K_RING_SEGMENT_TO_OUTLET_MIX,
             dynamic_loss_params=ring_hp.outlet_dynamic_loss_params,
         )
         segment_entry_links.append(entry_link)
@@ -316,7 +331,7 @@ def build_model():
                 macro_vol=inlet_buffer_channel.volumes[-1],
                 multiplier=2,
                 flow_area=AREA_HOT_LEG,
-                k_loss=0.0,
+                k_loss=K_INLET_HEADER_TO_HOT_LEG,
             )
         )
         hot_leg_to_inlet_mix.append(
@@ -325,7 +340,7 @@ def build_model():
                 from_vol=hot_legs[idx].volumes[-1],
                 to_vol=inlet_mix_nodes[key],
                 flow_area=AREA_HOT_LEG,
-                k_loss=0.0,
+                k_loss=K_HOT_LEG_TO_INLET_MIX,
             )
         )
 
@@ -336,7 +351,7 @@ def build_model():
                 from_vol=outlet_mix_nodes[key],
                 to_vol=manifolds[idx].volumes[0],
                 flow_area=AREA_MANIFOLD,
-                k_loss=0.0,
+                k_loss=K_OUTLET_MIX_TO_MANIFOLD,
             )
         )
         manifold_to_outlet_buffer.append(
@@ -347,7 +362,7 @@ def build_model():
                 macro_vol=outlet_buffer_channel.volumes[0],
                 multiplier=2,
                 flow_area=AREA_MANIFOLD,
-                k_loss=0.0,
+                k_loss=K_MANIFOLD_TO_OUTLET_HEADER,
             )
         )
 
@@ -437,6 +452,15 @@ def print_model_summary(model):
         f"integrator={HP_TIME_INTEGRATOR}, "
         f"theta={HP_THETA_IMPLICIT_VALUE:.3f}, "
         f"implicit_boundary={HP_IMPLICIT_BOUNDARY_LINEARIZATION}"
+    )
+    print(
+        "Local loss K         : "
+        f"inlet_header_hotleg={K_INLET_HEADER_TO_HOT_LEG:.3g}, "
+        f"hotleg_inlet_mix={K_HOT_LEG_TO_INLET_MIX:.3g}, "
+        f"mix_ring={K_INLET_MIX_TO_RING_SEGMENT:.3g}, "
+        f"ring_outlet_mix={K_RING_SEGMENT_TO_OUTLET_MIX:.3g}, "
+        f"outlet_mix_manifold={K_OUTLET_MIX_TO_MANIFOLD:.3g}, "
+        f"manifold_header={K_MANIFOLD_TO_OUTLET_HEADER:.3g}"
     )
     print("  Ring topology: I1 -> A1 -> O1 -> A2 -> I2 -> A3 -> O2")
     print("                 -> A4 -> I3 -> A5 -> O3 -> A6 -> I1")
@@ -540,6 +564,9 @@ def run_case(
             "T_out_avg": t_out_avg,
             "T_inlet_buffer_out": float(inlet_buffer_channel.volumes[-1].T),
             "T_outlet_buffer_out": float(outlet_buffer_channel.volumes[-1].T),
+            "P_inlet_buffer_out": float(inlet_buffer_channel.volumes[-1].P),
+            "P_outlet_buffer_in": float(outlet_buffer_channel.volumes[0].P),
+            "P_outlet_buffer_out": float(outlet_buffer_channel.volumes[-1].P),
         }
         for idx, key in enumerate(INLET_MIX_KEYS, start=1):
             node = inlet_mix_nodes[key]
@@ -549,6 +576,12 @@ def run_case(
                 inlet_buffer_to_hot_leg[idx - 1].get_mass_flow_for(inlet_buffer_channel.volumes[-1])
             )
             row[f"W_hotleg_to_inlet_mix_{key}"] = float(hot_leg_to_inlet_mix[idx - 1].W)
+            row[f"dP_macro_inlet_to_hotleg_{idx}"] = pressure_drop_along_flow(
+                inlet_buffer_to_hot_leg[idx - 1]
+            )
+            row[f"dP_hotleg_to_inlet_mix_{key}"] = pressure_drop_along_flow(
+                hot_leg_to_inlet_mix[idx - 1]
+            )
         for idx, key in enumerate(OUTLET_MIX_KEYS, start=1):
             node = outlet_mix_nodes[key]
             row[f"T_outlet_mix_{key}"] = float(node.T)
@@ -557,15 +590,29 @@ def run_case(
             row[f"W_macro_manifold_to_outlet_{idx}"] = float(
                 manifold_to_outlet_buffer[idx - 1].get_mass_flow_for(outlet_buffer_channel.volumes[0])
             )
+            row[f"dP_outlet_mix_to_manifold_{key}"] = pressure_drop_along_flow(
+                outlet_mix_to_manifold[idx - 1]
+            )
+            row[f"dP_macro_manifold_to_outlet_{idx}"] = pressure_drop_along_flow(
+                manifold_to_outlet_buffer[idx - 1]
+            )
         for idx, channel in enumerate(hot_legs, start=1):
             row[f"T_hotleg_{idx}_out"] = float(channel.volumes[-1].T)
+            row[f"P_hotleg_{idx}_in"] = float(channel.volumes[0].P)
+            row[f"P_hotleg_{idx}_out"] = float(channel.volumes[-1].P)
         for idx, channel in enumerate(manifolds, start=1):
             row[f"T_manifold_{idx}_out"] = float(channel.volumes[-1].T)
+            row[f"P_manifold_{idx}_in"] = float(channel.volumes[0].P)
+            row[f"P_manifold_{idx}_out"] = float(channel.volumes[-1].P)
         for idx, channel in enumerate(sectors, start=1):
             row[f"T_A{idx}_in"] = float(channel.volumes[0].T)
             row[f"T_A{idx}_out"] = float(channel.volumes[-1].T)
+            row[f"P_A{idx}_in"] = float(channel.volumes[0].P)
+            row[f"P_A{idx}_out"] = float(channel.volumes[-1].P)
             row[f"W_A{idx}_entry"] = float(segment_entry_links[idx - 1].W)
             row[f"W_A{idx}_exit"] = float(segment_exit_links[idx - 1].W)
+            row[f"dP_A{idx}_entry"] = pressure_drop_along_flow(segment_entry_links[idx - 1])
+            row[f"dP_A{idx}_exit"] = pressure_drop_along_flow(segment_exit_links[idx - 1])
 
         history.append(row)
 
