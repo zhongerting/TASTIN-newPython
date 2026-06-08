@@ -1,5 +1,7 @@
 import numpy as np
 from scipy.integrate import solve_ivp
+from scipy.sparse import coo_matrix
+from scipy.sparse.linalg import spsolve
 
 from Materials.Base import SolidMaterial
 from Materials.Solids.WickMaterial import WickMaterial
@@ -99,6 +101,8 @@ class HeatPipe2D(HeatConduction2D):
         self.maximum_physical_temperature = np.inf
         self.use_anisotropic_wick_conductivity = False
         self.face_conductance_mode = "legacy_harmonic"
+        self.time_integrator = "bdf"
+        self.theta_implicit_value = 0.6
 
         super().__init__(mesh, self.wall_mat, name=name, initial_temp=initial_temp)
 
@@ -166,6 +170,18 @@ class HeatPipe2D(HeatConduction2D):
         if mode not in valid_modes:
             raise ValueError(f"Unsupported face conductance mode: {mode}")
         self.face_conductance_mode = mode
+
+    def set_time_integrator(self, integrator: str):
+        valid_integrators = {"bdf", "implicit_euler", "theta_implicit"}
+        if integrator not in valid_integrators:
+            raise ValueError(f"Unsupported HeatPipe2D time integrator: {integrator}")
+        self.time_integrator = integrator
+
+    def set_theta_implicit_value(self, theta: float):
+        theta = float(theta)
+        if theta < 0.5 or theta > 1.0:
+            raise ValueError("theta_implicit_value must be in [0.5, 1.0]")
+        self.theta_implicit_value = theta
 
     def _reset_boundary_condition_diagnostics(self):
         for boundary in self.boundaries.values():
@@ -620,6 +636,167 @@ class HeatPipe2D(HeatConduction2D):
 
         return Q_net_2d.reshape(-1).copy()
 
+    def _compute_boundary_flux_vector(self) -> np.ndarray:
+        Q_boundary = self.Q_net_2d_buffer
+        Q_boundary.fill(0.0)
+
+        if 'left' in self.boundaries:
+            Q_boundary[0, :] += self.boundaries['left'].compute_net_flux_for_solver()
+
+        if 'bottom' in self.boundaries:
+            Q_boundary[:, 0] += self.boundaries['bottom'].compute_net_flux_for_solver()
+
+        if 'top' in self.boundaries:
+            Q_boundary[:, -1] += self.boundaries['top'].compute_net_flux_for_solver()
+
+        if 'outer_eva' in self.boundaries:
+            Q_boundary[-1, self._slice_eva] += self.boundaries['outer_eva'].compute_net_flux_for_solver()
+
+        if 'outer_aba' in self.boundaries:
+            Q_boundary[-1, self._slice_aba] += self.boundaries['outer_aba'].compute_net_flux_for_solver()
+
+        if 'outer_con' in self.boundaries:
+            Q_boundary[-1, self._slice_con] += self.boundaries['outer_con'].compute_net_flux_for_solver()
+
+        return Q_boundary.reshape(-1).copy()
+
+    def _compute_internal_flux_for_temperature(self, T_flat: np.ndarray) -> np.ndarray:
+        Q_net_2d = self.Q_net_2d_buffer
+        Q_net_2d.fill(0.0)
+        T_2d = np.asarray(T_flat, dtype=float).reshape(self.shape_nodes)
+
+        if self.G_x_inner.size > 0:
+            np.subtract(T_2d[:-1, :], T_2d[1:, :], out=self._flux_x_buffer)
+            np.multiply(self._flux_x_buffer, self.G_x_inner, out=self._flux_x_buffer)
+            Q_net_2d[:-1, :] -= self._flux_x_buffer
+            Q_net_2d[1:, :] += self._flux_x_buffer
+
+        if self.G_y_inner.size > 0:
+            np.subtract(T_2d[:, :-1], T_2d[:, 1:], out=self._flux_y_buffer)
+            np.multiply(self._flux_y_buffer, self.G_y_inner, out=self._flux_y_buffer)
+            Q_net_2d[:, :-1] -= self._flux_y_buffer
+            Q_net_2d[:, 1:] += self._flux_y_buffer
+
+        return Q_net_2d.reshape(-1).copy()
+
+    def _assemble_theta_implicit_matrix(self, dt: float, theta: float):
+        nx, ny = self.shape_nodes
+        inv_dt = 1.0 / max(float(dt), 1.0e-30)
+        diag = self.thermal_capacitance * inv_dt
+        theta = float(theta)
+
+        rows = []
+        cols = []
+        data = []
+
+        def node_index(i: int, j: int) -> int:
+            return i * ny + j
+
+        if self.G_x_inner.size > 0:
+            for i in range(nx - 1):
+                for j in range(ny):
+                    conductance = theta * float(self.G_x_inner[i, j])
+                    if conductance == 0.0:
+                        continue
+                    left = node_index(i, j)
+                    right = node_index(i + 1, j)
+                    diag[left] += conductance
+                    diag[right] += conductance
+                    rows.extend([left, right])
+                    cols.extend([right, left])
+                    data.extend([-conductance, -conductance])
+
+        if self.G_y_inner.size > 0:
+            for i in range(nx):
+                for j in range(ny - 1):
+                    conductance = theta * float(self.G_y_inner[i, j])
+                    if conductance == 0.0:
+                        continue
+                    bottom = node_index(i, j)
+                    top = node_index(i, j + 1)
+                    diag[bottom] += conductance
+                    diag[top] += conductance
+                    rows.extend([bottom, top])
+                    cols.extend([top, bottom])
+                    data.extend([-conductance, -conductance])
+
+        rows.extend(range(self.N))
+        cols.extend(range(self.N))
+        data.extend(diag.tolist())
+
+        return coo_matrix((data, (rows, cols)), shape=(self.N, self.N)).tocsc()
+
+    def _solve_theta_implicit_once(self, dt: float, t_start: float, T_start: np.ndarray, theta: float) -> np.ndarray:
+        self._compute_internal_resistance()
+        self._update_boundaries_state(current_time=t_start)
+        Q_boundary = self._compute_boundary_flux_vector()
+        self._update_sources(t_start)
+
+        inv_dt = 1.0 / max(float(dt), 1.0e-30)
+        rhs = self.thermal_capacitance * inv_dt * T_start
+        if theta < 1.0:
+            rhs = rhs + (1.0 - theta) * self._compute_internal_flux_for_temperature(T_start)
+        rhs = rhs + Q_boundary + self.Q_source
+
+        matrix = self._assemble_theta_implicit_matrix(dt, theta)
+        candidate_T = spsolve(matrix, rhs)
+        return np.asarray(candidate_T, dtype=float)
+
+    def _implicit_euler_step(self, dt: float) -> bool:
+        return self._theta_implicit_step(dt, theta=1.0, method_name="Implicit Euler")
+
+    def _theta_implicit_step(self, dt: float, theta: float = None, method_name: str = "Theta implicit") -> bool:
+        if theta is None:
+            theta = self.theta_implicit_value
+        theta = float(theta)
+        attempted_end_time = self.current_time + dt
+        self._reset_step_diagnostics(attempted_end_time)
+        self._reset_boundary_condition_diagnostics()
+        self.save_state()
+
+        time_start = self.current_time
+        T_start = self.T.copy()
+        guess_T = T_start.copy()
+        accepted_T = None
+        max_outer_iters = max(int(self.max_outer_property_corrections), 1)
+
+        for _ in range(max_outer_iters):
+            self.T[:] = guess_T
+            self.current_time = time_start
+            self._properties_frozen = False
+            self._update_properties()
+
+            candidate_T = self._solve_theta_implicit_once(dt, time_start, T_start, theta)
+            self._record_trial_state(time_start + dt, candidate_T)
+            if not np.all(np.isfinite(candidate_T)):
+                failure_message = self._compose_failure_message(
+                    f"{method_name} returned non-finite temperature state"
+                )
+                self.load_state()
+                self._mark_step_failure(failure_message, failure_time=attempted_end_time)
+                return False
+
+            accepted_T = candidate_T
+            delta = float(np.max(np.abs(candidate_T - guess_T)))
+            scale = max(1.0, float(np.max(np.abs(candidate_T))))
+            if delta <= self.outer_property_tol * scale:
+                break
+            guess_T = candidate_T.copy()
+
+        if accepted_T is None or not self._is_temperature_state_physical(accepted_T):
+            failure_message = self._compose_failure_message(
+                f"{method_name} produced unphysical temperature state"
+            )
+            self.load_state()
+            self._mark_step_failure(failure_message, failure_time=attempted_end_time)
+            return False
+
+        self.T[:] = accepted_T
+        self.current_time = attempted_end_time
+        self._refresh_current_state(current_time=self.current_time)
+        self._mark_step_success()
+        return True
+
     def get_derivatives(self, t: float, T_current: np.ndarray) -> np.ndarray:
         if not self._properties_frozen:
             return super().get_derivatives(t, T_current)
@@ -641,6 +818,17 @@ class HeatPipe2D(HeatConduction2D):
         return self.dTdt
 
     def step(self, dt: float, method: str = 'BDF', **kwargs) -> bool:
+        if self.time_integrator == "implicit_euler":
+            return self._implicit_euler_step(dt)
+        if self.time_integrator == "theta_implicit":
+            return self._theta_implicit_step(
+                dt,
+                theta=self.theta_implicit_value,
+                method_name=f"Theta implicit (theta={self.theta_implicit_value:.3g})"
+            )
+        if self.time_integrator != "bdf":
+            raise ValueError(f"Unsupported HeatPipe2D time integrator: {self.time_integrator}")
+
         attempted_end_time = self.current_time + dt
         self._reset_step_diagnostics(attempted_end_time)
         self._reset_boundary_condition_diagnostics()

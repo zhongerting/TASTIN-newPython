@@ -24,6 +24,7 @@ build/
 CoolantLoop/*.png
 testModule/*.png
 CoolantLoop/*_profiler_report.txt
+CoolantLoop/warning_test_*_first_warning.txt
 ThermoCalc/build_cp312/
 testModule/single_tfe_energy_conservation_v7*/
 testModule/tec_joule_fix_audit_tmp/
