@@ -355,6 +355,8 @@ sys_mgr.load_global_state("restart_state.npz")
 - Each segment has three coolant control volumes. Heat-pipe multipliers are `A1=[5,6,6]`, `A2=[5,5,6]`, `A3=[5,6,6]`, `A4=[5,5,6]`, `A5=[5,6,6]`, `A6=[5,6,6]`, giving segment totals `17/16/17/16/17/17` and total heat-pipe count `100`.
 - The mixing volumes are not heat-pipe-bearing ring nodes. Inlet mixing volumes use `AREA_HOT_LEG * (2*DH_HOT_LEG)` and outlet mixing volumes use `AREA_MANIFOLD * (2*DH_MANIFOLD)`. Links from mixing volumes into/out of RingHP segments use `AREA_RING`; no additional local loss is added initially.
 - `MacroFlowJunction(multiplier=2)` is only used between macro buffers and single-ring branches. A smoke run to `0.005 s` verified `W_in_total=1.300000 kg/s`, `W_ring_in_total=0.650000 kg/s`, and near-even inlet branch flows of about `0.2167 kg/s` each.
+- As of 2026-06-08, this case configures each representative heat pipe with anisotropic wick conductivity, uncapped axial wick conductivity, `HeatPipe2D.time_integrator="theta_implicit"`, `theta_implicit_value=0.6`, and `set_implicit_boundary_linearization(True)`. The generic heat-conduction BDF path is not used for these heat-pipe solids.
+- A 2026-06-08 restart run from `collector_ring_6segment_geometry100hp_potassium_mixed_500s_resume_restart.npz` to `700 s` completed without RuntimeWarning. Output files use the prefix `collector_ring_6segment_geometry100hp_potassium_mixed_new_hp_solver_700s_from500s`; at `700 s`, `T_out_avg=756.533151 K`, inlet-buffer outlet temperature was `842.999005 K`, inlet-outlet `dT=86.465854 K`, `W_in_total=1.300000 kg/s`, and `W_ring_in_total=0.650000 kg/s`.
 
 ## 12. 2026-06-07 anisotropic wick conductivity test wrapper
 

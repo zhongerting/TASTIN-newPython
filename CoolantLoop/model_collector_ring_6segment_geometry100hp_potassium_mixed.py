@@ -93,6 +93,11 @@ OUTLET_MIX_KEYS = ["O1", "O2", "O3"]
 DEFAULT_T_END = 50.0
 DEFAULT_PRINT_EVERY_TIME = 1.0
 DEFAULT_RESTART_SAVE_EVERY = 10.0
+HP_WICK_ANISOTROPIC = True
+HP_WICK_CONDUCTIVITY_CAP = None
+HP_TIME_INTEGRATOR = "theta_implicit"
+HP_THETA_IMPLICIT_VALUE = 0.6
+HP_IMPLICIT_BOUNDARY_LINEARIZATION = True
 
 if sum(sum(spec[3]) for spec in SEGMENT_SPECS) != HP_TOTAL_COUNT:
     raise ValueError("Segment heat-pipe multipliers must sum to HP_TOTAL_COUNT.")
@@ -146,6 +151,17 @@ def build_mix_node(name, kind):
         initial_T=T_INIT,
         material=nak,
     )
+
+
+def configure_ring_hp_heat_pipe_solver(ring_hp):
+    for hp_unit in ring_hp.hp_units:
+        hp = hp_unit.hp
+        hp.set_wick_conductivity_mode(HP_WICK_ANISOTROPIC)
+        hp.wick_mat.set_conductivity_cap(HP_WICK_CONDUCTIVITY_CAP)
+        hp.set_time_integrator(HP_TIME_INTEGRATOR)
+        if HP_TIME_INTEGRATOR == "theta_implicit":
+            hp.set_theta_implicit_value(HP_THETA_IMPLICIT_VALUE)
+        hp.set_implicit_boundary_linearization(HP_IMPLICIT_BOUNDARY_LINEARIZATION)
 
 
 def build_model():
@@ -246,6 +262,7 @@ def build_model():
             solid_header=solid,
             hp_multipliers=multipliers,
         )
+        configure_ring_hp_heat_pipe_solver(ring_hp)
         sectors.append(channel)
         solids.append(solid)
         ring_hps.append(ring_hp)
@@ -410,6 +427,14 @@ def print_model_summary(model):
     print(f"HPs in whole ring    : {sum(sum(spec[3]) for spec in SEGMENT_SPECS)}")
     print(f"HP/fin emissivity    : {HP_EMISSIVITY:.3f} / {FIN_EMISSIVITY:.3f}")
     print(f"Ring emissivity      : {RING_EMISSIVITY:.3f}, T_space = {T_SPACE:.1f} K")
+    print(
+        "HP solver            : "
+        f"wick_anisotropic={HP_WICK_ANISOTROPIC}, "
+        f"k_cap={HP_WICK_CONDUCTIVITY_CAP}, "
+        f"integrator={HP_TIME_INTEGRATOR}, "
+        f"theta={HP_THETA_IMPLICIT_VALUE:.3f}, "
+        f"implicit_boundary={HP_IMPLICIT_BOUNDARY_LINEARIZATION}"
+    )
     print("  Ring topology: I1 -> A1 -> O1 -> A2 -> I2 -> A3 -> O2")
     print("                 -> A4 -> I3 -> A5 -> O3 -> A6 -> I1")
     print("  MacroFlow is only between macro buffers and single-ring branches.")

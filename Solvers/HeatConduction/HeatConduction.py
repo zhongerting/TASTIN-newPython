@@ -305,7 +305,7 @@ class BaseHeatConduction(ABC):
             fun=self.get_derivatives,
             t_span=t_span,
             y0=self.T.copy(),
-            method='BDF',
+            method=method,
             **kwargs
         )
 

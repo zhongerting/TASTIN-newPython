@@ -649,7 +649,7 @@ k = i * n_y + j
 
 ### 8.5 时间积分方法
 
-`BaseHeatConduction.step(dt, method="BDF", **kwargs)` 的接口保留了 `method` 参数，但当前实现中实际传给 `solve_ivp` 的方法固定为 `BDF`。如果需要切换到 `Radau` 或 `RK45`，需要同步修改 `solve_ivp(method=...)` 的调用。
+`BaseHeatConduction.step(dt, method="BDF", **kwargs)` 会把 `method` 参数直接传给 `scipy.integrate.solve_ivp`。默认仍为 `BDF`，因此现有 `SystemManager` 中 `solid.step(dt)` 的行为保持不变；需要对普通导热固体测试非 BDF 方法时，可以显式传入 `RK45`、`DOP853`、`LSODA`、`Radau` 等 solve_ivp 支持的方法。`BDF` 和 `Radau` 路径会继续注入可用的稀疏雅可比结构。
 
 ### 8.6 初始化同步
 
