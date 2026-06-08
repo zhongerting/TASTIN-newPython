@@ -103,6 +103,7 @@ class HeatPipe2D(HeatConduction2D):
         self.face_conductance_mode = "legacy_harmonic"
         self.time_integrator = "bdf"
         self.theta_implicit_value = 0.6
+        self.implicit_boundary_linearization = False
 
         super().__init__(mesh, self.wall_mat, name=name, initial_temp=initial_temp)
 
@@ -182,6 +183,9 @@ class HeatPipe2D(HeatConduction2D):
         if theta < 0.5 or theta > 1.0:
             raise ValueError("theta_implicit_value must be in [0.5, 1.0]")
         self.theta_implicit_value = theta
+
+    def set_implicit_boundary_linearization(self, enabled: bool):
+        self.implicit_boundary_linearization = bool(enabled)
 
     def _reset_boundary_condition_diagnostics(self):
         for boundary in self.boundaries.values():
@@ -660,6 +664,108 @@ class HeatPipe2D(HeatConduction2D):
 
         return Q_boundary.reshape(-1).copy()
 
+    def _iter_boundary_regions_with_flat_indices(self):
+        nx, ny = self.shape_nodes
+
+        if 'left' in self.boundaries:
+            yield self.boundaries['left'], np.arange(ny, dtype=int)
+
+        if 'bottom' in self.boundaries:
+            yield self.boundaries['bottom'], np.arange(nx, dtype=int) * ny
+
+        if 'top' in self.boundaries:
+            yield self.boundaries['top'], np.arange(nx, dtype=int) * ny + (ny - 1)
+
+        outer_base = (nx - 1) * ny
+
+        if 'outer_eva' in self.boundaries:
+            y_idx = np.arange(ny, dtype=int)[self._slice_eva]
+            yield self.boundaries['outer_eva'], outer_base + y_idx
+
+        if 'outer_aba' in self.boundaries:
+            y_idx = np.arange(ny, dtype=int)[self._slice_aba]
+            yield self.boundaries['outer_aba'], outer_base + y_idx
+
+        if 'outer_con' in self.boundaries:
+            y_idx = np.arange(ny, dtype=int)[self._slice_con]
+            yield self.boundaries['outer_con'], outer_base + y_idx
+
+    @staticmethod
+    def _accumulate_boundary_linear_terms(boundary,
+                                          flat_indices: np.ndarray,
+                                          boundary_flux: np.ndarray,
+                                          conductance: np.ndarray,
+                                          source: np.ndarray,
+                                          old_flux: np.ndarray,
+                                          explicit_flux: np.ndarray):
+        indices = np.asarray(flat_indices, dtype=int).reshape(-1)
+        if indices.size == 0:
+            return
+
+        flux = np.asarray(boundary_flux, dtype=float).reshape(-1)
+        if flux.size != indices.size:
+            raise ValueError("Boundary flux size does not match mapped heat pipe nodes")
+
+        resistance_mask = getattr(boundary, "_resistance_mask", None)
+        if resistance_mask is None:
+            G_sum = getattr(boundary, "G_sum", None)
+            if G_sum is None:
+                np.add.at(explicit_flux, indices, flux)
+                return
+            resistance_mask = np.asarray(G_sum, dtype=float).reshape(-1) > 1.0e-20
+        else:
+            resistance_mask = np.asarray(resistance_mask, dtype=bool).reshape(-1)
+
+        if resistance_mask.size != indices.size:
+            raise ValueError("Boundary resistance mask size does not match mapped heat pipe nodes")
+
+        if np.any(resistance_mask):
+            R_eff = np.asarray(boundary.R_eff, dtype=float).reshape(-1)
+            R_internal = np.asarray(boundary.R_internal, dtype=float).reshape(-1)
+            T_eff = np.asarray(boundary.T_eff, dtype=float).reshape(-1)
+            R_total = R_eff + R_internal
+
+            with np.errstate(divide='ignore', invalid='ignore'):
+                G_total = np.divide(
+                    1.0,
+                    R_total,
+                    out=np.zeros_like(R_total, dtype=float),
+                    where=resistance_mask
+                )
+            G_total = np.nan_to_num(G_total, nan=0.0, posinf=1.0e20, neginf=0.0)
+
+            active_indices = indices[resistance_mask]
+            active_G = G_total[resistance_mask]
+            np.add.at(conductance, active_indices, active_G)
+            np.add.at(source, active_indices, active_G * T_eff[resistance_mask])
+            np.add.at(old_flux, active_indices, flux[resistance_mask])
+
+        if np.any(~resistance_mask):
+            np.add.at(explicit_flux, indices[~resistance_mask], flux[~resistance_mask])
+
+    def _compute_boundary_theta_terms(self):
+        conductance = np.zeros(self.N, dtype=float)
+        source = np.zeros(self.N, dtype=float)
+        old_flux = np.zeros(self.N, dtype=float)
+        explicit_flux = np.zeros(self.N, dtype=float)
+
+        for boundary, indices in self._iter_boundary_regions_with_flat_indices():
+            boundary_flux = boundary.compute_net_flux_for_solver()
+            if self.implicit_boundary_linearization:
+                self._accumulate_boundary_linear_terms(
+                    boundary,
+                    indices,
+                    boundary_flux,
+                    conductance,
+                    source,
+                    old_flux,
+                    explicit_flux
+                )
+            else:
+                np.add.at(explicit_flux, indices, np.asarray(boundary_flux, dtype=float).reshape(-1))
+
+        return conductance, source, old_flux, explicit_flux
+
     def _compute_internal_flux_for_temperature(self, T_flat: np.ndarray) -> np.ndarray:
         Q_net_2d = self.Q_net_2d_buffer
         Q_net_2d.fill(0.0)
@@ -679,11 +785,17 @@ class HeatPipe2D(HeatConduction2D):
 
         return Q_net_2d.reshape(-1).copy()
 
-    def _assemble_theta_implicit_matrix(self, dt: float, theta: float):
+    def _assemble_theta_implicit_matrix(self,
+                                        dt: float,
+                                        theta: float,
+                                        boundary_conductance: np.ndarray = None):
         nx, ny = self.shape_nodes
         inv_dt = 1.0 / max(float(dt), 1.0e-30)
         diag = self.thermal_capacitance * inv_dt
         theta = float(theta)
+
+        if boundary_conductance is not None:
+            diag = diag + theta * np.asarray(boundary_conductance, dtype=float)
 
         rows = []
         cols = []
@@ -729,16 +841,22 @@ class HeatPipe2D(HeatConduction2D):
     def _solve_theta_implicit_once(self, dt: float, t_start: float, T_start: np.ndarray, theta: float) -> np.ndarray:
         self._compute_internal_resistance()
         self._update_boundaries_state(current_time=t_start)
-        Q_boundary = self._compute_boundary_flux_vector()
+        (
+            boundary_conductance,
+            boundary_source,
+            boundary_old_flux,
+            boundary_explicit_flux
+        ) = self._compute_boundary_theta_terms()
         self._update_sources(t_start)
 
         inv_dt = 1.0 / max(float(dt), 1.0e-30)
         rhs = self.thermal_capacitance * inv_dt * T_start
         if theta < 1.0:
             rhs = rhs + (1.0 - theta) * self._compute_internal_flux_for_temperature(T_start)
-        rhs = rhs + Q_boundary + self.Q_source
+            rhs = rhs + (1.0 - theta) * boundary_old_flux
+        rhs = rhs + theta * boundary_source + boundary_explicit_flux + self.Q_source
 
-        matrix = self._assemble_theta_implicit_matrix(dt, theta)
+        matrix = self._assemble_theta_implicit_matrix(dt, theta, boundary_conductance=boundary_conductance)
         candidate_T = spsolve(matrix, rhs)
         return np.asarray(candidate_T, dtype=float)
 

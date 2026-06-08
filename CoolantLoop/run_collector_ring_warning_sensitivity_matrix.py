@@ -31,16 +31,18 @@ class WarningTestCase:
     frozen_properties: bool
     integrator: str = "bdf"
     theta: float = 0.6
+    implicit_boundary: bool = False
 
     @property
     def label(self) -> str:
         cap_label = "uncapped" if self.conductivity_cap is None else f"cap{self.conductivity_cap:.1e}".replace(".", "p")
         mode = "aniso" if self.anisotropic else "iso"
         frozen = "frozen" if self.frozen_properties else "liveprops"
+        boundary = "ibc" if self.implicit_boundary else "explicitbc"
         integrator_label = self.integrator
         if self.integrator == "theta_implicit":
             integrator_label = f"theta{self.theta:.2f}".replace(".", "p")
-        return f"{self.key}_{mode}_{cap_label}_{frozen}_{integrator_label}"
+        return f"{self.key}_{mode}_{cap_label}_{frozen}_{integrator_label}_{boundary}"
 
 
 CASES = {
@@ -52,6 +54,8 @@ CASES = {
     "F": WarningTestCase("F", anisotropic=True, conductivity_cap=None, frozen_properties=False, integrator="implicit_euler"),
     "G": WarningTestCase("G", anisotropic=True, conductivity_cap=1.2e6, frozen_properties=False, integrator="theta_implicit", theta=0.6),
     "H": WarningTestCase("H", anisotropic=True, conductivity_cap=None, frozen_properties=False, integrator="theta_implicit", theta=0.6),
+    "I": WarningTestCase("I", anisotropic=True, conductivity_cap=None, frozen_properties=False, integrator="theta_implicit", theta=0.6, implicit_boundary=True),
+    "J": WarningTestCase("J", anisotropic=True, conductivity_cap=None, frozen_properties=False, integrator="implicit_euler", implicit_boundary=True),
 }
 
 
@@ -68,6 +72,7 @@ def configure_heat_pipes(model, test_case: WarningTestCase):
         hp.wick_mat.set_conductivity_cap(test_case.conductivity_cap)
         hp.enable_frozen_property_correction = test_case.frozen_properties
         hp.set_time_integrator(test_case.integrator)
+        hp.set_implicit_boundary_linearization(test_case.implicit_boundary)
         if test_case.integrator == "theta_implicit":
             hp.set_theta_implicit_value(test_case.theta)
         count += 1
@@ -120,6 +125,7 @@ def build_solid_summary(solid, dt, test_case: WarningTestCase):
             [
                 f"wick_mode={'anisotropic' if solid.use_anisotropic_wick_conductivity else 'isotropic'}",
                 f"frozen_property_correction={bool(solid.enable_frozen_property_correction)}",
+                f"implicit_boundary_linearization={bool(solid.implicit_boundary_linearization)}",
                 f"wick_temperature[min,max]=({float(np.nanmin(wick_temperature)):.9f},{float(np.nanmax(wick_temperature)):.9f})",
                 f"k_axial[min,max]=({float(np.nanmin(k_axial)):.6e},{float(np.nanmax(k_axial)):.6e})",
                 f"k_radial_model[min,max]=({float(np.nanmin(k_radial_model)):.6e},{float(np.nanmax(k_radial_model)):.6e})",
@@ -160,7 +166,7 @@ def run_stage(
                 f"Configured case {test_case.label}: heat_pipes={count}, "
                 f"anisotropic={test_case.anisotropic}, cap={test_case.conductivity_cap}, "
                 f"frozen_properties={test_case.frozen_properties}, integrator={test_case.integrator}, "
-                f"theta={test_case.theta}"
+                f"theta={test_case.theta}, implicit_boundary={test_case.implicit_boundary}"
             )
         return model
 
@@ -290,7 +296,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Run warning sensitivity matrix for the 6-segment potassium collector-ring case."
     )
-    parser.add_argument("--case", choices=sorted(CASES), required=True, help="Case key to run: A, B, C, or D.")
+    parser.add_argument("--case", choices=sorted(CASES), required=True, help="Case key to run.")
     parser.add_argument("--restart-from", default=DEFAULT_RESTART, help="Input restart path for transition stage.")
     parser.add_argument("--transition-end", type=float, default=510.0, help="Transition stage absolute end time [s].")
     parser.add_argument("--validation-end", type=float, default=530.0, help="Validation stage absolute end time [s].")

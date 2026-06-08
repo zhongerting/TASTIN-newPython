@@ -711,3 +711,13 @@ HeatConduction 当前实现具有以下特点：
 - `HeatConduction/HeatConduction.py`
 - `Couplers.py`
 - `SystemManager.py`
+
+## 12. 2026-06-08 HeatPipe2D heat-pipe-only implicit boundary linearization
+
+`DynamicRadiationResistanceBC` keeps its generic `BoundaryRegion` behavior: `compute_net_flux_for_solver()` still evaluates the thermal-resistance network and returns the heat flow into the adjacent solid node. `Components/basicComponents/HeatPipe2D.py` adds a heat-pipe-only option for the sparse `implicit_euler` and `theta_implicit` paths:
+
+```python
+hp.set_implicit_boundary_linearization(True)
+```
+
+The option is disabled by default and does not affect BDF, generic `HeatConduction1D/2D`, reactor-core radiation boundaries, or shared `BoundaryRegion` semantics. When enabled, heat-pipe resistance-type boundary terms are assembled into the heat-pipe matrix as `Q = G * (T_eff - T_node)`. This includes bare-wall `DynamicRadiationResistanceBC` and the `HPwithFin` equivalent fin-branch `ResistanceBC`; flux-only terms remain explicit RHS contributions.
