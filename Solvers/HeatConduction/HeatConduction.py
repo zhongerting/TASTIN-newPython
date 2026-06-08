@@ -16,6 +16,8 @@ from profiler import TEASAProfiler
 #  提取 1D 和 2D 共用的状态管理、物性更新和热源接口
 # =================================================================
 class BaseHeatConduction(ABC):
+    VALID_ODE_METHODS = {"RK45", "RK23", "DOP853", "Radau", "BDF", "LSODA"}
+
     def __init__(self,
                  mesh: Union[Mesh1D, Mesh2D],
                  material: SolidMaterial,
@@ -24,6 +26,7 @@ class BaseHeatConduction(ABC):
         self.mesh = mesh
         self.material = material
         self.name = name
+        self.ode_method = "BDF"
         self.N = mesh.N  # 节点总数 (1D: n_vols, 2D: nx*ny)
 
         # --- 状态变量 (Flattened 1D Arrays) ---
@@ -58,6 +61,13 @@ class BaseHeatConduction(ABC):
 
         # 初始化
         self._update_properties()
+
+    def set_ode_method(self, method: str):
+        method = str(method)
+        if method not in self.VALID_ODE_METHODS:
+            valid = ", ".join(sorted(self.VALID_ODE_METHODS))
+            raise ValueError(f"Unsupported ODE method '{method}'. Valid methods: {valid}")
+        self.ode_method = method
 
     def _reset_step_diagnostics(self, attempted_end_time: Optional[float] = None):
         current_min = float(np.min(self.T))
@@ -280,7 +290,7 @@ class BaseHeatConduction(ABC):
 
     # 时间步进接口，用于推进物体温度场
     @TEASAProfiler.profile
-    def step(self, dt: float, method: str = 'BDF', **kwargs) -> bool:
+    def step(self, dt: float, method: str = None, **kwargs) -> bool:
         """
         执行一个时间步长的积分，推进固体温度场。
 
@@ -290,6 +300,15 @@ class BaseHeatConduction(ABC):
         :param kwargs: 传递给 solve_ivp 的其他参数 (如 rtol, atol)
         :return: 是否成功 (True/False)
         """
+        # method=None means use the per-solid default selected by set_ode_method().
+
+        if method is None:
+            method = self.ode_method
+        else:
+            method = str(method)
+            if method not in self.VALID_ODE_METHODS:
+                valid = ", ".join(sorted(self.VALID_ODE_METHODS))
+                raise ValueError(f"Unsupported ODE method '{method}'. Valid methods: {valid}")
 
         t_span = (self.current_time, self.current_time + dt)
         self._reset_step_diagnostics(t_span[1])

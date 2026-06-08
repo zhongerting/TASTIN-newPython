@@ -93,6 +93,7 @@ OUTLET_MIX_KEYS = ["O1", "O2", "O3"]
 DEFAULT_T_END = 50.0
 DEFAULT_PRINT_EVERY_TIME = 1.0
 DEFAULT_RESTART_SAVE_EVERY = 10.0
+RING_WALL_ODE_METHOD = "LSODA"
 HP_WICK_ANISOTROPIC = True
 HP_WICK_CONDUCTIVITY_CAP = None
 HP_TIME_INTEGRATOR = "theta_implicit"
@@ -121,6 +122,7 @@ def build_sector_solid(name):
         name=name,
         initial_temp=T_INIT,
     )
+    solid.set_ode_method(RING_WALL_ODE_METHOD)
     bare_area_array = solid.boundaries["right"].area / 2.0
     solid.boundaries["right"].add_dynamic_radiation_condition(
         emissivity=RING_EMISSIVITY,
@@ -427,6 +429,7 @@ def print_model_summary(model):
     print(f"HPs in whole ring    : {sum(sum(spec[3]) for spec in SEGMENT_SPECS)}")
     print(f"HP/fin emissivity    : {HP_EMISSIVITY:.3f} / {FIN_EMISSIVITY:.3f}")
     print(f"Ring emissivity      : {RING_EMISSIVITY:.3f}, T_space = {T_SPACE:.1f} K")
+    print(f"Ring wall ODE method : {RING_WALL_ODE_METHOD}")
     print(
         "HP solver            : "
         f"wick_anisotropic={HP_WICK_ANISOTROPIC}, "

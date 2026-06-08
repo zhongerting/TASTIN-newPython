@@ -460,7 +460,7 @@ rho_fb = 0.001360811
 
 当未冻结物性时，直接调用父类逻辑；当冻结物性时，使用当前缓存物性和导热导纳计算导数。
 
-#### `step(dt, method='BDF', **kwargs)`
+#### `step(dt, method=None, **kwargs)`
 
 推进一个时间步。
 
@@ -468,6 +468,7 @@ rho_fb = 0.001360811
 
 - 未启用冻结物性修正：调用父类 `step()`，并检查求解成功和温度物理性。
 - 启用冻结物性修正：执行外层物性修正迭代，在冻结物性条件下调用 `_solve_ivp_step()`，直到温度变化满足 `outer_property_tol`。
+- 当热管回退到 `solve_ivp` 路径时，`method=None` 会使用固体自身的 `ode_method`；`theta_implicit` 和 `implicit_euler` 热管专用路径不使用通用 ODE 方法。
 
 失败处理：
 

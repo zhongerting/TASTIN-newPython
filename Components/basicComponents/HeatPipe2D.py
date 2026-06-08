@@ -231,7 +231,15 @@ class HeatPipe2D(HeatConduction2D):
             return base_message
         return f"{base_message}; " + "; ".join(details)
 
-    def _solve_ivp_step(self, dt: float, method: str = 'BDF', **kwargs):
+    def _solve_ivp_step(self, dt: float, method: str = None, **kwargs):
+        if method is None:
+            method = self.ode_method
+        else:
+            method = str(method)
+            if method not in self.VALID_ODE_METHODS:
+                valid = ", ".join(sorted(self.VALID_ODE_METHODS))
+                raise ValueError(f"Unsupported ODE method '{method}'. Valid methods: {valid}")
+
         t_span = (self.current_time, self.current_time + dt)
         solve_kwargs = dict(kwargs)
 
@@ -935,7 +943,7 @@ class HeatPipe2D(HeatConduction2D):
         )
         return self.dTdt
 
-    def step(self, dt: float, method: str = 'BDF', **kwargs) -> bool:
+    def step(self, dt: float, method: str = None, **kwargs) -> bool:
         if self.time_integrator == "implicit_euler":
             return self._implicit_euler_step(dt)
         if self.time_integrator == "theta_implicit":

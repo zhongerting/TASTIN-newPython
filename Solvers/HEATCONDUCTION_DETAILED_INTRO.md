@@ -649,7 +649,9 @@ k = i * n_y + j
 
 ### 8.5 时间积分方法
 
-`BaseHeatConduction.step(dt, method="BDF", **kwargs)` 会把 `method` 参数直接传给 `scipy.integrate.solve_ivp`。默认仍为 `BDF`，因此现有 `SystemManager` 中 `solid.step(dt)` 的行为保持不变；需要对普通导热固体测试非 BDF 方法时，可以显式传入 `RK45`、`DOP853`、`LSODA`、`Radau` 等 solve_ivp 支持的方法。`BDF` 和 `Radau` 路径会继续注入可用的稀疏雅可比结构。
+`BaseHeatConduction` now supports a per-solid default ODE method through `solid.ode_method` and `solid.set_ode_method(method)`. The default is still `BDF`, so existing `SystemManager` calls to `solid.step(dt)` keep their previous behavior unless a component sets a different method on that solid.
+
+`BaseHeatConduction.step(dt, method=None, **kwargs)` uses `self.ode_method` when `method is None`; passing `method` explicitly overrides only that single call. Supported methods are the SciPy `solve_ivp` methods `RK45`, `RK23`, `DOP853`, `Radau`, `BDF`, and `LSODA`. `BDF` and `Radau` continue to receive available sparse Jacobian structure.
 
 ### 8.6 初始化同步
 

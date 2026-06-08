@@ -486,7 +486,7 @@ T_eff = J_total / G_total    # 等效戴维南温度
    ```
 2. **`step(dt, method) -> bool`** — 执行 ODE 积分一个时间步
    ```
-   solve_ivp(fun=get_derivatives, t_span=[t, t+dt], y0=T, method='BDF', ...)
+   solve_ivp(fun=get_derivatives, t_span=[t, t+dt], y0=T, method=solid.ode_method, ...)
    ```
 3. **`save_state_dict(prefix)`** **/** **`load_state_dict(data, prefix)`** — 持久化接口
 4. **`link_source_buffer(external_buffer)`** — 内存绑定外部热源数组 (高性能耦合)
@@ -875,7 +875,7 @@ SystemManager.step(dt, inner_iter, convergence_tol, reactivity_control,
   │     ├── fluid_solver.step_Picard(dt)  → 水力网络压力+焓求解
   │     │
   │     ├── for solid in solid_components:
-  │     │     └── solid.step(dt)  → BDF 积分推进固体温度场
+  │     │     └── solid.step(dt)  → 按 solid.ode_method 推进固体温度场，默认 BDF
   │     │
   │     ├── [收敛检查] if inner_iter > 1:
   │     │     ├── err_f = max|T_f_new - T_f_old|
@@ -939,7 +939,7 @@ SystemManager.step(dt)
      │     └── 半隐式焓方程求解            → P, T, h, W 更新
      │
      ├── HeatConduction.step(dt)   ←── 每个固体
-     │     └── scipy.integrate.solve_ivp (BDF)
+     │     └── scipy.integrate.solve_ivp (solid.ode_method, default BDF)
      │           ├── get_derivatives(t, T):
      │           │     ├── _update_properties()    ←── SolidMaterial (T → k, rho, cp)
      │           │     ├── _compute_internal_resistance()  → R_geom 或 G
