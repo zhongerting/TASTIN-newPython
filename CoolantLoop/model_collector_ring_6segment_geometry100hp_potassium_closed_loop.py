@@ -44,12 +44,17 @@ T_INLET_TARGET = open_case.T_INLET
 P_REF = open_case.P_OUTLET
 T_INIT = open_case.T_INIT
 W_TOTAL_TARGET = open_case.W_TOTAL
+OPEN_LOOP_STEADY_OUTLET_T = 756.5365807303224
 
 DEFAULT_PUMP_DELTA_P = 2070.0
 DEFAULT_HEATER_POWER = 98.0e3
 DEFAULT_T_END = 10.0
 DEFAULT_PRINT_EVERY_TIME = 1.0
 DEFAULT_RESTART_SAVE_EVERY = 10.0
+DEFAULT_THERMAL_INIT_RESTART = os.path.join(
+    current_dir,
+    "collector_ring_6segment_geometry100hp_potassium_mixed_local_loss_630s_from510s_restart.npz",
+)
 
 L_HEATER = 1.0
 N_HEATER = 10
@@ -73,6 +78,24 @@ K_RETURN_TO_PRESSURIZER = 0.2
 
 
 nak = open_case.nak
+
+
+def set_volume_temperature(vol, temperature):
+    temperature = float(temperature)
+    pressure = float(getattr(vol, "P", P_REF))
+    vol.T = temperature
+    vol.h = vol.material.enthalpy(temperature, pressure)
+    vol.rho = vol.material.density(temperature, pressure)
+    vol.mu = vol.material.viscosity(temperature, pressure)
+
+
+def set_channel_temperature_profile(channel, t_start, t_end):
+    if len(channel.volumes) == 1:
+        set_volume_temperature(channel.volumes[0], 0.5 * (t_start + t_end))
+        return
+    for idx, vol in enumerate(channel.volumes):
+        frac = idx / (len(channel.volumes) - 1)
+        set_volume_temperature(vol, t_start + frac * (t_end - t_start))
 
 
 def build_sector_solid(name, initial_temp):
@@ -135,10 +158,34 @@ def _total_fluid_inventory_energy(volumes):
     return total
 
 
+def load_solid_thermal_state(sys_mgr, restart_path):
+    if restart_path is None:
+        return 0
+    if not os.path.exists(restart_path):
+        print(f"Thermal initialization restart not found, using analytic initial profile: {restart_path}")
+        return 0
+
+    loaded = 0
+    with np.load(restart_path, allow_pickle=False) as data:
+        data_dict = dict(data)
+        for name, solid in sys_mgr.solid_components.items():
+            prefix = f"Solid_{name}"
+            if f"{prefix}/T" not in data_dict:
+                continue
+            solid.load_state_dict(data_dict, prefix=prefix)
+            loaded += 1
+    sys_mgr._sync_solid_times_to_global()
+    return loaded
+
+
 def build_model(
     pump_delta_p=DEFAULT_PUMP_DELTA_P,
     heater_power=DEFAULT_HEATER_POWER,
     initial_temp=T_INIT,
+    initialize_from_open_loop_profile=True,
+    initial_inlet_temp=T_INLET_TARGET,
+    initial_outlet_temp=OPEN_LOOP_STEADY_OUTLET_T,
+    thermal_restart_from=DEFAULT_THERMAL_INIT_RESTART,
 ):
     pressurizer = PressurizerVolume(
         name="Pressurizer",
@@ -221,11 +268,19 @@ def build_model(
     ]
 
     inlet_mix_nodes = {
-        key: build_mix_node(f"InletMix_{key}", "inlet", initial_temp)
+        key: build_mix_node(
+            f"InletMix_{key}",
+            "inlet",
+            initial_inlet_temp if initialize_from_open_loop_profile else initial_temp,
+        )
         for key in open_case.INLET_MIX_KEYS
     }
     outlet_mix_nodes = {
-        key: build_mix_node(f"OutletMix_{key}", "outlet", initial_temp)
+        key: build_mix_node(
+            f"OutletMix_{key}",
+            "outlet",
+            initial_outlet_temp if initialize_from_open_loop_profile else initial_temp,
+        )
         for key in open_case.OUTLET_MIX_KEYS
     }
     mix_nodes = {**inlet_mix_nodes, **outlet_mix_nodes}
@@ -238,6 +293,19 @@ def build_model(
     segment_exit_links = []
 
     for sector_name, start_key, end_key, multipliers in open_case.SEGMENT_SPECS:
+        if initialize_from_open_loop_profile:
+            t_sector_start = (
+                initial_inlet_temp if start_key in open_case.INLET_MIX_KEYS else initial_outlet_temp
+            )
+            t_sector_end = (
+                initial_inlet_temp if end_key in open_case.INLET_MIX_KEYS else initial_outlet_temp
+            )
+            t_sector_solid = 0.5 * (t_sector_start + t_sector_end)
+        else:
+            t_sector_start = initial_temp
+            t_sector_end = initial_temp
+            t_sector_solid = initial_temp
+
         channel = IncompressibleFluidChannel(
             name=f"{sector_name}_Channel",
             n_nodes=open_case.N_SECTOR,
@@ -245,10 +313,12 @@ def build_model(
             flow_area=open_case.AREA_RING,
             hydraulic_diam=open_case.DH_RING,
             initial_P=P_REF,
-            initial_T=initial_temp,
+            initial_T=t_sector_solid,
             material=nak,
         )
-        solid = build_sector_solid(f"{sector_name}_Solid", initial_temp)
+        if initialize_from_open_loop_profile:
+            set_channel_temperature_profile(channel, t_sector_start, t_sector_end)
+        solid = build_sector_solid(f"{sector_name}_Solid", t_sector_solid)
         ring_hp = cfg.build_ring_hp(
             name=f"{sector_name}_RingHP",
             fluid_channel=channel,
@@ -392,6 +462,17 @@ def build_model(
     for channel in manifolds:
         all_juncs.extend(channel.internal_junctions)
 
+    if initialize_from_open_loop_profile:
+        set_volume_temperature(pressurizer, initial_outlet_temp)
+        set_channel_temperature_profile(heater_channel, initial_outlet_temp, initial_inlet_temp)
+        set_channel_temperature_profile(inlet_buffer_channel, initial_inlet_temp, initial_inlet_temp)
+        set_channel_temperature_profile(outlet_buffer_channel, initial_outlet_temp, initial_outlet_temp)
+        set_channel_temperature_profile(return_channel, initial_outlet_temp, initial_outlet_temp)
+        for channel in hot_legs:
+            set_channel_temperature_profile(channel, initial_inlet_temp, initial_inlet_temp)
+        for channel in manifolds:
+            set_channel_temperature_profile(channel, initial_outlet_temp, initial_outlet_temp)
+
     w_hot_leg = W_TOTAL_TARGET / 6.0
     pump_junction.W = W_TOTAL_TARGET
     _set_channel_flow_guess(heater_channel, W_TOTAL_TARGET)
@@ -417,6 +498,7 @@ def build_model(
     sys_mgr = SystemManager(fluid_network=network)
     for ring_hp in ring_hps:
         sys_mgr.add_component(ring_hp)
+    loaded_thermal_solids = load_solid_thermal_state(sys_mgr, thermal_restart_from)
 
     heater_power_ref = {"value": float(heater_power)}
 
@@ -457,6 +539,8 @@ def build_model(
         "sys_mgr": sys_mgr,
         "heater_power_ref": heater_power_ref,
         "last_fluid_energy": None,
+        "thermal_restart_from": thermal_restart_from,
+        "loaded_thermal_solids": loaded_thermal_solids,
     }
 
 
@@ -474,6 +558,8 @@ def print_model_summary(model):
     print(f"Pressure reference  : Pressurizer at {P_REF:.1f} Pa")
     print(f"Pump delta-p        : {model['pump_junction'].delta_p:.3f} Pa")
     print(f"Heater power        : {model['heater_power_ref']['value']:.3f} W")
+    print(f"Thermal restart     : {model['thermal_restart_from']}")
+    print(f"Loaded thermal sols : {model['loaded_thermal_solids']}")
     print(f"Target total flow   : {W_TOTAL_TARGET:.6f} kg/s")
     print(f"RingHP segment nodes: {open_case.N_SECTOR} per segment, {6 * open_case.N_SECTOR} total")
     print(f"HP segment totals   : {[sum(spec[3]) for spec in open_case.SEGMENT_SPECS]}")
@@ -635,11 +721,15 @@ def run_case(
     pump_delta_p=DEFAULT_PUMP_DELTA_P,
     heater_power=DEFAULT_HEATER_POWER,
     initial_temp=T_INIT,
+    initialize_from_open_loop_profile=True,
+    thermal_restart_from=DEFAULT_THERMAL_INIT_RESTART,
 ):
     model = build_model(
         pump_delta_p=pump_delta_p,
         heater_power=heater_power,
         initial_temp=initial_temp,
+        initialize_from_open_loop_profile=initialize_from_open_loop_profile,
+        thermal_restart_from=thermal_restart_from,
     )
     sys_mgr = model["sys_mgr"]
 
