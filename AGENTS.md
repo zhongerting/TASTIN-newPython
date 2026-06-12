@@ -2,7 +2,7 @@
 
 > 面向新的 Codex 对话和开发者。  
 > 目标：先通过本文建立全局认识，再按任务定向阅读子模块说明；不要默认重新遍历整个代码仓库。  
-> 本文基于各模块说明整理，基线日期：2026-05-31。源码与文档冲突时，以当前源码为准，并在任务中同步修正文档。
+> 本文基于各模块说明整理，基线日期：2026-06-12。源码与文档冲突时，以当前源码为准，并在任务中同步修正文档。
 >
 > Codex 在本仓库内开始任务时，应将本文作为项目级首读指令，并按本文导航定向读取子模块说明。
 
@@ -41,7 +41,7 @@ TASTIN-Python 是空间核电源热离子反应堆的多物理场瞬态仿真程
 
 | 用例层 | 用途 | 当前首读文档 |
 | --- | --- | --- |
-| `testModule/` | 堆芯全系统组装、v7 CaseA、断点续算、审计、结果提取、分层测试 | [`testModule/AI_AGENT_TESTMODULE_ANALYSIS.md`](./testModule/AI_AGENT_TESTMODULE_ANALYSIS.md) |
+| `testModule/` | 堆芯全系统组装、v7/v8/v9 CaseA、断点续算、审计、结果提取、分层测试 | [`testModule/AI_AGENT_TESTMODULE_ANALYSIS.md`](./testModule/AI_AGENT_TESTMODULE_ANALYSIS.md) |
 | `CoolantLoop/` | 集流环冷却回路生产模型、包装器、诊断、性能分析 | [`CoolantLoop/AI_AGENT_COOLANTLOOP_ANALYSIS.md`](./CoolantLoop/AI_AGENT_COOLANTLOOP_ANALYSIS.md) |
 
 ## 3. 架构总览
@@ -142,6 +142,8 @@ V9 CaseA 位于 `testModule/test_core_assemble_v9_caseA.py`，是基于 V8 堆�
 
 后续把 V9 与 `CoolantLoop` 的 6 段集流环连接时，不能把三条 V9 热出口支路直接接到单个显式集流环的 `I1/I2/I3`。当前集流环模型只显式建一套物理集流环，并用 `MacroFlowJunction(multiplier=2)` 代表第二套对称集流环；集成链条中热出口支路到 `I1/I2/I3` 需要宏观到单环的 `multiplier=2` 分流，`O1/O2/O3` 回到 V9 冷侧管路也需要匹配的单环到宏观汇流。
 
+2026-06-11 V9 已完成无 TEC 预热和带 TEC 续算验证：`testModule/v9_caseA_open_loop_tec_3000s/` 最终绝对时间约 `5010 s`，入口温度约 `743.000 K`，出口温度约 `838.944 K`，进出口温差约 `95.944 K`，冷却剂焓升约 `108745.775 W`，端电功率约 `4870.107 W`。该目录是本地运行产物，不应默认提交；需要复现实验时优先使用 V9 runner 和 V9 restart。
+
 ### 5.2 集流环冷却回路路径
 
 `CoolantLoop/` 当前有两个生产模型：
@@ -207,7 +209,7 @@ V9 CaseA 位于 `testModule/test_core_assemble_v9_caseA.py`，是基于 V8 堆�
 
 1. 先运行与改动直接相关的最小测试。
 2. 涉及跨模块耦合时，再运行对应集成测试或审计脚本。
-3. 涉及 v7 CaseA 时，优先使用低成本 smoke、`run_v7_caseA_multipliers_short.py` 和审计脚本。
+3. 涉及 v7/v8/v9 CaseA 时，优先使用低成本 smoke、短时续算、拓扑测试和审计脚本。
 4. 只有任务确实需要长时行为时，才启动过夜或 `100000 s` 级续算。
 5. 使用 restart 前，核对重建系统的几何、倍率、材料、TEC 配置和状态同步流程。
 
@@ -222,6 +224,7 @@ V9 CaseA 位于 `testModule/test_core_assemble_v9_caseA.py`，是基于 V8 堆�
 | `SystemManager优化重构/`、`HeatPipe优化重构/`、`HeatConduction优化重构/`、`HydraulicNetwork优化重构/` | 性能验证和重构过程脚本，不是核心运行入口 |
 | `inputs/` | Fortran 时代输入文件；Python 版是否直接使用要按调用点核验 |
 | `*.npz`、`*.json`、`*.csv`、`*.out`、`*.err`、`*.log`、`*.png` | restart、摘要、审计和运行产物，不是源码事实基准 |
+| `testModule/v7_caseA_*`、`testModule/v8_caseA_*`、`testModule/v9_caseA_*` | 长时算例输出目录；除非用户明确要求，不应加入提交 |
 
 ## 11. 文档维护规则
 
@@ -243,6 +246,8 @@ TEC 生产焦耳热当前以 C++ `VcalcFVM()` 输出的逐轴向节点功率 `jo
 v7/V8 CaseA 多 TEC 串联路径仍会重复报告 `Failed to converge after 100000 iterations.`。2026-06-09 V8 `LSODA` smoke 中该信息出现 `4440` 次，全部位于进入长算主循环前的 `core.thermo_calc.calculate(verbose=False)` 阶段；后续 `system.step(0.01)` 未再输出。该问题属于 ThermoCalc C++ 电路收敛专项，不是固体导热 ODE 收敛失败，也不能视为焦耳热映射已经解决的范围。
 
 2026-06-10 起，V8 CaseA 公共加载运行路径 `testModule/run_v8_caseA_common.py` 会向 ThermoCalc 施加导线电阻 `[0.00155199999999970, 0.00102400000000000, 0.000336000000000000, 0.000608000000000000] ohm`，并写入 `latest_state.json` 的 `wire_resistance_ohm`。该电阻必须在 restart 加载、TEC fixed voltage 设置和 `core.post_step(...)` 电极温度同步之后再重建 ThermoCalc；提前计算会显著拖慢首次 TEC 求解。V8 默认冷却剂同日改为 `SodiumPotassium78`；`testModule/v8_caseA_nak_wire_2000s/` 已从绝对时间 `41184 s` 续算到 `43184 s`，末段端电功率约 `4868.580 W`，冷却剂焓升约 `108560.205 W`，进出口温差约 `95.781 K`，thermal-model residual 约 `-0.132 W`，日志未再出现 `Failed to converge after 100000 iterations.`。
+
+V9 复用该导线电阻和 NaK78 冷却剂约定。冷态直接启动 TEC 可能使首次 ThermoCalc 求解返回非有限焦耳热；冷态拓扑 smoke 应使用 `--disable-tec-coupled`，带 TEC 长算应从 V9 兼容的温热 restart 或专门迁移器输出继续。
 
 ## 13. 2026-06-02 全局慢化剂映射顺序补充
 

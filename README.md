@@ -22,7 +22,7 @@ PowerShell 示例：
 
 | 用例层 | 用途 | 首读文档 |
 | --- | --- | --- |
-| `testModule/` | 堆芯全系统组装、v7/v8 CaseA、断点续算、审计、结果提取、分层测试 | [`testModule/AI_AGENT_TESTMODULE_ANALYSIS.md`](./testModule/AI_AGENT_TESTMODULE_ANALYSIS.md) |
+| `testModule/` | 堆芯全系统组装、v7/v8/v9 CaseA、断点续算、审计、结果提取、分层测试 | [`testModule/AI_AGENT_TESTMODULE_ANALYSIS.md`](./testModule/AI_AGENT_TESTMODULE_ANALYSIS.md) |
 | `CoolantLoop/` | 集流环冷却回路生产模型、包装器、诊断、性能分析 | [`CoolantLoop/AI_AGENT_COOLANTLOOP_ANALYSIS.md`](./CoolantLoop/AI_AGENT_COOLANTLOOP_ANALYSIS.md) |
 
 ## 架构概览
@@ -94,7 +94,22 @@ test_core_assemble_v7_caseA.py
   -> 瞬态运行、restart、审计和结果提取脚本
 ```
 
-V8 CaseA 位于 [`testModule/test_core_assemble_v8_caseA.py`](./testModule/test_core_assemble_v8_caseA.py)，用于把第四圈燃料元件拆成 `Ring3_TEC` 和 `Ring3_Open` 两类代表元件：接入电路的 34 根元件和不接入电路的 3 根元件。V8 复用 V7 CaseA 的主要几何和边界，但拥有独立水力拓扑与 restart；旧 V7 restart 需要通过迁移脚本转换后使用。
+V8 CaseA 位于 [`testModule/test_core_assemble_v8_caseA.py`](./testModule/test_core_assemble_v8_caseA.py)，用于把第四圈燃料元件拆成 `Ring3_TEC` 和 `Ring3_Open` 两类代表元件：接入电路的 34 根元件和不接入电路的 3 根元件。V8 复用 V7 CaseA 的主要几何和边界，但拥有独立水力拓扑与 restart；旧 V7 restart 需要通过迁移脚本转换后使用。当前 V8 默认冷却剂为 `SodiumPotassium78`，公共运行入口会施加标准导线电阻并使用 fixed-voltage TEC。
+
+V9 CaseA 位于 [`testModule/test_core_assemble_v9_caseA.py`](./testModule/test_core_assemble_v9_caseA.py)，运行入口是 [`testModule/run_v9_caseA_open_loop.py`](./testModule/run_v9_caseA_open_loop.py)。V9 基于 V8 堆芯和 TEC 配置，重建外部开式水力骨架为：
+
+```text
+固定流量入口
+  -> 辐射器出口支路/总管
+  -> 冷回流支路
+  -> 堆芯
+  -> 三条热出口支路
+  -> 固定压力出口
+```
+
+V9 暂不包含集流环、热管、泵和局部阻力系数；`CoreInletConnector` / `CoreOutletConnector` 只是数值连接节点，不代表真实进出口箱。V8 restart 不能直接加载到 V9，后续若需要迁移应使用专门迁移器。
+
+V9 与集流环模型连接时需要保留 `CoolantLoop` 当前“一套显式集流环 + `MacroFlowJunction(multiplier=2)` 代表第二套对称集流环”的约定。三条 V9 热出口支路不能直接硬接到单个显式集流环的 `I1/I2/I3`，应先通过 `multiplier=2` 宏观到单环分流；`O1/O2/O3` 返回 V9 冷侧管路时也需要匹配汇流。
 
 ### 集流环冷却回路
 
@@ -106,6 +121,23 @@ V8 CaseA 位于 [`testModule/test_core_assemble_v8_caseA.py`](./testModule/test_
 | `model_collector_ring_full_ringhp.py` | 单一 360 度 `RingHP`，共 24 个环节点 | 完整环模型 |
 
 两者都通过 `SystemManager.save_global_state()` / `load_global_state()` 使用 `.npz` 断点。
+
+## 常用运行入口
+
+V9 拓扑和轻量验证：
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m py_compile testModule\test_core_assemble_v9_caseA.py testModule\run_v9_caseA_open_loop.py testModule\test_v9_caseA_topology.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m unittest testModule.test_v9_caseA_topology
+```
+
+V9 开式骨架短算：
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v9_caseA_open_loop.py --duration 0.1 --record-interval 0.1 --restart-interval 0.1 --max-dt 0.01 --disable-tec-coupled
+```
+
+V9 带 TEC 长算应从 V9 兼容的温热 restart 启动，不要直接使用 V8 restart。
 
 ## 运行环境
 
@@ -122,7 +154,7 @@ V8 CaseA 位于 [`testModule/test_core_assemble_v8_caseA.py`](./testModule/test_
 
 1. 先运行与改动直接相关的最小测试。
 2. 涉及跨模块耦合时，再运行对应集成测试或审计脚本。
-3. 涉及 v7/v8 CaseA 时，优先使用低成本 smoke、短时续算和能量审计脚本。
+3. 涉及 v7/v8/v9 CaseA 时，优先使用低成本 smoke、短时续算和能量审计脚本。
 4. 只有任务确实需要长时行为时，才启动长时续算。
 5. 使用 restart 前，核对重建系统的几何、倍率、材料、TEC 配置和状态同步流程。
 
@@ -133,6 +165,9 @@ V8 CaseA 位于 [`testModule/test_core_assemble_v8_caseA.py`](./testModule/test_
 - `ExternalHeatSources` 返回 `W/m2`，`ExternalHeatFluxBC` 负责乘面积，调用方不要重复乘面积。
 - `Components/basicComponents/Electord.py` 的文件名拼写已被现有导入路径依赖，不要直接重命名。
 - `Materials/Fluids/NaK78.py` 仅部分实现；主用液态 NaK78 类是 `SodiumPotassium78`。
+- V8/V9 CaseA 当前使用 `SodiumPotassium78` 冷却剂；V8 旧 Sodium restart 续算前需要先迁移。
+- V8/V9 的 TEC fixed-voltage 路径会施加标准导线电阻 `[0.00155199999999970, 0.00102400000000000, 0.000336000000000000, 0.000608000000000000] ohm`。
+- V7/V8 多 TEC 串联路径可能在 ThermoCalc 初始化阶段输出 `Failed to converge after 100000 iterations.`；该信息来自 C++ 电路求解，不是固体导热 ODE 收敛失败。
 - `Correlations.h_single_crossflow_pipe()` 当前直接使用可能触发参数不足的 `TypeError`，调用前需要核验。
 - 运行产物、restart、审计 CSV/JSON、PNG 和日志不是源码事实基准，不应作为代码提交内容。
 
@@ -149,6 +184,7 @@ V8 CaseA 位于 [`testModule/test_core_assemble_v8_caseA.py`](./testModule/test_
 *.out
 testModule/v7_caseA_*/
 testModule/v8_caseA_*/
+testModule/v9_caseA_*/
 testModule/single_tfe_energy_conservation_v7*/
 ```
 
