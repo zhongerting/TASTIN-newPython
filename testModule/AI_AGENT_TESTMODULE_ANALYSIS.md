@@ -449,10 +449,13 @@ python testModule\run_v8_caseA_long_energy.py `
   --record-interval 200 `
   --restart-interval 200 `
   --max-dt 0.8 `
-  --inner-iter 1
+  --inner-iter 1 `
+  --solid-ode-method LSODA
 ```
 
-每 `200 s` 覆盖 latest restart，并向固定 CSV 续写完整径向热流链、分层储能、三种全局残差和 `Ring3_Open` 零源检查。restart 后再次启动时，运行器从 CSV 恢复统一记录起点，保持相对时间连续。
+每 `200 s` 覆盖 latest restart，并向固定 CSV 续写完整径向热流链、分层储能、三种全局残差和 `Ring3_Open` 零源检查。restart 后再次启动时，运行器从 CSV 恢复统一记录起点，保持相对时间连续。V8 公共入口默认 `solid_ode_method = LSODA`，并在构建后和加载 restart 后对 `SystemManager.solid_components` 中的全部 36 个堆芯固体调用 `set_ode_method()`；`latest_state.json` 会记录 `solid_ode_method` 和逐固体 `solid_ode_methods`。
+
+2026-06-10 补充：`run_v8_caseA_common.py` 现在会在 V8 加载运行中向每个 ThermoCalc virtual element 施加导线电阻 `[0.00155199999999970, 0.00102400000000000, 0.000336000000000000, 0.000608000000000000] ohm`，并在 `latest_state.json` 记录 `wire_resistance_ohm`。该电阻应在 `system.load_global_state()`、`core.setup_tec_circuit("fixed_u", 27.2, I_guess=150.0)` 和 `core.post_step(...)` 同步电极温度之后重建并计算 ThermoCalc；若在温度同步前施加非零导线电阻，首次 `thermo_calc.calculate()` 可能极慢。已从绝对时间 `39184 s` 继续计算 `2000 s` 到 `41184 s`，结果保存在 `testModule/v8_caseA_lsoda_wire_2000s/`：末段端电功率 `4873.557 W`，TEC applied removed heat `5760.694 W`，冷却剂焓升 `108524.931 W`，combined storage `-16.346 W`，thermal-model residual `-0.335 W`。terminal-power residual 约 `+886.802 W`，基本等于 TEC applied removed heat 与端电输出之差，说明带导线电阻后该口径包含当前尚未单独沉积的导线/端部损耗，需与 thermal-model residual 分开解读。
 
 V8 定向审计入口：
 
@@ -463,7 +466,7 @@ audit_v8_caseA_interface_energy.py
 audit_v8_caseA_fluid_energy_network.py
 ```
 
-首次短验证结果：五个代表 TFE、四个真实慢化剂环、`37/34` 倍率和 `Ring3_Open` 六项 TEC 零源检查均通过；`QTEC,thermal - QTEC,count = 0 W`。静态普通固固接口累计误差约 `5.29e-9 W`，同步慢化剂映射最大误差约 `7.11e-15 W`，流体逐控制体矩阵残差保持在 `1e-9 W` 附近。初始化阶段仍会重复输出既有 `Failed to converge after 100000 iterations.`，该电路收敛专项尚未修复。
+首次短验证结果：五个代表 TFE、四个真实慢化剂环、`37/34` 倍率和 `Ring3_Open` 六项 TEC 零源检查均通过；`QTEC,thermal - QTEC,count = 0 W`。静态普通固固接口累计误差约 `5.29e-9 W`，同步慢化剂映射最大误差约 `7.11e-15 W`，流体逐控制体矩阵残差保持在 `1e-9 W` 附近。2026-06-09 的 `LSODA` smoke 中，`Failed to converge after 100000 iterations.` 共出现 `4440` 次，全部发生在进入 V8 长算主循环前的 `core.thermo_calc.calculate(verbose=False)` 阶段；`system.step(0.01)`、记录输出和结束阶段未再出现。该信息来自 ThermoCalc C++ 电路迭代，不是 `BaseHeatConduction` 的固体 ODE 收敛失败，该电路收敛专项尚未修复。
 
 迁移后 `100 s` 受控延续结果：
 
@@ -471,3 +474,79 @@ audit_v8_caseA_fluid_energy_network.py
 - 最后 `10 s` 的 `R_thermal_model = -1864.39 W`，其中固体区间残差 `-187.11 W`、流体方程残差 `-0.28 W`、流固时间层差 `-1677.01 W`。
 - 最终静态普通固固接口累计误差约 `5.19e-9 W`，同步慢化剂映射最大误差约 `3.55e-15 W`。
 - V8 不再被 TEC 倍率口径差掩盖；当前剩余项主要来自迁移后外圈热状态重新分化期间的流固时间层差。正式 `20000 s` 长算应继续记录其趋势，不得把某一时刻的全局抵消值直接视为严格闭合。
+
+## 16. 2026-06-10 V8 CaseA NaK78 coolant migration
+
+V8 CaseA now defaults to `SodiumPotassium78` coolant in `test_core_assemble_v8_caseA.py`, while V7 CaseA keeps its default `Sodium` behavior. The shared V7 builder accepts `coolant_material` and still stores the selected coolant object under the legacy `"Sodium"` material key so existing TFE and hydraulic construction code remains compatible.
+
+Do not directly continue an old V8 Sodium restart with the NaK78 model. Use:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\migrate_v8_caseA_sodium_restart_to_nak.py
+```
+
+The migration builds the current V8 NaK78 model, loads `testModule/v8_caseA_lsoda_wire_2000s/v8_caseA_lsoda_wire_2000s_latest_restart.npz`, recomputes `HydraulicNetwork.h_vec` from saved `T_vec/P_vec` using the current NaK78 material, refreshes fluid properties, reapplies LSODA, fixed voltage, design flows, `115000 W` core power and the standard wire resistance, then writes:
+
+- `testModule/v8_caseA_nak_migrated/v8_caseA_nak_migrated_latest_restart.npz`
+- `testModule/v8_caseA_nak_migrated/v8_caseA_nak_migrated_migration_summary.json`
+
+The NaK78 2000 s continuation was then run with:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v8_caseA_long_energy.py `
+  --restart-in testModule\v8_caseA_nak_migrated\v8_caseA_nak_migrated_latest_restart.npz `
+  --duration 2000 `
+  --record-interval 200 `
+  --restart-interval 200 `
+  --max-dt 0.8 `
+  --output-dir testModule\v8_caseA_nak_wire_2000s `
+  --case-prefix v8_caseA_nak_wire_2000s `
+  --solid-ode-method LSODA
+```
+
+Final state: absolute time `43184.00000000066 s`, relative time `2000 s`, terminal electric power `4868.580 W`, coolant enthalpy rise `108560.205 W`, coolant solid-to-fluid heat `108560.067 W`, outer-wall radiation `729.210 W`, combined storage `-11.771 W`, thermal-model residual `-0.132 W`, terminal-power residual `853.775 W`. Rebuilt final-state inlet/outlet plenum temperatures are `743.004650 K` and `838.785235 K`, so `DeltaT = 95.780585 K`; the NaK78 enthalpy rise is `83507.805 J/kg`, matching the `1.30 kg/s` loop heat pickup. `run.err` is empty and `run.out` contains no `Failed to converge`, `Traceback`, or `Error`.
+
+`run_v8_caseA_long_energy.py` currently writes restart, JSON and CSV products only; it does not append `Diag/` fields into the `.npz` restart. The `Diag/` append behavior belongs to the separate v7 100000 s continuation path unless a future task explicitly extends it to V8.
+
+## 17. 2026-06-11 V9 CaseA open external-piping skeleton
+
+V9 CaseA is implemented in `testModule/test_core_assemble_v9_caseA.py` and `testModule/run_v9_caseA_open_loop.py`. It does not change the V8 default builder or V8 restart path. V9 first builds the V8 core and TFE/TEC stack, then replaces the pre-initialization hydraulic network with an open external-piping skeleton for the pre-collector-ring integration stage.
+
+V9 keeps the V8 representative core (`Center/Ring1/Ring2/Ring3_TEC/Ring3_Open`), NaK78 coolant, fixed-voltage TEC mode, LSODA solid option, `Ring3_Open` zero-TEC-source contract, and standard wire resistance. The external hydraulic path is:
+
+```text
+fixed-flow inlet
+  -> V9_InletConnector
+  -> RadiatorOutletBranch_38
+     + RadiatorOutletBranch_44_50_Rep(multiplier=2)
+  -> RadiatorInnerHeader_53
+  -> RadiatorOuterHeader_52
+  -> ColdReturnBranch_1
+     + ColdReturnBranch_2_3_Rep(multiplier=2)
+  -> CoreInletConnector
+  -> V8/V9 representative TFE channels
+  -> CoreOutletConnector
+  -> HotOutletBranch_1/2/3
+  -> fixed-pressure outlet
+```
+
+Important constraints:
+
+- V9 has no pump, no pressurizer, no collector-ring heat pipes, and no first-round local-loss K values; all new external junctions use `k_loss=0.0`.
+- The inlet is a fixed mass-flow `InletJunction` with default `1.3 kg/s` and `743 K`; the only fixed pressure boundary is the outlet, default `160000 Pa`.
+- #38 is explicit, while #44/#50 are represented by `RadiatorOutletBranch_44_50_Rep(multiplier=2)` because their lengths differ from #38.
+- The cold return #2/#3 pair uses one representative branch with `multiplier=2`; the three hot outlet branches stay explicit for later connection to collector-ring `I1/I2/I3`.
+- `CoreInletConnector` and `CoreOutletConnector` are numerical mixing/connection nodes, not physical inlet/outlet boxes.
+- V8 restart files cannot be loaded directly into V9 because the hydraulic topology and fixed-pressure-boundary set are different. Use only V9 restart files with `run_v9_caseA_open_loop.py --restart-in ...`.
+
+V9-to-collector-ring integration note: the current V9 hot outlet branches are macro-system branches. The current 6-segment collector-ring model explicitly builds one physical collector ring and uses `MacroFlowJunction(multiplier=2)` to represent the second symmetric ring. Therefore the future integrated open chain must not connect `HotOutletBranch_1/2/3` directly to the single-ring `I1/I2/I3` nodes. Each hot branch should connect through a macro-to-single-ring split, so a macro branch flow of about `0.433 kg/s` becomes about `0.2167 kg/s` into the explicitly modeled ring. The `O1/O2/O3` side needs the matching single-ring-to-macro merge before returning to V9 cold-side piping. Building two explicit collector rings is possible later, but the first integrated version should keep the one-ring-plus-`multiplier=2` convention used by `CoolantLoop`.
+
+Recommended first checks:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m py_compile testModule\test_core_assemble_v9_caseA.py testModule\run_v9_caseA_open_loop.py testModule\test_v9_caseA_topology.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m unittest testModule.test_v9_caseA_topology
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v9_caseA_open_loop.py --duration 0.1 --record-interval 0.1 --restart-interval 0.1 --max-dt 0.01 --disable-tec-coupled
+```
+
+Cold-start V9 hydraulic/topology smoke should use `--disable-tec-coupled`, because the uniform cold initial TFE state can make the first ThermoCalc solve return non-finite Joule heat before a migrated warm thermal state is available. TEC-coupled V9 runs should start from a V9-compatible warm restart or a future dedicated V8-to-V9 thermal migration path.

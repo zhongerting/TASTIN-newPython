@@ -22,8 +22,11 @@ from audit_v7_caseA_global_storage_continue import (
     finite_difference_storage_rates,
 )
 from run_v8_caseA_common import (
+    DEFAULT_SOLID_ODE_METHOD,
     build_loaded_case,
+    get_solid_ode_methods,
     json_default,
+    parse_solid_ode_method,
     parse_v8_multipliers,
     passive_tec_source_totals,
 )
@@ -45,6 +48,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--safety-factor", type=float, default=5000.0)
     parser.add_argument("--pipe-n-nodes", type=int, default=8)
     parser.add_argument("--target-voltage", type=float, default=27.2)
+    parser.add_argument(
+        "--solid-ode-method",
+        type=parse_solid_ode_method,
+        default=DEFAULT_SOLID_ODE_METHOD,
+    )
     parser.add_argument(
         "--ring-multipliers",
         type=lambda text: parse_v8_multipliers(text, allow_zero=False),
@@ -125,6 +133,9 @@ def main() -> None:
     print(f"start_time={start_time:.6f}, target_time={target_time:.6f}", flush=True)
     print(f"history_csv={history_path}", flush=True)
     print(f"latest_restart={restart_path}", flush=True)
+    print(f"coolant_material={build['coolant_material']}", flush=True)
+    print(f"solid_ode_method={build['solid_ode_method']}", flush=True)
+    print(f"wire_resistance_ohm={build['wire_resistance_ohm']}", flush=True)
 
     while interval_start < target_time - 1.0e-10:
         interval_end = min(interval_start + float(args.record_interval), target_time)
@@ -172,6 +183,10 @@ def main() -> None:
             "record_interval_s": float(args.record_interval),
             "max_dt_s": float(args.max_dt),
             "inner_iter": int(args.inner_iter),
+            "coolant_material": build["coolant_material"],
+            "solid_ode_method": build["solid_ode_method"],
+            "solid_ode_methods": get_solid_ode_methods(build),
+            "wire_resistance_ohm": build["wire_resistance_ohm"],
             "ring_multipliers": build["ring_multipliers"],
             "tec_ring_multipliers": build["tec_ring_multipliers"],
             "latest": row,

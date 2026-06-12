@@ -33,6 +33,7 @@ from Materials.Solids.ZrH import ZirconiumHydride
 from Materials.Solids.BerylliumOxide import BerylliumOxide
 from Materials.Solids.GasGaps import Xenon, Cesium, CarbonDioxide, Helium
 from Materials.Fluids.Sodium import Sodium
+from Materials.Fluids.SodiumPotassium78 import SodiumPotassium78
 from Components.TFEUnit import TFEUnit, TFEGeometry, TFEMeshParams, GapConfig
 from Components.ReactorCore import (
     ReactorCore,
@@ -83,6 +84,24 @@ def _scale_solid_heat_capacity(material, heat_capacity_scale: float):
     return HeatCapacityScaledMaterial(material, heat_capacity_scale)
 
 
+def _make_case_a_coolant(coolant_material: str):
+    material_key = str(coolant_material).strip().lower()
+    if material_key in {"sodium", "na"}:
+        return Sodium(), "Sodium"
+    if material_key in {
+        "sodiumpotassium78",
+        "sodium_potassium_78",
+        "sodium-potassium78",
+        "nak",
+        "nak78",
+        "na-k78",
+    }:
+        return SodiumPotassium78(), "SodiumPotassium78"
+    raise ValueError(
+        "coolant_material must be one of: Sodium, SodiumPotassium78, NaK, NaK78."
+    )
+
+
 def _extend_channel_objects(all_vols, all_juncs, channel):
     all_vols.extend(channel.volumes)
     all_juncs.extend(channel.internal_junctions)
@@ -116,6 +135,7 @@ def build_v7_case_a_system(
     representative_power_factors: Optional[Dict[str, float]] = None,
     physical_ring_count: Optional[int] = None,
     core_name: str = "TASTIN_Core_V7_CaseA",
+    coolant_material: str = "Sodium",
 ) -> Dict[str, Any]:
     if inlet_plenum_volume_m3 <= 0.0 or outlet_plenum_volume_m3 <= 0.0:
         raise ValueError("Plenum volumes must be positive.")
@@ -200,8 +220,9 @@ def build_v7_case_a_system(
         else value
         for key, value in base_solid_materials.items()
     }
+    coolant, coolant_material_name = _make_case_a_coolant(coolant_material)
     materials_dict.update({
-        "Sodium": Sodium(),
+        "Sodium": coolant,
     })
 
     def global_material(key: str):
@@ -602,6 +623,7 @@ def build_v7_case_a_system(
         "j_outlet_pipe_out": j_outlet_pipe_out,
         "total_flow_design_kg_s": total_flow_design,
         "single_pipe_flow_design_kg_s": single_pipe_flow_design,
+        "coolant_material": coolant_material_name,
         "solid_heat_capacity_scale": tfe_heat_capacity_scale,
         "solid_heat_capacity_scale_scope": scale_scope,
         "global_outer_heat_capacity_scale": global_heat_capacity_scale,

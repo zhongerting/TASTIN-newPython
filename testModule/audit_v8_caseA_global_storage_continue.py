@@ -1,7 +1,12 @@
 import argparse
 
 import audit_v7_caseA_global_storage_continue as audit
-from run_v8_caseA_common import build_loaded_case, parse_v8_multipliers
+from run_v8_caseA_common import (
+    DEFAULT_SOLID_ODE_METHOD,
+    build_loaded_case,
+    parse_solid_ode_method,
+    parse_v8_multipliers,
+)
 
 
 DEFAULT_RESTART = "testModule/v8_caseA_migrated/v8_caseA_migrated_latest_restart.npz"
@@ -19,6 +24,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--safety-factor", type=float, default=5000.0)
     parser.add_argument("--pipe-n-nodes", type=int, default=8)
     parser.add_argument("--target-voltage", type=float, default=27.2)
+    parser.add_argument(
+        "--solid-ode-method",
+        type=parse_solid_ode_method,
+        default=DEFAULT_SOLID_ODE_METHOD,
+    )
     parser.add_argument(
         "--ring-multipliers",
         type=lambda text: parse_v8_multipliers(text, allow_zero=False),

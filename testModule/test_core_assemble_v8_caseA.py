@@ -58,6 +58,7 @@ def build_v8_case_a_system(
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """Build V8 CaseA with the outer physical ring split into TEC and passive representatives."""
+    kwargs.setdefault("coolant_material", "SodiumPotassium78")
     multipliers = list(V8_RING_MULTIPLIERS if ring_multipliers is None else ring_multipliers)
     tec_multipliers = list(
         V8_TEC_RING_MULTIPLIERS if tec_ring_multipliers is None else tec_ring_multipliers

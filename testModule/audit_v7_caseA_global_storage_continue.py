@@ -676,6 +676,9 @@ def main() -> None:
             "terminal_residual_definition": "Qcore - Qfluid_external_net_out - Qradiation - Pterminal - dEsolid_dt - dEfluid_dt",
         },
     }
+    if "solid_ode_method" in build:
+        summary["solid_ode_method"] = build["solid_ode_method"]
+        summary["solid_ode_methods"] = build.get("solid_ode_methods", {})
     with summary_path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False, default=json_default)
 

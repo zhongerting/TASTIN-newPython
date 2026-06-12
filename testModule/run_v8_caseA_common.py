@@ -13,6 +13,7 @@ if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
 from run_v7_caseA_multipliers_short import json_default
+from Solvers.HeatConduction.HeatConduction import BaseHeatConduction
 from test_core_assemble_v8_caseA import (
     _case_a_reset_design_flows_after_restart,
     build_v8_case_a_system,
@@ -20,6 +21,29 @@ from test_core_assemble_v8_caseA import (
 
 
 TOTAL_POWER_W = 115000.0
+DEFAULT_SOLID_ODE_METHOD = "LSODA"
+DEFAULT_COOLANT_MATERIAL = "SodiumPotassium78"
+WIRE_RESISTANCE_OHM = [
+    0.00155199999999970,
+    0.00102400000000000,
+    0.000336000000000000,
+    0.000608000000000000,
+]
+
+
+def parse_solid_ode_method(method: str) -> str:
+    method = str(method)
+    method_by_lower = {
+        valid.lower(): valid
+        for valid in BaseHeatConduction.VALID_ODE_METHODS
+    }
+    method = method_by_lower.get(method.lower(), method)
+    if method not in BaseHeatConduction.VALID_ODE_METHODS:
+        valid = ", ".join(sorted(BaseHeatConduction.VALID_ODE_METHODS))
+        raise argparse.ArgumentTypeError(
+            f"Unsupported solid ODE method '{method}'. Valid methods: {valid}."
+        )
+    return method
 
 
 def parse_v8_multipliers(text: str, *, allow_zero: bool = False) -> List[int]:
@@ -57,11 +81,52 @@ def passive_tec_source_totals(build: Dict[str, Any]) -> Dict[str, float]:
     return totals
 
 
+def apply_solid_ode_method(build: Dict[str, Any], method: str) -> Dict[str, str]:
+    method = parse_solid_ode_method(method)
+    system = build["system"]
+    applied = {}
+    for name, solid in system.solid_components.items():
+        solid.set_ode_method(method)
+        applied[name] = solid.ode_method
+    return applied
+
+
+def get_solid_ode_methods(build: Dict[str, Any]) -> Dict[str, str]:
+    system = build["system"]
+    return {
+        name: str(getattr(solid, "ode_method", ""))
+        for name, solid in system.solid_components.items()
+    }
+
+
+def apply_wire_resistance(core: Any) -> None:
+    if core.thermo_calc is None:
+        return
+    n_elem = core.thermo_calc.N_elem
+    wire_res = np.asarray(WIRE_RESISTANCE_OHM, dtype=float)
+    core.thermo_calc._input_data.resistanceWire = np.tile(wire_res, (n_elem, 1))
+    core.thermo_calc.build()
+    core.thermo_calc.calculate(verbose=False)
+
+
+def get_wire_resistance(core: Any) -> List[float]:
+    if core.thermo_calc is None:
+        return list(WIRE_RESISTANCE_OHM)
+    resistance = np.asarray(core.thermo_calc._input_data.resistanceWire, dtype=float)
+    if resistance.size == 0:
+        return list(WIRE_RESISTANCE_OHM)
+    return [float(value) for value in resistance.reshape((-1, 4))[0]]
+
+
 def build_loaded_case(args: argparse.Namespace) -> Dict[str, Any]:
+    solid_ode_method = parse_solid_ode_method(
+        getattr(args, "solid_ode_method", DEFAULT_SOLID_ODE_METHOD)
+    )
     build = build_v8_case_a_system(
         pipe_n_nodes=args.pipe_n_nodes,
         solid_heat_capacity_scale=1.0,
         solid_heat_capacity_scale_scope="global_outer",
+        coolant_material=getattr(args, "coolant_material", DEFAULT_COOLANT_MATERIAL),
         ring_multipliers=args.ring_multipliers,
         tec_ring_multipliers=args.tec_ring_multipliers,
     )
@@ -70,12 +135,14 @@ def build_loaded_case(args: argparse.Namespace) -> Dict[str, Any]:
     core.point_reactor = None
     core.enable_tec_coupled = True
     core.thermo_update_interval = 0.0
+    apply_solid_ode_method(build, solid_ode_method)
     system.initialize_system()
     system.load_global_state(args.restart_in)
+    apply_solid_ode_method(build, solid_ode_method)
     core.point_reactor = None
     core.enable_tec_coupled = True
     core.thermo_update_interval = 0.0
-    core.setup_tec_circuit("fixed_u", args.target_voltage, I_guess=260.0)
+    core.setup_tec_circuit("fixed_u", args.target_voltage, I_guess=150.0)
     core.update_neutronic_power(
         p_total=TOTAL_POWER_W,
         p_fiss=TOTAL_POWER_W,
@@ -85,15 +152,27 @@ def build_loaded_case(args: argparse.Namespace) -> Dict[str, Any]:
     _case_a_reset_design_flows_after_restart(build)
     core.post_step(0.0, float(system.global_time))
     if core.thermo_calc is not None:
-        core.thermo_calc.calculate(verbose=False)
+        apply_wire_resistance(core)
     core.pre_step(0.0, float(system.global_time))
+    build["solid_ode_method"] = solid_ode_method
+    build["solid_ode_methods"] = get_solid_ode_methods(build)
+    build["wire_resistance_ohm"] = get_wire_resistance(core)
+    build["coolant_material"] = build.get("coolant_material", DEFAULT_COOLANT_MATERIAL)
     return build
 
 
 __all__ = [
+    "DEFAULT_COOLANT_MATERIAL",
+    "DEFAULT_SOLID_ODE_METHOD",
     "TOTAL_POWER_W",
+    "WIRE_RESISTANCE_OHM",
+    "apply_wire_resistance",
+    "apply_solid_ode_method",
     "build_loaded_case",
+    "get_solid_ode_methods",
+    "get_wire_resistance",
     "json_default",
     "parse_v8_multipliers",
+    "parse_solid_ode_method",
     "passive_tec_source_totals",
 ]

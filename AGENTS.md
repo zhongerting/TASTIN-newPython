@@ -136,7 +136,11 @@ test_core_assemble_v7_caseA.py
 
 排查 v7 CaseA 时先读 `testModule` 手册，不要从旧版 `test_core_assemble_v1.py` 到 `v6.py` 顺序通读。旧版本用于演进参考。
 
-V8 CaseA 位于 `testModule/test_core_assemble_v8_caseA.py`，用于把外圈拆为 `Ring3_TEC` 和 `Ring3_Open` 两个代表元件。它复用 V7 CaseA 几何和边界，但拥有独立水力拓扑与 restart；旧 V7 restart 必须通过 `testModule/migrate_v7_caseA_restart_to_v8.py` 迁移，不能直接加载。
+V8 CaseA 位于 `testModule/test_core_assemble_v8_caseA.py`，用于把外圈拆为 `Ring3_TEC` 和 `Ring3_Open` 两个代表元件。它复用 V7 CaseA 几何和边界，但拥有独立水力拓扑与 restart；旧 V7 restart 必须通过 `testModule/migrate_v7_caseA_restart_to_v8.py` 迁移，不能直接加载。2026-06-10 起，V8 默认冷却剂已改为 `Materials.Fluids.SodiumPotassium78.SodiumPotassium78`，与 `CoolantLoop` 集流环算例保持一致；从旧 Sodium V8 restart 续算前应先运行 `testModule/migrate_v8_caseA_sodium_restart_to_nak.py`，该脚本会按当前 NaK78 材料由已保存的 `T/P` 重算 `h_vec` 和流体物性。
+
+V9 CaseA 位于 `testModule/test_core_assemble_v9_caseA.py`，是基于 V8 堆芯和 TEC 配置的开式外管路骨架。它重建水力网络为“固定流量入口 -> 辐射器出口支路/总管 -> 冷回流支路 -> 堆芯 -> 三条热出口支路 -> 固定压力出口”，暂不包含集流环、热管、泵或局部阻力系数；运行入口为 `testModule/run_v9_caseA_open_loop.py`。V8 restart 不能直接加载到 V9，除非后续新增专门迁移器。
+
+后续把 V9 与 `CoolantLoop` 的 6 段集流环连接时，不能把三条 V9 热出口支路直接接到单个显式集流环的 `I1/I2/I3`。当前集流环模型只显式建一套物理集流环，并用 `MacroFlowJunction(multiplier=2)` 代表第二套对称集流环；集成链条中热出口支路到 `I1/I2/I3` 需要宏观到单环的 `multiplier=2` 分流，`O1/O2/O3` 回到 V9 冷侧管路也需要匹配的单环到宏观汇流。
 
 ### 5.2 集流环冷却回路路径
 
@@ -236,7 +240,9 @@ TEC 生产焦耳热当前以 C++ `VcalcFVM()` 输出的逐轴向节点功率 `jo
 
 `UE / UC / rhoE / rhoC` 和节点中心梯度函数继续保留为诊断数据，但不得重新作为生产焦耳热源。2026-06-02 单 TFE TEC `1 s` 基线中，二维映射与 C++ 节点功率差为 `0 W`，TEC 转换闭合差约 `0.0250 W`，最终全局残差约 `0.0891 W`。
 
-v7 CaseA 多 TEC 串联路径仍会重复报告 `Failed to converge after 100000 iterations.`。该问题属于后续电路收敛专项，不能视为焦耳热映射已经解决的范围。
+v7/V8 CaseA 多 TEC 串联路径仍会重复报告 `Failed to converge after 100000 iterations.`。2026-06-09 V8 `LSODA` smoke 中该信息出现 `4440` 次，全部位于进入长算主循环前的 `core.thermo_calc.calculate(verbose=False)` 阶段；后续 `system.step(0.01)` 未再输出。该问题属于 ThermoCalc C++ 电路收敛专项，不是固体导热 ODE 收敛失败，也不能视为焦耳热映射已经解决的范围。
+
+2026-06-10 起，V8 CaseA 公共加载运行路径 `testModule/run_v8_caseA_common.py` 会向 ThermoCalc 施加导线电阻 `[0.00155199999999970, 0.00102400000000000, 0.000336000000000000, 0.000608000000000000] ohm`，并写入 `latest_state.json` 的 `wire_resistance_ohm`。该电阻必须在 restart 加载、TEC fixed voltage 设置和 `core.post_step(...)` 电极温度同步之后再重建 ThermoCalc；提前计算会显著拖慢首次 TEC 求解。V8 默认冷却剂同日改为 `SodiumPotassium78`；`testModule/v8_caseA_nak_wire_2000s/` 已从绝对时间 `41184 s` 续算到 `43184 s`，末段端电功率约 `4868.580 W`，冷却剂焓升约 `108560.205 W`，进出口温差约 `95.781 K`，thermal-model residual 约 `-0.132 W`，日志未再出现 `Failed to converge after 100000 iterations.`。
 
 ## 13. 2026-06-02 全局慢化剂映射顺序补充
 

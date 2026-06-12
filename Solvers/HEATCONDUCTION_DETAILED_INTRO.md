@@ -653,6 +653,8 @@ k = i * n_y + j
 
 `BaseHeatConduction.step(dt, method=None, **kwargs)` uses `self.ode_method` when `method is None`; passing `method` explicitly overrides only that single call. Supported methods are the SciPy `solve_ivp` methods `RK45`, `RK23`, `DOP853`, `Radau`, `BDF`, and `LSODA`. `BDF` and `Radau` continue to receive available sparse Jacobian structure.
 
+V8 CaseA 的公共入口 `testModule/run_v8_caseA_common.py` 会在构建后和加载 restart 后统一调用 `solid.set_ode_method()`。默认 `--solid-ode-method` 为 `LSODA`，并覆盖 `SystemManager.solid_components` 中注册的全部堆芯固体，包括 TFE 内部固体、全局慢化剂环、筒体、反射层和网格化间隙固体。显式传入 `BDF`、`Radau` 等合法方法可恢复或切换该算例的固体积分器。
+
 ### 8.6 初始化同步
 
 `HeatConduction1D` 和 `HeatConduction2D` 构造结束时都会调用 `initialize_state()`，用于：

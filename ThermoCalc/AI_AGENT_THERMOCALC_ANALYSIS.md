@@ -297,4 +297,4 @@ joulePowerC[n_axi] [W]
 
 2026-06-02 已使用 Python `3.12.13` 重建本地扩展。单 TFE TEC `1 s` 审计中，二维映射与 C++ 节点功率总差为 `0 W`；TEC 转换闭合差由旧梯度口径的约 `0.280 W` 降为 `0.0250 W`。剩余量主要受当前外层电路电流停止条件影响，本轮未修改该阈值。
 
-v7 CaseA `1 s` smoke 和静态接口审计可以完成，但底层 TEC 会重复报告 `Failed to converge after 100000 iterations.`。静态接口审计的即时 TEC 闭合差约为 `5.20 W`。这不是二维热源映射误差；后续应单独检查多 TEC 串联电路的收敛条件、失败状态传播和告警限流。
+v7 CaseA `1 s` smoke 和静态接口审计可以完成，但底层 TEC 会重复报告 `Failed to converge after 100000 iterations.`。静态接口审计的即时 TEC 闭合差约为 `5.20 W`。2026-06-09 的 V8 CaseA `LSODA` smoke 中，该信息共出现 `4440` 次，分段探针确认全部发生在进入长算主循环前的 `core.thermo_calc.calculate(verbose=False)` 调用；随后 `system.step(0.01)`、记录输出和结束阶段未再出现。这不是二维热源映射误差，也不是 `BaseHeatConduction` 固体 ODE 收敛失败；后续应单独检查多 TEC 串联电路的收敛条件、失败状态传播和告警限流。
