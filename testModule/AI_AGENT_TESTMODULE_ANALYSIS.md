@@ -628,3 +628,49 @@ Recommended first V10 local-implicit smoke:
 ```
 
 Treat `max_dt=0.5 s` as an exploratory setting, not an acceptance criterion, because the previous explicit-coupling V10 run developed hydraulic nonconvergence near absolute time `12237.6 s`.
+
+## 20. 2026-06-15 V10 727 K radiator tuning preset
+
+`testModule/run_v10_caseA_open_loop.py` now supports a 727 K radiator tuning preset:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v10_caseA_open_loop.py `
+  --preset-727-radiator-tuning `
+  --restart-in <v10_restart.npz> `
+  --duration 500 `
+  --record-interval 50 `
+  --restart-interval 50
+```
+
+The preset sets `inlet_temperature_k=727.0`, `wire_resistance_scale=0.5`, `ring_emissivity=0.15`, `outer_header_emissivity=0.2`, `hp_emissivity=0.6`, `fin_emissivity=0.6`, `solid_ode_method=RK45`, `fluid_solid_coupling_scheme=local_implicit`, and `max_dt=0.1`.
+
+Implementation notes:
+
+- The inlet boundary temperature is re-applied after V10 restart loading or V9/ring restart injection, because restart files contain the previous boundary temperature.
+- `RadiatorOuterHeader_52` remains a fluid channel; its radiation is an equivalent fluid-side sink `epsilon*sigma*A*(T^4-T_space^4)` applied in `pre_step()`.
+- `ring_emissivity`, `hp_emissivity`, `fin_emissivity`, `outer_header_emissivity`, `outer_header_radiation_w`, `ring_wall_radiation_w`, and `hp_fin_radiation_w` are written to diagnostics/history.
+- First tune with HP/fin emissivity fixed at `0.6`; adjust both together only after the 727 K case reaches a relative steady trend.
+
+Tuning results as of 2026-06-15:
+
+- `ring_emissivity=0.20`, `hp_emissivity=0.70`, `fin_emissivity=0.70` reached near steady state after `1000 s`; `RadiatorOuterHeader_52_out` was about `732.45 K`, still about `5.45 K` above the 727 K inlet target.
+- `ring_emissivity=0.20`, `hp_emissivity=0.75`, `fin_emissivity=0.75` is the current preferred candidate. After the latest continuation to absolute time about `15530 s`, `RadiatorOuterHeader_52_out` was about `728.65 K`, while the core inlet boundary and connector stayed at about `727.000 K`.
+- `ring_emissivity=0.20`, `hp_emissivity=0.80`, `fin_emissivity=0.80` over-cooled the outer header outlet to about `725.05 K`; use it only as an upper bracket.
+
+The current `0.75/0.75` candidate restart is:
+
+```text
+testModule/v10_caseA_tune727_ring020_hpfin075_steady_plus1000s/v10_caseA_tune727_ring020_hpfin075_steady_plus1000s_latest_restart.npz
+```
+
+For future closed-loop construction, the pressure audit from the `0.75/0.75` near-steady case gives:
+
+```text
+CoreInletConnector pressure  ≈ 166471.52 Pa
+CoreOutletConnector pressure ≈ 162614.31 Pa
+Core pressure drop           ≈   3857.21 Pa
+ColdReturnOutletMerge pressure ≈ 160004.97 Pa
+Suggested initial pump head from ColdReturnOutletMerge to CoreInletConnector ≈ 6.5 kPa at 1.3 kg/s
+```
+
+The detailed pressure summary for the earlier `0.75/0.75` steady checkpoint is in the generated run directory as `pressure_summary.json`; run artifacts remain untracked and should not be committed unless explicitly requested.

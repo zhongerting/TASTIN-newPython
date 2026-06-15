@@ -67,7 +67,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-voltage", type=float, default=27.2)
     parser.add_argument("--thermo-update-interval", type=float, default=0.8)
     parser.add_argument("--disable-tec-coupled", action="store_true")
+    parser.add_argument("--preset-727-radiator-tuning", action="store_true")
     parser.add_argument("--inlet-temperature-k", type=float, default=753.330663091)
+    parser.add_argument("--wire-resistance-scale", type=float, default=1.0)
+    parser.add_argument("--ring-emissivity", type=float, default=None)
+    parser.add_argument("--hp-emissivity", type=float, default=None)
+    parser.add_argument("--fin-emissivity", type=float, default=None)
+    parser.add_argument("--outer-header-emissivity", type=float, default=0.0)
+    parser.add_argument("--outer-header-t-space-k", type=float, default=None)
+    parser.add_argument("--outer-header-area-scale", type=float, default=1.0)
     parser.add_argument("--total-inlet-flow-kg-s", type=float, default=1.3)
     parser.add_argument("--outlet-pressure-pa", type=float, default=160000.0)
     parser.add_argument("--connector-volume-m3", type=float, default=1.0e-5)
@@ -93,7 +101,18 @@ def parse_args() -> argparse.Namespace:
         type=lambda text: parse_v8_multipliers(text, allow_zero=True),
         default=parse_v8_multipliers("1,6,12,15,0", allow_zero=True),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.preset_727_radiator_tuning:
+        args.inlet_temperature_k = 727.0
+        args.wire_resistance_scale = 0.5
+        args.ring_emissivity = 0.15
+        args.hp_emissivity = 0.6
+        args.fin_emissivity = 0.6
+        args.outer_header_emissivity = 0.2
+        args.solid_ode_method = parse_solid_ode_method("RK45")
+        args.fluid_solid_coupling_scheme = "local_implicit"
+        args.max_dt = 0.1
+    return args
 
 
 def flatten_for_csv(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -137,6 +156,36 @@ def apply_fluid_solid_coupling_scheme(system: Any, scheme: str) -> int:
             f"{names}"
         )
     return count
+
+
+def enforce_inlet_boundary_temperature(build: Dict[str, Any], temperature_k: float) -> None:
+    inlet = build["inlet_boundary"]
+    temperature = float(temperature_k)
+    set_boundary_state = getattr(inlet, "set_boundary_state", None)
+    if callable(set_boundary_state):
+        set_boundary_state(T=temperature)
+    else:
+        inlet.T = temperature
+        if getattr(inlet, "material", None) is not None:
+            inlet.h = inlet.material.enthalpy(inlet.T, inlet.P)
+            inlet.update_properties(inlet.material)
+    net = build["system"].fluid_solver
+    for idx, vol in enumerate(getattr(net, "volumes_obj", [])):
+        if vol is inlet:
+            net.T_vec[idx] = float(inlet.T)
+            net.h_vec[idx] = float(inlet.h)
+            net.rho_vec[idx] = float(inlet.rho)
+            net.mu_vec[idx] = float(getattr(inlet, "mu", net.mu_vec[idx]))
+            if hasattr(net, "T_backup"):
+                net.T_backup[idx] = net.T_vec[idx]
+            if hasattr(net, "h_backup"):
+                net.h_backup[idx] = net.h_vec[idx]
+            if hasattr(net, "rho_backup"):
+                net.rho_backup[idx] = net.rho_vec[idx]
+            if hasattr(net, "mu_backup"):
+                net.mu_backup[idx] = net.mu_vec[idx]
+            break
+    build["target_core_inlet_t_k"] = temperature
 
 
 def _load_npz_dict(path: str) -> Dict[str, np.ndarray]:
@@ -326,6 +375,12 @@ def build_case(args: argparse.Namespace) -> Dict[str, Any]:
         coolant_material=args.coolant_material,
         ring_multipliers=args.ring_multipliers,
         tec_ring_multipliers=args.tec_ring_multipliers,
+        ring_emissivity=args.ring_emissivity,
+        hp_emissivity=args.hp_emissivity,
+        fin_emissivity=args.fin_emissivity,
+        outer_header_emissivity=float(args.outer_header_emissivity),
+        outer_header_t_space_k=args.outer_header_t_space_k,
+        outer_header_area_scale=float(args.outer_header_area_scale),
     )
     system = build["system"]
     core = build["core"]
@@ -355,9 +410,10 @@ def build_case(args: argparse.Namespace) -> Dict[str, Any]:
     )
     preserve_ring_restart_flows = bool(args.restart_in or migration is not None)
     reset_v10_design_flows(build, preserve_ring_restart_flows=preserve_ring_restart_flows)
+    enforce_inlet_boundary_temperature(build, args.inlet_temperature_k)
     core.post_step(0.0, float(system.global_time))
     if core.enable_tec_coupled and core.thermo_calc is not None:
-        apply_wire_resistance(core)
+        apply_wire_resistance(core, scale=float(args.wire_resistance_scale))
         core._last_thermo_update_time = float(system.global_time)
     core.pre_step(0.0, float(system.global_time))
     build["fluid_solid_coupling_scheme"] = args.fluid_solid_coupling_scheme
@@ -367,7 +423,13 @@ def build_case(args: argparse.Namespace) -> Dict[str, Any]:
     )
     build["solid_ode_method"] = args.solid_ode_method
     build["solid_ode_methods"] = get_solid_ode_methods(build)
+    build["wire_resistance_scale"] = float(args.wire_resistance_scale)
     build["wire_resistance_ohm"] = get_wire_resistance(core)
+    if core.thermo_calc is None:
+        build["wire_resistance_ohm"] = [
+            float(value) * float(args.wire_resistance_scale)
+            for value in build["wire_resistance_ohm"]
+        ]
     build["tec_coupled_enabled"] = bool(core.enable_tec_coupled)
     build["migration_summary"] = migration
     return build
@@ -387,6 +449,15 @@ def write_latest_state(path: Path, build: Dict[str, Any], args: argparse.Namespa
         "max_dt_s": float(args.max_dt),
         "inner_iter": int(args.inner_iter),
         "coolant_material": build["coolant_material"],
+        "preset_727_radiator_tuning": bool(args.preset_727_radiator_tuning),
+        "inlet_temperature_k": float(args.inlet_temperature_k),
+        "wire_resistance_scale": float(args.wire_resistance_scale),
+        "ring_emissivity": build["ring_emissivity"],
+        "hp_emissivity": build["hp_emissivity"],
+        "fin_emissivity": build["fin_emissivity"],
+        "outer_header_emissivity": build["outer_header_emissivity"],
+        "outer_header_t_space_k": build["outer_header_t_space_k"],
+        "outer_header_area_scale": build["outer_header_area_scale"],
         "fluid_solid_coupling_scheme": build["fluid_solid_coupling_scheme"],
         "fluid_solid_coupler_count": build["fluid_solid_coupler_count"],
         "solid_ode_method": build["solid_ode_method"],
@@ -427,11 +498,22 @@ def main() -> None:
     print(f"history_csv={history_path}", flush=True)
     print(f"latest_restart={latest_restart_path}", flush=True)
     print(f"fluid_solid_coupling_scheme={build['fluid_solid_coupling_scheme']}", flush=True)
+    print(
+        "tuning="
+        f"inlet={args.inlet_temperature_k:.3f}K "
+        f"wire_scale={args.wire_resistance_scale:.3f} "
+        f"ring_eps={build['ring_emissivity']:.3f} "
+        f"hp_eps={build['hp_emissivity']:.3f} "
+        f"fin_eps={build['fin_emissivity']:.3f} "
+        f"outer_header_eps={build['outer_header_emissivity']:.3f}",
+        flush=True,
+    )
     print(f"migration_summary={build.get('migration_summary')}", flush=True)
 
     initial_record = {
         **v10_basic_diagnostics(build),
         "fluid_solid_coupling_scheme": build["fluid_solid_coupling_scheme"],
+        "wire_resistance_scale": build["wire_resistance_scale"],
     }
     system.save_global_state(str(latest_restart_path))
     write_latest_state(
@@ -484,6 +566,7 @@ def main() -> None:
                 "inner_iter": int(args.inner_iter),
                 "fluid_solid_coupling_scheme": build["fluid_solid_coupling_scheme"],
                 "solid_ode_method": build["solid_ode_method"],
+                "wire_resistance_scale": build["wire_resistance_scale"],
                 "wire_resistance_ohm": build["wire_resistance_ohm"],
                 "tec_coupled_enabled": build["tec_coupled_enabled"],
             }

@@ -12,6 +12,7 @@ if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
 import CoolantLoop.model_collector_ring_6segment_v9_interface as ring_cfg
+from Components.BaseComponent import BaseComponent
 from Solvers.Hydrodynamics.BoundaryVolume import IncompressibleBoundaryVolume, InletJunction
 from Solvers.Hydrodynamics.Components import (
     FlowJunction,
@@ -53,6 +54,43 @@ V10_DEFAULT_INLET_TEMPERATURE_K = 753.330663091
 V10_DEFAULT_OUTLET_PRESSURE_PA = 160000.0
 V10_DEFAULT_CONNECTOR_VOLUME_M3 = 1.0e-5
 V10_DEFAULT_CONNECTOR_LENGTH_M = 0.02
+SIGMA_SB = 5.670374419e-8
+
+
+class FluidChannelRadiationSink(BaseComponent):
+    """Equivalent radiation sink applied directly to a fluid channel."""
+
+    def __init__(
+        self,
+        name: str,
+        channel: IncompressibleFluidChannel,
+        emissivity: float,
+        t_space: float,
+        perimeter: float,
+        area_scale: float = 1.0,
+    ):
+        super().__init__(name)
+        self.channel = channel
+        self.emissivity = float(emissivity)
+        self.t_space = float(t_space)
+        self.perimeter = float(perimeter)
+        self.area_scale = float(area_scale)
+        self.node_area = self.perimeter * float(channel.node_length) * self.area_scale
+        self.last_radiation_distribution_w = np.zeros(channel.n_nodes, dtype=float)
+        self.last_radiation_w = 0.0
+
+    def pre_step(self, dt: float, current_time: float):
+        temperatures = np.asarray(self.channel.temperature_vector, dtype=float)
+        q_reject = (
+            self.emissivity
+            * SIGMA_SB
+            * self.node_area
+            * (np.maximum(temperatures, 1.0e-6) ** 4 - self.t_space ** 4)
+        )
+        q_reject = np.nan_to_num(q_reject, nan=0.0, posinf=0.0, neginf=0.0)
+        self.last_radiation_distribution_w[:] = q_reject
+        self.last_radiation_w = float(np.sum(q_reject))
+        self.channel.add_heat_source_distribution(-q_reject)
 
 
 def _is_core_channel_junction(name: str) -> bool:
@@ -112,7 +150,24 @@ def _is_preserved_ring_restart_junction(name: str) -> bool:
     )
 
 
-def _build_ring_only(material: Any, initial_p: float, initial_t: float) -> Dict[str, Any]:
+def _build_ring_only(
+    material: Any,
+    initial_p: float,
+    initial_t: float,
+    ring_emissivity: Optional[float] = None,
+    hp_emissivity: Optional[float] = None,
+    fin_emissivity: Optional[float] = None,
+) -> Dict[str, Any]:
+    old_ring_emissivity = ring_cfg.RING_EMISSIVITY
+    old_hp_emissivity = ring_cfg.cfg.HP_EMISSIVITY
+    old_fin_emissivity = ring_cfg.cfg.FIN_EMISSIVITY
+    if ring_emissivity is not None:
+        ring_cfg.RING_EMISSIVITY = float(ring_emissivity)
+    if hp_emissivity is not None:
+        ring_cfg.cfg.HP_EMISSIVITY = float(hp_emissivity)
+    if fin_emissivity is not None:
+        ring_cfg.cfg.FIN_EMISSIVITY = float(fin_emissivity)
+
     inlet_mix_nodes = {
         key: ring_cfg.build_mix_node(f"InletMix_{key}", "inlet")
         for key in ring_cfg.INLET_MIX_KEYS
@@ -135,47 +190,52 @@ def _build_ring_only(material: Any, initial_p: float, initial_t: float) -> Dict[
     segment_entry_links = []
     segment_exit_links = []
 
-    for sector_name, start_key, end_key, multipliers in ring_cfg.SEGMENT_SPECS:
-        channel = IncompressibleFluidChannel(
-            name=f"{sector_name}_Channel",
-            n_nodes=ring_cfg.N_SECTOR,
-            total_length=ring_cfg.L_SECTOR,
-            flow_area=ring_cfg.AREA_RING,
-            hydraulic_diam=ring_cfg.DH_RING,
-            initial_P=float(initial_p),
-            initial_T=float(initial_t),
-            material=material,
-        )
-        solid = ring_cfg.build_sector_solid(f"{sector_name}_Solid")
-        ring_hp = ring_cfg.cfg.build_ring_hp(
-            name=f"{sector_name}_RingHP",
-            fluid_channel=channel,
-            solid_header=solid,
-            hp_multipliers=multipliers,
-        )
-        ring_cfg.configure_ring_hp_heat_pipe_solver(ring_hp)
-        sectors.append(channel)
-        solids.append(solid)
-        ring_hps.append(ring_hp)
+    try:
+        for sector_name, start_key, end_key, multipliers in ring_cfg.SEGMENT_SPECS:
+            channel = IncompressibleFluidChannel(
+                name=f"{sector_name}_Channel",
+                n_nodes=ring_cfg.N_SECTOR,
+                total_length=ring_cfg.L_SECTOR,
+                flow_area=ring_cfg.AREA_RING,
+                hydraulic_diam=ring_cfg.DH_RING,
+                initial_P=float(initial_p),
+                initial_T=float(initial_t),
+                material=material,
+            )
+            solid = ring_cfg.build_sector_solid(f"{sector_name}_Solid")
+            ring_hp = ring_cfg.cfg.build_ring_hp(
+                name=f"{sector_name}_RingHP",
+                fluid_channel=channel,
+                solid_header=solid,
+                hp_multipliers=multipliers,
+            )
+            ring_cfg.configure_ring_hp_heat_pipe_solver(ring_hp)
+            sectors.append(channel)
+            solids.append(solid)
+            ring_hps.append(ring_hp)
 
-        entry_link = FlowJunction(
-            name=f"J_{start_key}_to_{sector_name}",
-            from_vol=mix_nodes[start_key],
-            to_vol=channel.volumes[0],
-            flow_area=ring_cfg.AREA_RING,
-            k_loss=ring_cfg.K_INLET_MIX_TO_RING_SEGMENT,
-        )
-        exit_link = FlowJunction(
-            name=f"J_{sector_name}_to_{end_key}",
-            from_vol=channel.volumes[-1],
-            to_vol=mix_nodes[end_key],
-            flow_area=ring_cfg.AREA_RING,
-            k_loss=ring_hp.outlet_k_loss + ring_cfg.K_RING_SEGMENT_TO_OUTLET_MIX,
-            dynamic_loss_params=ring_hp.outlet_dynamic_loss_params,
-        )
-        segment_entry_links.append(entry_link)
-        segment_exit_links.append(exit_link)
-        segment_links.extend([entry_link, exit_link])
+            entry_link = FlowJunction(
+                name=f"J_{start_key}_to_{sector_name}",
+                from_vol=mix_nodes[start_key],
+                to_vol=channel.volumes[0],
+                flow_area=ring_cfg.AREA_RING,
+                k_loss=ring_cfg.K_INLET_MIX_TO_RING_SEGMENT,
+            )
+            exit_link = FlowJunction(
+                name=f"J_{sector_name}_to_{end_key}",
+                from_vol=channel.volumes[-1],
+                to_vol=mix_nodes[end_key],
+                flow_area=ring_cfg.AREA_RING,
+                k_loss=ring_hp.outlet_k_loss + ring_cfg.K_RING_SEGMENT_TO_OUTLET_MIX,
+                dynamic_loss_params=ring_hp.outlet_dynamic_loss_params,
+            )
+            segment_entry_links.append(entry_link)
+            segment_exit_links.append(exit_link)
+            segment_links.extend([entry_link, exit_link])
+    finally:
+        ring_cfg.RING_EMISSIVITY = old_ring_emissivity
+        ring_cfg.cfg.HP_EMISSIVITY = old_hp_emissivity
+        ring_cfg.cfg.FIN_EMISSIVITY = old_fin_emissivity
 
     return {
         "inlet_mix_nodes": inlet_mix_nodes,
@@ -203,6 +263,12 @@ def build_v10_case_a_system(
     ring_multipliers: Optional[Sequence[int]] = None,
     tec_ring_multipliers: Optional[Sequence[int]] = None,
     coolant_material: str = "SodiumPotassium78",
+    ring_emissivity: Optional[float] = None,
+    hp_emissivity: Optional[float] = None,
+    fin_emissivity: Optional[float] = None,
+    outer_header_emissivity: float = 0.0,
+    outer_header_t_space_k: Optional[float] = None,
+    outer_header_area_scale: float = 1.0,
 ) -> Dict[str, Any]:
     if total_inlet_flow_kg_s <= 0.0:
         raise ValueError("total_inlet_flow_kg_s must be positive.")
@@ -336,7 +402,28 @@ def build_v10_case_a_system(
         )
         for idx in range(1, 4)
     ]
-    ring = _build_ring_only(material, initial_p, initial_t)
+    ring = _build_ring_only(
+        material,
+        initial_p,
+        initial_t,
+        ring_emissivity=ring_emissivity,
+        hp_emissivity=hp_emissivity,
+        fin_emissivity=fin_emissivity,
+    )
+    effective_ring_emissivity = float(ring_cfg.RING_EMISSIVITY if ring_emissivity is None else ring_emissivity)
+    effective_hp_emissivity = float(ring_cfg.cfg.HP_EMISSIVITY if hp_emissivity is None else hp_emissivity)
+    effective_fin_emissivity = float(ring_cfg.cfg.FIN_EMISSIVITY if fin_emissivity is None else fin_emissivity)
+    effective_outer_header_t_space = float(ring_cfg.T_SPACE if outer_header_t_space_k is None else outer_header_t_space_k)
+    outer_header_radiation_sink = None
+    if float(outer_header_emissivity) > 0.0:
+        outer_header_radiation_sink = FluidChannelRadiationSink(
+            name="RadiatorOuterHeader_52_RadiationSink",
+            channel=radiator_outer_header_52,
+            emissivity=float(outer_header_emissivity),
+            t_space=effective_outer_header_t_space,
+            perimeter=np.pi * DH_HEADER,
+            area_scale=float(outer_header_area_scale),
+        )
 
     all_vols: List[Any] = [
         inlet_boundary,
@@ -537,6 +624,8 @@ def build_v10_case_a_system(
     system.add_component(core)
     for ring_hp in ring["ring_hps"]:
         system.add_component(ring_hp)
+    if outer_header_radiation_sink is not None:
+        system.add_component(outer_header_radiation_sink)
 
     build.update(
         {
@@ -561,6 +650,7 @@ def build_v10_case_a_system(
             "radiator_branch_merge": radiator_merge,
             "radiator_inner_header_53": radiator_inner_header_53,
             "radiator_outer_header_52": radiator_outer_header_52,
+            "outer_header_radiation_sink": outer_header_radiation_sink,
             "header_to_cold_split": header_to_cold_split,
             "cold_return_branch_1": build["inlet_pipe_1"],
             "cold_return_branch_2_3_rep": build["inlet_pipe_23"],
@@ -576,11 +666,18 @@ def build_v10_case_a_system(
             "single_ring_branch_flow_design_kg_s": single_ring_branch_flow,
             "single_tfe_flow_design_kg_s": tfe_single_flow,
             "coolant_material": coolant_material,
+            "target_core_inlet_t_k": float(inlet_temperature_k),
             "physical_ring_count": V8_PHYSICAL_RING_COUNT,
             "passive_tfe_names": ["Ring3_Open"],
             "external_pipe_n_nodes": int(external_pipe_n_nodes),
             "connector_volume_m3": float(connector_volume_m3),
             "connector_length_m": float(connector_length_m),
+            "ring_emissivity": effective_ring_emissivity,
+            "hp_emissivity": effective_hp_emissivity,
+            "fin_emissivity": effective_fin_emissivity,
+            "outer_header_emissivity": float(outer_header_emissivity),
+            "outer_header_t_space_k": effective_outer_header_t_space,
+            "outer_header_area_scale": float(outer_header_area_scale),
         }
     )
     return build
@@ -685,10 +782,62 @@ def v10_temperature_diagnostics(build: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _ring_wall_radiation_w(build: Dict[str, Any]) -> float:
+    total = 0.0
+    for solid in build.get("ring", {}).get("solids", []):
+        for boundary in getattr(solid, "boundaries", {}).values():
+            if boundary is None:
+                continue
+            if hasattr(boundary, "compute_net_flux_for_solver"):
+                boundary.compute_net_flux_for_solver()
+            for condition in getattr(boundary, "conditions", []):
+                if hasattr(condition, "G_rad") and hasattr(condition, "q_flux"):
+                    total += -float(np.sum(condition.q_flux))
+    return total
+
+
+def v10_radiation_diagnostics(build: Dict[str, Any]) -> Dict[str, Any]:
+    outer_sink = build.get("outer_header_radiation_sink")
+    outer_header_radiation_w = (
+        float(getattr(outer_sink, "last_radiation_w", 0.0))
+        if outer_sink is not None
+        else 0.0
+    )
+    hp_fin_radiation_w = 0.0
+    hp_fin_radiation_macro_w = 0.0
+    for ring_hp in build.get("ring", {}).get("ring_hps", []):
+        rejection = float(ring_hp.get_total_heat_rejection_scaled())
+        hp_fin_radiation_w += rejection
+        hp_fin_radiation_macro_w += 2.0 * rejection
+    core_inlet_t = float(build["core_inlet_connector"].T)
+    return {
+        "target_core_inlet_t_k": float(build.get("target_core_inlet_t_k", np.nan)),
+        "core_inlet_minus_target_k": core_inlet_t - float(build.get("target_core_inlet_t_k", core_inlet_t)),
+        "radiator_cooling_delta_t_k": (
+            float(build["core_outlet_connector"].T)
+            - float(build["core_inlet_connector"].T)
+        ),
+        "radiator_outer_to_core_inlet_delta_t_k": (
+            float(build["radiator_outer_header_52"].volumes[-1].T)
+            - float(build["core_inlet_connector"].T)
+        ),
+        "ring_emissivity": float(build.get("ring_emissivity", np.nan)),
+        "hp_emissivity": float(build.get("hp_emissivity", np.nan)),
+        "fin_emissivity": float(build.get("fin_emissivity", np.nan)),
+        "outer_header_emissivity": float(build.get("outer_header_emissivity", 0.0)),
+        "outer_header_t_space_k": float(build.get("outer_header_t_space_k", np.nan)),
+        "outer_header_radiation_w": outer_header_radiation_w,
+        "ring_wall_radiation_w": _ring_wall_radiation_w(build),
+        "hp_fin_radiation_w": hp_fin_radiation_w,
+        "hp_fin_radiation_macro_w": hp_fin_radiation_macro_w,
+    }
+
+
 def v10_basic_diagnostics(build: Dict[str, Any]) -> Dict[str, Any]:
     electric = _case_a_electric_diagnostics(build["core"])
     flow = v10_flow_diagnostics(build)
     temp = v10_temperature_diagnostics(build)
+    radiation = v10_radiation_diagnostics(build)
     core_heat_power_w = sum(
         float(tfe.neutronic_data.total_power) * float(build["ring_multipliers"][name])
         for name, tfe in build["tfes"].items()
@@ -702,6 +851,7 @@ def v10_basic_diagnostics(build: Dict[str, Any]) -> Dict[str, Any]:
         **electric,
         **flow,
         **temp,
+        **radiation,
     }
 
 

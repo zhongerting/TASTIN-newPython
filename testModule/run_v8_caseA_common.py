@@ -99,11 +99,11 @@ def get_solid_ode_methods(build: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
-def apply_wire_resistance(core: Any) -> None:
+def apply_wire_resistance(core: Any, scale: float = 1.0) -> None:
     if core.thermo_calc is None:
         return
     n_elem = core.thermo_calc.N_elem
-    wire_res = np.asarray(WIRE_RESISTANCE_OHM, dtype=float)
+    wire_res = np.asarray(WIRE_RESISTANCE_OHM, dtype=float) * float(scale)
     core.thermo_calc._input_data.resistanceWire = np.tile(wire_res, (n_elem, 1))
     core.thermo_calc.build()
     core.thermo_calc.calculate(verbose=False)

@@ -60,6 +60,22 @@ class TestV10CaseATopology(unittest.TestCase):
         self.assertIsInstance(self.build["j_cold_23_out"], MacroFlowJunction)
         self.assertEqual(self.build["j_cold_23_in"].multiplier, 2.0)
         self.assertEqual(self.build["j_cold_23_out"].multiplier, 2.0)
+        self.assertIsNone(self.build["outer_header_radiation_sink"])
+
+    def test_radiator_tuning_parameters_are_optional(self):
+        build = build_v10_case_a_system(
+            pipe_n_nodes=1,
+            external_pipe_n_nodes=1,
+            ring_emissivity=0.15,
+            hp_emissivity=0.6,
+            fin_emissivity=0.6,
+            outer_header_emissivity=0.2,
+        )
+        self.assertAlmostEqual(build["ring_emissivity"], 0.15)
+        self.assertAlmostEqual(build["hp_emissivity"], 0.6)
+        self.assertAlmostEqual(build["fin_emissivity"], 0.6)
+        self.assertAlmostEqual(build["outer_header_emissivity"], 0.2)
+        self.assertIsNotNone(build["outer_header_radiation_sink"])
 
     def test_initial_flow_diagnostics_close_at_design_values(self):
         diag = v10_flow_diagnostics(self.build)
