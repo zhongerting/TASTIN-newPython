@@ -550,3 +550,55 @@ Recommended first checks:
 ```
 
 Cold-start V9 hydraulic/topology smoke should use `--disable-tec-coupled`, because the uniform cold initial TFE state can make the first ThermoCalc solve return non-finite Joule heat before a migrated warm thermal state is available. TEC-coupled V9 runs should start from a V9-compatible warm restart or a future dedicated V8-to-V9 thermal migration path.
+
+## 18. 2026-06-12 V10 CaseA integrated open loop
+
+V10 CaseA is implemented in `testModule/test_core_assemble_v10_caseA.py` and `testModule/run_v10_caseA_open_loop.py`. It is the first integrated open-loop chain that combines the V9 core/external-piping skeleton with the current 6-segment one-ring collector model from `CoolantLoop/model_collector_ring_6segment_v9_interface.py`.
+
+The hydraulic path is:
+
+```text
+fixed-flow inlet
+  -> CoreInletConnector
+  -> V8/V9 representative TFE channels
+  -> CoreOutletConnector
+  -> HotOutletBranch_1/2/3
+  -> MacroFlowJunction(multiplier=2) into InletMix_I1/I2/I3
+  -> A1..A6 one explicit collector ring with RingHP heat pipes
+  -> OutletMix_O1/O2/O3
+  -> Manifold_1/2/3
+  -> MacroFlowJunction(multiplier=2) into V10_RadiatorManifoldMerge
+  -> RadiatorInnerHeader_53
+  -> RadiatorOuterHeader_52
+  -> ColdReturnBranch_1 + ColdReturnBranch_2_3_Rep(multiplier=2)
+  -> fixed-pressure outlet
+```
+
+Important constraints:
+
+- V10 keeps V9's open-loop boundary convention: the inlet is fixed mass flow and the only fixed pressure reference is `V10_OutletBoundary_FixedPressure`; it does not add a pump or pressurizer.
+- The V9 duplicate radiator-outlet-side branches before the collector ring are removed. The collector ring supplies `InletMix_I*`, `A1..A6`, `OutletMix_O*`, and `Manifold_*`.
+- One explicit collector ring represents two symmetric physical rings. Hot macro branches of about `0.433 kg/s` enter the explicit ring through `MacroFlowJunction(multiplier=2)` at about `0.2167 kg/s`; the manifold side uses the matching single-ring-to-macro merge.
+- `reset_v10_design_flows(..., preserve_ring_restart_flows=True)` must be used after V9/ring restart injection and after V10 restart loading. It resets the external open-chain boundary/core/cold-return flows while preserving collector-ring internal `A*`, `J_I*/J_A*`, `OutletMix -> Manifold`, and `Manifold_*_Junc_*` flow distribution copied from the ring restart.
+- V10 restart files are topology-specific. Do not load V8 or V9 restart files directly through `--restart-in`; use the V10 runner's V9+ring injection path to create an initial V10 restart first.
+
+Initial restart creation:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v10_caseA_open_loop.py `
+  --create-init-only `
+  --output-dir testModule\v10_caseA_open_loop_init `
+  --case-prefix v10_caseA_open_loop_init `
+  --max-dt 0.05
+```
+
+The 2026-06-12 initialization copied 36 core solids from `testModule/v9_caseA_open_loop_tec_3000s/v9_caseA_open_loop_tec_3000s_latest_restart.npz`, 24 collector-ring solids from `CoolantLoop/collector_ring_6segment_v9_interface_500s_from200s_restart.npz`, 211 V9 fluid volumes, and 63 ring fluid volumes. The initial V10 absolute time is `5010 s`.
+
+Verified checks:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m py_compile testModule\test_core_assemble_v10_caseA.py testModule\run_v10_caseA_open_loop.py testModule\test_v10_caseA_topology.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m unittest testModule.test_v10_caseA_topology
+```
+
+Both passed. A TEC-coupled `40 s` smoke from the injected V10 restart also completed with `max_dt=0.05 s`; the final record was approximately `Tin=743.000 K`, `Tcore_out=838.918 K`, `Tring_out=762.823 K`, and `Pel=4874.558 W`. A later `max_dt=0.1 s` continuation did not numerically fail, but was too slow for the 300 s command timeout and only recorded the first `20 s`. Current V10 long runs should therefore use conservative time steps and be treated as expensive until the integrated hydraulic/thermal startup is further optimized.

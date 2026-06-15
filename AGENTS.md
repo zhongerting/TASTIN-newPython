@@ -142,6 +142,8 @@ V9 CaseA 位于 `testModule/test_core_assemble_v9_caseA.py`，是基于 V8 堆�
 
 后续把 V9 与 `CoolantLoop` 的 6 段集流环连接时，不能把三条 V9 热出口支路直接接到单个显式集流环的 `I1/I2/I3`。当前集流环模型只显式建一套物理集流环，并用 `MacroFlowJunction(multiplier=2)` 代表第二套对称集流环；集成链条中热出口支路到 `I1/I2/I3` 需要宏观到单环的 `multiplier=2` 分流，`O1/O2/O3` 回到 V9 冷侧管路也需要匹配的单环到宏观汇流。
 
+V10 CaseA 位于 `testModule/test_core_assemble_v10_caseA.py`，运行入口为 `testModule/run_v10_caseA_open_loop.py`。V10 已把 V9 堆芯侧与 `CoolantLoop/model_collector_ring_6segment_v9_interface.py` 的 6 段集流环连接为开式大链条，沿用固定入口总流量和出口定压边界，不添加泵或稳压器。V10 初始化应通过 runner 从 V9 带 TEC restart 和集流环接口 restart 注入状态；V8/V9 restart 不能直接作为 V10 `--restart-in` 使用。注入后必须保留集流环内部环段和 Manifold 的 restart 流量分布，只重置外部边界、堆芯通道、热出口和冷回流设计流量。
+
 2026-06-11 V9 已完成无 TEC 预热和带 TEC 续算验证：`testModule/v9_caseA_open_loop_tec_3000s/` 最终绝对时间约 `5010 s`，入口温度约 `743.000 K`，出口温度约 `838.944 K`，进出口温差约 `95.944 K`，冷却剂焓升约 `108745.775 W`，端电功率约 `4870.107 W`。该目录是本地运行产物，不应默认提交；需要复现实验时优先使用 V9 runner 和 V9 restart。
 
 ### 5.2 集流环冷却回路路径

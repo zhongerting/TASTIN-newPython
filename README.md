@@ -111,6 +111,8 @@ V9 暂不包含集流环、热管、泵和局部阻力系数；`CoreInletConnect
 
 V9 与集流环模型连接时需要保留 `CoolantLoop` 当前“一套显式集流环 + `MacroFlowJunction(multiplier=2)` 代表第二套对称集流环”的约定。三条 V9 热出口支路不能直接硬接到单个显式集流环的 `I1/I2/I3`，应先通过 `multiplier=2` 宏观到单环分流；`O1/O2/O3` 返回 V9 冷侧管路时也需要匹配汇流。
 
+V10 CaseA 位于 [`testModule/test_core_assemble_v10_caseA.py`](./testModule/test_core_assemble_v10_caseA.py)，运行入口是 [`testModule/run_v10_caseA_open_loop.py`](./testModule/run_v10_caseA_open_loop.py)。V10 将 V9 堆芯侧和 `CoolantLoop/model_collector_ring_6segment_v9_interface.py` 的 6 段集流环连接为完整开式链条：固定流量入口 -> 堆芯 -> 三条热出口支路 -> 单显式集流环及热管 -> 三条 Manifold -> 辐射器总管 -> 冷回流支路 -> 固定压力出口。V10 默认从 V9 带 TEC restart 和集流环接口 restart 注入初值，不应直接加载 V8/V9 restart 作为 V10 `--restart-in`。
+
 ### 集流环冷却回路
 
 `CoolantLoop/` 当前有两个生产模型：
