@@ -743,3 +743,28 @@ G_cond = k_gas * A_in / gap_width
 - `Hydrodynamics/Components.py`
 - `Hydrodynamics/HydraulicNetwork.py`
 - `SystemManager.py`
+
+## 16. 2026-06-15 `FluidSolidCouple` optional local implicit exchange
+
+`FluidSolidCouple` now supports two time-coupling schemes:
+
+- `coupling_time_scheme="current"` is the default and preserves the previous behavior: the solid side receives a Robin `ResistanceBC`, and the fluid side receives the semi-implicit source `Q_fluid = lambda * T_wall - lambda * T_fluid`.
+- `coupling_time_scheme="local_implicit"` is opt-in. It solves each fluid-solid interface node as a local two-capacitance exchange over the current time step and applies the result as equal-and-opposite discrete powers.
+
+For local implicit exchange:
+
+```text
+delta_old = T_wall - T_fluid
+C_eff = C_solid * C_fluid / (C_solid + C_fluid)
+delta_new = delta_old / (1 + dt * lambda * (1/C_solid + 1/C_fluid))
+q_to_fluid = C_eff * (delta_old - delta_new) / dt
+q_to_solid = -q_to_fluid
+```
+
+Implementation notes:
+
+- Local implicit mode requires `solid_node_capacitance`; missing capacitance is a hard error only when this mode is selected.
+- The original Robin `ResistanceBC` object is retained for compatibility but is set to near-adiabatic in local implicit mode.
+- A dedicated `FluxBC` applies `q_to_solid` on the solid side, while `FluidChannel.add_coupling_source_distribution()` receives `q_to_fluid` as an explicit bounded source with zero implicit coefficient.
+- `get_max_stable_dt()` no longer constrains the global step by the explicit fluid-solid exchange time constant in local implicit mode. Fluid CFL, `max_dt`, growth limits, and convergence controls still apply.
+- Existing cases and restart files remain compatible because the default scheme is still `current`.

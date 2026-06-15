@@ -183,7 +183,8 @@ class FluidSolidCouple:
                  solid_boundary_region: 'BoundaryRegion',
                  heated_perimeter: float,
                  correlation_func: Callable[[float, float, float], float],
-                 solid_node_capacitance: Optional[np.ndarray] = None):
+                 solid_node_capacitance: Optional[np.ndarray] = None,
+                 coupling_time_scheme: str = "current"):
         """
         初始化耦合器
 
@@ -206,6 +207,10 @@ class FluidSolidCouple:
         self._last_lambda = None
         self._interface_relaxation_previous = None
         self._last_coupling_diagnostics = None
+        self._local_implicit_flux_bc = None
+        self._local_implicit_min_capacitance = 1.0e-10
+        self._local_implicit_min_lambda = 1.0e-10
+        self.set_coupling_time_scheme(coupling_time_scheme)
 
         # --- 1. 校验网格一致性 ---
         # 确保流体节点数与固体边界的节点数一致
@@ -240,11 +245,65 @@ class FluidSolidCouple:
             R_ext=R_init
         )
 
+    def set_coupling_time_scheme(self, scheme: str):
+        """Set fluid-solid time coupling scheme without changing legacy defaults."""
+        if scheme not in ("current", "local_implicit"):
+            raise ValueError(
+                f"[{self.name}] Unknown coupling_time_scheme={scheme!r}; "
+                "expected 'current' or 'local_implicit'."
+            )
+        self.coupling_time_scheme = scheme
+        if scheme == "current" and self._local_implicit_flux_bc is not None:
+            self._local_implicit_flux_bc.update_params(np.zeros(self.fluid.n_nodes, dtype=float))
+
     def set_solid_capacitance(self, capacitance_arr: np.ndarray):
         """[辅助] 更新/设置固体节点热容"""
         if capacitance_arr.shape[0] != self.fluid.n_nodes:
             raise ValueError(f"Capacitance shape mismatch: {capacitance_arr.shape}")
         self.solid_node_capacitance = capacitance_arr
+
+    def _fluid_node_capacitance(self, T_f: np.ndarray, P_f: np.ndarray, rho: np.ndarray) -> np.ndarray:
+        Cp_f = np.asarray(self.fluid.material.heat_capacity(T_f, P_f), dtype=float)
+        flow_area = getattr(self.fluid, 'area', getattr(self.fluid, 'flow_area', 1.0))
+        V_fluid = np.asarray(flow_area, dtype=float) * self.fluid.node_length
+        return np.asarray(rho, dtype=float) * V_fluid * Cp_f
+
+    @staticmethod
+    def compute_local_implicit_exchange(
+        delta_old: np.ndarray,
+        lambda_vals: np.ndarray,
+        C_solid: np.ndarray,
+        C_fluid: np.ndarray,
+        dt: float,
+        min_capacitance: float = 1.0e-10,
+        min_lambda: float = 1.0e-10,
+    ):
+        """Return (q_to_fluid, delta_new, C_eff) for local two-capacitance exchange."""
+        if dt is None or dt <= 0.0:
+            raise ValueError("local implicit exchange requires positive dt.")
+
+        delta = np.asarray(delta_old, dtype=float)
+        lam = np.maximum(np.asarray(lambda_vals, dtype=float), min_lambda)
+        Cs = np.maximum(np.asarray(C_solid, dtype=float), min_capacitance)
+        Cf = np.maximum(np.asarray(C_fluid, dtype=float), min_capacitance)
+        C_eff = (Cs * Cf) / (Cs + Cf)
+        rate = lam * (1.0 / Cs + 1.0 / Cf)
+        delta_new = delta / (1.0 + float(dt) * rate)
+        q_to_fluid = C_eff * (delta - delta_new) / float(dt)
+        q_to_fluid = np.nan_to_num(q_to_fluid, nan=0.0, posinf=0.0, neginf=0.0)
+        delta_new = np.nan_to_num(delta_new, nan=0.0, posinf=0.0, neginf=0.0)
+        C_eff = np.nan_to_num(C_eff, nan=0.0, posinf=0.0, neginf=0.0)
+        return q_to_fluid, delta_new, C_eff
+
+    def _ensure_local_implicit_ready(self):
+        if self.solid_node_capacitance is None:
+            raise ValueError(
+                f"[{self.name}] local_implicit coupling requires solid_node_capacitance."
+            )
+        if self._local_implicit_flux_bc is None:
+            self._local_implicit_flux_bc = self.solid_bound.add_flux_condition(
+                np.zeros(self.fluid.n_nodes, dtype=float)
+            )
 
     def reset_interface_relaxation(self):
         self._interface_relaxation_previous = None
@@ -286,7 +345,7 @@ class FluidSolidCouple:
         return dict(self._last_coupling_diagnostics)
 
     @TEASAProfiler.profile
-    def execute(self, interface_relaxation: float = 1.0):
+    def execute(self, interface_relaxation: float = 1.0, dt: Optional[float] = None):
         """
         执行耦合计算步骤:
         1. 获取状态 (Fluid T, Solid T, Flow properties)
@@ -303,7 +362,7 @@ class FluidSolidCouple:
         P_f = self.fluid.pressure_vector
         if hasattr(self.solid_bound, "compute_net_flux_for_solver"):
             self.solid_bound.compute_net_flux_for_solver()
-        T_wall = np.asarray(self.solid_bound.T_surface, dtype=float)
+        T_wall = np.asarray(self.solid_bound.T_surface, dtype=float).copy()
         rho = self.fluid.density_vector
         vel = self.fluid.velocity_vector  # 特征流速
 
@@ -385,8 +444,6 @@ class FluidSolidCouple:
             self.solid_bound.compute_net_flux_for_solver()
 
         # [关键数据获取] 从 BoundaryRegion 获取当前壁面温度
-        T_wall = np.asarray(self.solid_bound.T_surface, dtype=float)
-
         current_state = {
             "lambda": safe_lambda,
             "T_f": T_f,
@@ -413,18 +470,64 @@ class FluidSolidCouple:
         relaxed_T_f = relaxed_state["T_f"]
         relaxed_T_wall = relaxed_state["T_wall"]
 
-        self.solid_bc.R_ext[:] = 1.0 / relaxed_lambda
-        self.solid_bc.T_ext[:] = relaxed_T_f
+        scheme = self.coupling_time_scheme
+        local_implicit_info = None
 
-        explicit_arr = relaxed_lambda * relaxed_T_wall
-        implicit_arr = relaxed_lambda
+        if scheme == "local_implicit":
+            self._ensure_local_implicit_ready()
+            if dt is None or dt <= 0.0:
+                raise ValueError(f"[{self.name}] local_implicit coupling requires positive dt.")
+
+            C_solid = np.asarray(self.solid_node_capacitance, dtype=float)
+            C_fluid = self._fluid_node_capacitance(relaxed_T_f, P_f, rho)
+            delta_old = relaxed_T_wall - relaxed_T_f
+            q_to_fluid, delta_new, C_eff = self.compute_local_implicit_exchange(
+                delta_old,
+                relaxed_lambda,
+                C_solid,
+                C_fluid,
+                float(dt),
+                min_capacitance=self._local_implicit_min_capacitance,
+                min_lambda=self._local_implicit_min_lambda,
+            )
+
+            self.solid_bc.R_ext[:] = 1.0e30
+            self.solid_bc.T_ext[:] = relaxed_T_f
+            self._local_implicit_flux_bc.update_params(-q_to_fluid)
+
+            explicit_arr = q_to_fluid
+            implicit_arr = np.zeros_like(q_to_fluid)
+            tau_inv = relaxed_lambda * (
+                1.0 / np.maximum(C_solid, self._local_implicit_min_capacitance)
+                + 1.0 / np.maximum(C_fluid, self._local_implicit_min_capacitance)
+            )
+            local_implicit_info = {
+                "local_implicit_dt": float(dt),
+                "local_implicit_dt_over_tau_max": float(np.max(float(dt) * tau_inv)) if tau_inv.size else 0.0,
+                "local_implicit_q_to_fluid_sum_w": float(np.sum(q_to_fluid)) if q_to_fluid.size else 0.0,
+                "local_implicit_energy_mismatch_w": float(np.sum(q_to_fluid - q_to_fluid)) if q_to_fluid.size else 0.0,
+                "local_implicit_max_abs_delta_old_k": float(np.max(np.abs(delta_old))) if delta_old.size else 0.0,
+                "local_implicit_max_abs_delta_new_k": float(np.max(np.abs(delta_new))) if delta_new.size else 0.0,
+                "local_implicit_min_c_eff_j_per_k": float(np.min(C_eff)) if C_eff.size else 0.0,
+            }
+        else:
+            if self._local_implicit_flux_bc is not None:
+                self._local_implicit_flux_bc.update_params(np.zeros(self.fluid.n_nodes, dtype=float))
+            self.solid_bc.R_ext[:] = 1.0 / relaxed_lambda
+            self.solid_bc.T_ext[:] = relaxed_T_f
+
+            explicit_arr = relaxed_lambda * relaxed_T_wall
+            implicit_arr = relaxed_lambda
 
         # [关键调用] 使用 FluidChannel 提供的半隐式接口
         self.fluid.add_coupling_source_distribution(explicit_arr, implicit_arr)
 
         if previous_shapes_match:
-            previous_explicit = previous_state["lambda"] * previous_state["T_wall"]
-            previous_implicit = previous_state["lambda"]
+            previous_explicit = previous_state.get(
+                "explicit",
+                previous_state["lambda"] * previous_state["T_wall"],
+            )
+            previous_implicit = previous_state.get("implicit", previous_state["lambda"])
             delta_lambda = self._max_abs_delta_or_none(relaxed_lambda, previous_state["lambda"])
             delta_T_f = self._max_abs_delta_or_none(relaxed_T_f, previous_state["T_f"])
             delta_T_wall = self._max_abs_delta_or_none(relaxed_T_wall, previous_state["T_wall"])
@@ -440,6 +543,7 @@ class FluidSolidCouple:
         self._last_coupling_diagnostics = {
             "name": self.name,
             "type": type(self).__name__,
+            "coupling_time_scheme": scheme,
             "interface_relaxation": float(interface_relaxation),
             "relaxed": bool(interface_relaxation < 1.0 and previous_shapes_match),
             "has_previous_state": bool(previous_shapes_match),
@@ -457,6 +561,8 @@ class FluidSolidCouple:
             "max_Pr": float(np.max(Pr)) if np.asarray(Pr).size else 0.0,
             "max_Nu": float(np.max(Nu)) if np.asarray(Nu).size else 0.0,
         }
+        if local_implicit_info is not None:
+            self._last_coupling_diagnostics.update(local_implicit_info)
 
         # 缓存当前时间步的耦合系数，用于稳定性分析和下次迭代的松弛计算
         self._last_lambda = relaxed_lambda.copy()
@@ -464,6 +570,8 @@ class FluidSolidCouple:
             "lambda": relaxed_lambda.copy(),
             "T_f": np.asarray(relaxed_T_f, dtype=float).copy(),
             "T_wall": np.asarray(relaxed_T_wall, dtype=float).copy(),
+            "explicit": np.asarray(explicit_arr, dtype=float).copy(),
+            "implicit": np.asarray(implicit_arr, dtype=float).copy(),
         }
 
     # =========================================================================
@@ -480,6 +588,9 @@ class FluidSolidCouple:
         :return: 建议的时间步长
         """
         # 如果未提供固体热容信息，无法计算限制，返回上限
+        if getattr(self, "coupling_time_scheme", "current") == "local_implicit":
+            return max_limit
+
         if self.solid_node_capacitance is None:
             return max_limit
 

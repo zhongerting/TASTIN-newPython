@@ -213,7 +213,7 @@ class SystemManager:
                         if hasattr(boundary, 'compute_net_flux_for_solver'):
                             boundary.compute_net_flux_for_solver()
 
-    def _run_couplers(self, interface_relaxation: float = 1.0, current_time: float = None):
+    def _run_couplers(self, interface_relaxation: float = 1.0, current_time: float = None, dt: float = None):
         self._refresh_solid_boundary_cache(update_flux=False, current_time=current_time)
 
         for coupler in self.couplers:
@@ -224,7 +224,7 @@ class SystemManager:
 
         for coupler in self.couplers:
             if isinstance(coupler, FluidSolidCouple):
-                coupler.execute(interface_relaxation=interface_relaxation)
+                coupler.execute(interface_relaxation=interface_relaxation, dt=dt)
             elif hasattr(coupler, 'execute'):
                 coupler.execute()
 
@@ -288,6 +288,7 @@ class SystemManager:
                 self._run_couplers(
                     interface_relaxation=interface_relaxation,
                     current_time=coupling_time,
+                    dt=dt,
                 )
                 coupler_diagnostics = self._collect_coupler_diagnostics()
                 diagnostics["coupler_diagnostics_by_iteration"].append(coupler_diagnostics)

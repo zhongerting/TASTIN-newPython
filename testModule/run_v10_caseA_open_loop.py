@@ -74,6 +74,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--connector-length-m", type=float, default=0.02)
     parser.add_argument("--coolant-material", default=DEFAULT_COOLANT_MATERIAL)
     parser.add_argument(
+        "--fluid-solid-coupling-scheme",
+        choices=("current", "local_implicit"),
+        default="current",
+    )
+    parser.add_argument(
         "--solid-ode-method",
         type=parse_solid_ode_method,
         default=DEFAULT_SOLID_ODE_METHOD,
@@ -111,6 +116,27 @@ def append_row(path: Path, fieldnames: List[str], row: Dict[str, Any], *, write_
         if write_header:
             writer.writeheader()
         writer.writerow(row)
+
+
+def apply_fluid_solid_coupling_scheme(system: Any, scheme: str) -> int:
+    count = 0
+    missing_capacitance: List[str] = []
+    for coupler in getattr(system, "couplers", []):
+        setter = getattr(coupler, "set_coupling_time_scheme", None)
+        if not callable(setter):
+            continue
+        if scheme == "local_implicit" and getattr(coupler, "solid_node_capacitance", None) is None:
+            missing_capacitance.append(getattr(coupler, "name", type(coupler).__name__))
+            continue
+        setter(scheme)
+        count += 1
+    if missing_capacitance:
+        names = ", ".join(missing_capacitance)
+        raise ValueError(
+            "local_implicit fluid-solid coupling requires solid_node_capacitance for: "
+            f"{names}"
+        )
+    return count
 
 
 def _load_npz_dict(path: str) -> Dict[str, np.ndarray]:
@@ -334,6 +360,11 @@ def build_case(args: argparse.Namespace) -> Dict[str, Any]:
         apply_wire_resistance(core)
         core._last_thermo_update_time = float(system.global_time)
     core.pre_step(0.0, float(system.global_time))
+    build["fluid_solid_coupling_scheme"] = args.fluid_solid_coupling_scheme
+    build["fluid_solid_coupler_count"] = apply_fluid_solid_coupling_scheme(
+        system,
+        args.fluid_solid_coupling_scheme,
+    )
     build["solid_ode_method"] = args.solid_ode_method
     build["solid_ode_methods"] = get_solid_ode_methods(build)
     build["wire_resistance_ohm"] = get_wire_resistance(core)
@@ -356,6 +387,8 @@ def write_latest_state(path: Path, build: Dict[str, Any], args: argparse.Namespa
         "max_dt_s": float(args.max_dt),
         "inner_iter": int(args.inner_iter),
         "coolant_material": build["coolant_material"],
+        "fluid_solid_coupling_scheme": build["fluid_solid_coupling_scheme"],
+        "fluid_solid_coupler_count": build["fluid_solid_coupler_count"],
         "solid_ode_method": build["solid_ode_method"],
         "solid_ode_methods": get_solid_ode_methods(build),
         "wire_resistance_ohm": build["wire_resistance_ohm"],
@@ -393,9 +426,13 @@ def main() -> None:
     print(f"start_time={start_time:.6f}, target_time={target_time:.6f}", flush=True)
     print(f"history_csv={history_path}", flush=True)
     print(f"latest_restart={latest_restart_path}", flush=True)
+    print(f"fluid_solid_coupling_scheme={build['fluid_solid_coupling_scheme']}", flush=True)
     print(f"migration_summary={build.get('migration_summary')}", flush=True)
 
-    initial_record = v10_basic_diagnostics(build)
+    initial_record = {
+        **v10_basic_diagnostics(build),
+        "fluid_solid_coupling_scheme": build["fluid_solid_coupling_scheme"],
+    }
     system.save_global_state(str(latest_restart_path))
     write_latest_state(
         latest_state_path,
@@ -445,6 +482,7 @@ def main() -> None:
                 "relative_time_s": float(system.global_time) - start_time,
                 "max_dt_s": float(args.max_dt),
                 "inner_iter": int(args.inner_iter),
+                "fluid_solid_coupling_scheme": build["fluid_solid_coupling_scheme"],
                 "solid_ode_method": build["solid_ode_method"],
                 "wire_resistance_ohm": build["wire_resistance_ohm"],
                 "tec_coupled_enabled": build["tec_coupled_enabled"],

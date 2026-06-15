@@ -161,3 +161,11 @@ manager.step(dt=0.1, inner_iter=5, convergence_tol=1.0e-3)
 - `Couplers.py`
 - `Neutronics/PointReactor.py`
 - `SystemManager.py`
+
+## 9. 2026-06-15 local implicit fluid-solid coupling
+
+`FluidSolidCouple` has an opt-in `coupling_time_scheme="local_implicit"` mode. The default remains `"current"`, so existing builders, tests, and restart workflows keep their previous Robin-boundary plus fluid semi-implicit-source behavior.
+
+When local implicit mode is enabled, `SystemManager.step(dt, ...)` passes `dt` into `FluidSolidCouple.execute(...)`. The coupler solves the local two-capacitance heat exchange analytically for each interface node, applies `q_to_solid = -q_to_fluid` through a solid-side `FluxBC`, and adds `q_to_fluid` to the fluid channel with zero implicit coefficient. This removes the explicit fluid-solid exchange time constant from `FluidSolidCouple.get_max_stable_dt()`, but does not override fluid hydraulic stability, `max_dt`, or convergence-based time-step reductions.
+
+Do not enable local implicit mode on a `FluidSolidCouple` without `solid_node_capacitance`; the coupler intentionally raises an error instead of silently falling back.

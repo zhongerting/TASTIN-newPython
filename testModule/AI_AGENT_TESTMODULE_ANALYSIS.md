@@ -602,3 +602,29 @@ Verified checks:
 ```
 
 Both passed. A TEC-coupled `40 s` smoke from the injected V10 restart also completed with `max_dt=0.05 s`; the final record was approximately `Tin=743.000 K`, `Tcore_out=838.918 K`, `Tring_out=762.823 K`, and `Pel=4874.558 W`. A later `max_dt=0.1 s` continuation did not numerically fail, but was too slow for the 300 s command timeout and only recorded the first `20 s`. Current V10 long runs should therefore use conservative time steps and be treated as expensive until the integrated hydraulic/thermal startup is further optimized.
+
+## 19. 2026-06-15 V10 optional local implicit fluid-solid exchange
+
+`testModule/run_v10_caseA_open_loop.py` now accepts:
+
+```powershell
+--fluid-solid-coupling-scheme current
+--fluid-solid-coupling-scheme local_implicit
+```
+
+The default is `current`, which preserves previous V10 behavior and remains compatible with old restart files. `local_implicit` switches all `FluidSolidCouple` objects that provide `solid_node_capacitance` to the local two-capacitance exchange scheme implemented in `Solvers/Couplers.py`. The runner records `fluid_solid_coupling_scheme` and `fluid_solid_coupler_count` in `latest_state.json`; history rows record the selected scheme.
+
+Recommended first V10 local-implicit smoke:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v10_caseA_open_loop.py `
+  --restart-in testModule\v10_caseA_open_loop_rk45_1000s\v10_caseA_open_loop_rk45_1000s_latest_restart.npz `
+  --duration 100 `
+  --record-interval 50 `
+  --restart-interval 50 `
+  --max-dt 0.1 `
+  --solid-ode-method RK45 `
+  --fluid-solid-coupling-scheme local_implicit
+```
+
+Treat `max_dt=0.5 s` as an exploratory setting, not an acceptance criterion, because the previous explicit-coupling V10 run developed hydraulic nonconvergence near absolute time `12237.6 s`.
