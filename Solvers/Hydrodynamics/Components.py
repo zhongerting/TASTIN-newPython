@@ -471,6 +471,7 @@ class FlowJunction:
                  flow_area: Optional[float] = None,
                  k_loss: float = 0.0,
                  custom_length: Optional[float] = None,
+                 hydraulic_diam: Optional[float] = None,
                  dynamic_loss_params: Optional[dict] = None):
         """
         初始化连接
@@ -480,6 +481,7 @@ class FlowJunction:
         :param flow_area: 连接截面积 [m^2] (默认取两端较小值)
         :param k_loss: 形状阻力系数 (弯头/阀门)
         :param custom_length: 自定义惯性长度 [m] (默认取两端长度的一半之和)
+        :param hydraulic_diam: 连接件自身水力直径 [m]；默认回退到两端控制体直径
         :param dynamic_loss_params: 当 k_loss < 0 时，所需的动态阻力参数配置字典
         """
         self.name = name
@@ -498,6 +500,8 @@ class FlowJunction:
         else:
             self.length = custom_length
 
+        self.hydraulic_diameter = None if hydraulic_diam is None else float(hydraulic_diam)
+        self.d_h = 0.0 if self.hydraulic_diameter is None else self.hydraulic_diameter
         self.k_loss = k_loss
 
         # [新增] 保存动态计算所需的参数配置
@@ -642,10 +646,9 @@ class FlowJunction:
         if v_abs < 1e-10:
             return 0.0
 
-        # 获取特征尺寸 D_eff (水力直径)
-        # 这里优先使用上游节点的 D_h (施主原则或几何近似)
-        # 如果 FlowJunction 未来增加了自身的 D_h 属性，应改用 self.d_h
-        D_eff = self.from_vol.d_h
+        # 获取特征尺寸 D_eff (水力直径)。连接件显式给定时优先使用自身水力直径，
+        # 否则保持旧逻辑，按施主/相邻控制体直径兜底。
+        D_eff = self.hydraulic_diameter if self.hydraulic_diameter is not None else self.from_vol.d_h
 
         # 如果上游是边界/大容器(D=0)，则使用下游管道的直径作为特征尺寸
         if D_eff < 1e-9:

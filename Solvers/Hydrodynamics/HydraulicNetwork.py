@@ -150,6 +150,7 @@ class HydraulicNetwork:
         self.idx_to_vec = np.zeros(self.n_junc, dtype=np.int32)
         self.Dh_from_vec = np.zeros(self.n_junc)
         self.Dh_to_vec = np.zeros(self.n_junc)
+        self.junc_has_own_dh_vec = np.zeros(self.n_junc, dtype=bool)
         self.L_from_half_vec = np.zeros(self.n_junc)
         self.L_to_half_vec = np.zeros(self.n_junc)
         self.A_from_node_vec = np.zeros(self.n_junc)
@@ -343,10 +344,18 @@ class HydraulicNetwork:
             self.A_junc_vec[j_idx] = junc.area
             self.L_junc_vec[j_idx] = junc.length
             self.K_loss_vec[j_idx] = junc.k_loss
-            self.Dh_from_vec[j_idx] = vol_from.d_h
-            self.Dh_to_vec[j_idx] = vol_to.d_h
-            self.L_from_half_vec[j_idx] = 0.5 * vol_from.len
-            self.L_to_half_vec[j_idx] = 0.5 * vol_to.len
+            junc_dh = getattr(junc, 'hydraulic_diameter', None)
+            if junc_dh is not None and float(junc_dh) > 0.0:
+                self.junc_has_own_dh_vec[j_idx] = True
+                self.Dh_from_vec[j_idx] = float(junc_dh)
+                self.Dh_to_vec[j_idx] = float(junc_dh)
+                self.L_from_half_vec[j_idx] = 0.5 * junc.length
+                self.L_to_half_vec[j_idx] = 0.5 * junc.length
+            else:
+                self.Dh_from_vec[j_idx] = vol_from.d_h
+                self.Dh_to_vec[j_idx] = vol_to.d_h
+                self.L_from_half_vec[j_idx] = 0.5 * vol_from.len
+                self.L_to_half_vec[j_idx] = 0.5 * vol_to.len
             self.A_from_node_vec[j_idx] = vol_from.area
             self.A_to_node_vec[j_idx] = vol_to.area
 
@@ -1075,7 +1084,9 @@ class HydraulicNetwork:
             W = self.W_vec[j_idx]
             # 简单估算 Re 用于显示
             A = max(getattr(junc, 'flow_area', 1e-4), 1e-4)
-            D = getattr(junc, 'hydraulic_diameter', 0.03)
+            D = getattr(junc, 'hydraulic_diameter', None)
+            if D is None or D <= 0.0:
+                D = 0.03
             mu = 0.5 * (self.mu_vec[i_in] + self.mu_vec[i_out])
             Re = abs(W) * D / (A * mu) if mu > 0 else 0
 

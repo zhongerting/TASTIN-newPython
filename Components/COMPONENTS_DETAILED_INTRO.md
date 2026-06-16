@@ -11,6 +11,7 @@ Components/
 ├── BaseComponent.py
 ├── Pipe.py
 ├── AnnularPipe.py
+├── RadiatorPipeWithFin.py
 ├── HPwithFin.py
 ├── RingHP.py
 ├── TFEUnit.py
@@ -20,6 +21,7 @@ Components/
 ├── BASICCOMPONENTS_DETAILED_INTRO.md
 ├── BASICCOMPONENTS_ANALYSIS.md
 ├── EXTERNALHEATSOURCES_DETAILED_INTRO.md
+├── RADIATORPIPEWITHFIN_DETAILED_INTRO.md
 ├── basicComponents/
 │   ├── Electord.py
 │   ├── TECPair.py
@@ -40,6 +42,7 @@ Components/
 | 本文 | 目录结构、组件关系、接口、配置、数据流、单位和风险总览 | 每次进入 `Components` 时优先阅读 |
 | [`BASICCOMPONENTS_DETAILED_INTRO.md`](./BASICCOMPONENTS_DETAILED_INTRO.md) | `Fuel`、电极、`TECPair`、`HeatPipe2D`、`FinConduction` 的接口说明 | 修改基础热工元件或 TEC 细节时 |
 | [`EXTERNALHEATSOURCES_DETAILED_INTRO.md`](./EXTERNALHEATSOURCES_DETAILED_INTRO.md) | 轨道外热源、查表热流和边界封装 | 修改外热模型或辐射器外热加载时 |
+| [`RADIATORPIPEWITHFIN_DETAILED_INTRO.md`](./RADIATORPIPEWITHFIN_DETAILED_INTRO.md) | TOPAZ-II NaK 管翅式辐射器组件说明 | 修改辐射管、铜带降维翅片或相关诊断时 |
 | [`BASICCOMPONENTS_ANALYSIS.md`](./BASICCOMPONENTS_ANALYSIS.md) | 基础元件物理实现和调用链分析 | 修改公式、求解方法或排查物理结果时 |
 
 外热源的补充资料位于 [`ExternalHeatSources/README.md`](./ExternalHeatSources/README.md) 和 [`ExternalHeatSources/PARAMETERS.md`](./ExternalHeatSources/PARAMETERS.md)。
@@ -86,6 +89,11 @@ RingHP
     -> HeatPipe2D
     -> ExternalHeatSources
   -> FluidSolidCouple
+
+RadiatorPipeWithFin
+  -> HeatConduction2D tube wall
+  -> FluidSolidCouple
+  -> reduced-order copper fin radiation branch
 ```
 
 两条主路径：
@@ -108,6 +116,7 @@ RingHP
 | `BaseComponent.py` | 宏观组件基类 |
 | `Pipe.py` | 单壁管道流固耦合组件 |
 | `AnnularPipe.py` | 环形管道双壁流固耦合组件 |
+| `RadiatorPipeWithFin.py` | NaK 辐射管与铜带降维翅片组件 |
 | `HPwithFin.py` | 带降维翅片的热管散热器 |
 | `RingHP.py` | 集流环与代表性热管阵列组件 |
 | `TFEUnit.py` | 热离子燃料元件装配体 |
@@ -384,6 +393,32 @@ TFE 径向和轴向网格划分参数。
 - `get_couplers()`：返回所有内部耦合器。
 - `save_step_state()` / `load_step_state()`：保存和恢复时间步状态。
 - `get_state_dict()` / `load_state_dict()`：断点续算序列化接口。
+
+## `RadiatorPipeWithFin.py`
+
+### `RadiatorPipeWithFin`
+
+NaK 直流辐射管与铜带降维翅片组件，面向 TOPAZ-II 原始管翅式辐射器。
+
+建模思想：
+
+- 管内 NaK 由外部 `IncompressibleFluidChannel` 表示。
+- 管壁是普通圆柱 `HeatConduction2D`，内表面通过 `FluidSolidCouple` 与流体换热。
+- 裸管外表面直接向空间动态辐射。
+- 铜带不是独立二维固体，而是每个轴向切片上的一维准稳态翅片支路。
+- 翅片支路每步在 `pre_step()` 中更新等效热阻和等效外部温度。
+
+该组件不包含热管、吸液芯或蒸汽腔；热管辐射器仍应使用 `HPwithFin` / `RingHP`。
+
+主要接口：
+
+- `get_solids()`：返回管壁固体。
+- `get_couplers()`：返回管内流体到管壁的 `FluidSolidCouple`。
+- `pre_step()`：求解铜带翅片准稳态导热并更新外边界。
+- `get_heat_exchange_breakdown()`：返回裸管辐射、翅片辐射、翅片等效热阻等诊断。
+- `get_fin_temperature_distribution()`：返回 `(n_axial, n_fin_width)` 翅片温度场。
+
+详细说明见 [`RADIATORPIPEWITHFIN_DETAILED_INTRO.md`](./RADIATORPIPEWITHFIN_DETAILED_INTRO.md)。
 
 ## `HPwithFin.py`
 
@@ -898,6 +933,7 @@ TEC 热流和焦耳热进入导热方程的路径不同：
 | 独立二维翅片求解 | [`basicComponents/FinConduction.py`](./basicComponents/FinConduction.py) |
 | 热管内部降维翅片散热 | [`HPwithFin.py`](./HPwithFin.py) |
 | 集流环和代表热管阵列 | [`RingHP.py`](./RingHP.py) |
+| TOPAZ-II NaK 管翅式辐射器 | [`RadiatorPipeWithFin.py`](./RadiatorPipeWithFin.py)、[`RADIATORPIPEWITHFIN_DETAILED_INTRO.md`](./RADIATORPIPEWITHFIN_DETAILED_INTRO.md) |
 | 轨道外热流 | [`ExternalHeatSources/__init__.py`](./ExternalHeatSources/__init__.py) |
 | Fortran 热流查表 | [`ExternalHeatSources/embedded_flux_tables.py`](./ExternalHeatSources/embedded_flux_tables.py) |
 

@@ -41,6 +41,9 @@
 | [`model_collector_ring_full_ringhp_geometry100hp_potassium_mixed.py`](./model_collector_ring_full_ringhp_geometry100hp_potassium_mixed.py) | 钾热管混合节点独立算例 | 固化 `geometry100hp`、100 根钾热管、总流量 `1.3 kg/s`、`eps_hp=eps_fin=0.6`、集流环壁面 `eps=0.05`、`T_space=200 K`；入口/出口均有小体积无热管混合节点 | 后续闭式回路和入口/出口混合节点策略的首选基线 |
 | [`model_collector_ring_6segment_geometry100hp_potassium_mixed.py`](./model_collector_ring_6segment_geometry100hp_potassium_mixed.py) | 6 段钾热管混合节点独立算例 | 将 `geometry100hp` 拆为 6 个非闭合 `1/6 RingHP` 段，段间插入 3 个入口混合体和 3 个出口混合体；100 根钾热管按 `17/16/17/16/17/17` 分配，单段 3 个控制体 | 当前入口/出口连接混合体方案的首选实现；避免把混合体建成带热管的环节点 |
 | [`model_collector_ring_6segment_geometry100hp_potassium_closed_loop.py`](./model_collector_ring_6segment_geometry100hp_potassium_closed_loop.py) | 6 段钾热管闭环独立算例 | 在 6 段混合节点集流环基础上删除开环入口/出口边界，加入 `PressurizerVolume`、`PumpJunction`、加热管和回流管；默认泵压升 `2070 Pa`、加热功率 `98 kW` | 闭环拓扑、泵压升扫描和能量闭合测试入口；不能直接加载开环 restart |
+| [`model_topaz2_tube_fin_radiator.py`](./model_topaz2_tube_fin_radiator.py) | TOPAZ-II 管翅式辐射器独立算例 | 构造 NaK-78 直接流过 78 根辐射管的双入口/双出口管翅式辐射器；默认 `Tin=823 K`、总流量 `1.3 kg/s`、有效辐射面积约 `7.2 m2`，支持管壁/翅片发射率扫描 | 复现 Paramonov/El-Genk 辐射器工况和调参至 `Tout≈727 K` 的入口；不是 `RingHP/HPwithFin` 热管模型 |
+| [`run_topaz2_pipefin_steady_test.py`](./run_topaz2_pipefin_steady_test.py) | TOPAZ-II 管翅式辐射器稳态测试包装器 | 调用 `model_topaz2_tube_fin_radiator.run_case()`，默认 `eps_tube=eps_fin=0.80`、`duration=500 s`、`n_axial=8`、`n_fin_width=12`，并生成末段斜率和能量残差摘要 | 显式翅片模型的推荐回归入口；`Tout≈727 K` 是标定目标，不是当前硬失败条件 |
+| [`run_topaz2_pipefin_hydraulic_diagnostics.py`](./run_topaz2_pipefin_hydraulic_diagnostics.py) | TOPAZ-II 管翅式辐射器水力分配诊断 | 默认只初始化水力网络并扫描支管等效局阻与集管内径，输出逐管流量、代表管压力预算、集管流量摘要和分布图 | 排查 `R_header/R_tube` 比例和复现文献流量范围的首选入口；`K=100/100` 是等效校准预设，不是几何实测值 |
 | [`run_collector_ring_6segment_geometry100hp_potassium_anisotropic_wick_test.py`](./run_collector_ring_6segment_geometry100hp_potassium_anisotropic_wick_test.py) | 吸液芯各向异性导热 A/B 测试包装器 | 从 6 段钾热管混合节点算例构建系统，运行前对所有代表热管调用 `set_wick_conductivity_mode(True)`；默认从 `500 s` restart 跑到 `501 s` 并统计 BDF warning | 用于验证“轴向赝热导、径向结构导热”是否降低 BDF warning 和改变稳态温差；不是生产默认模型 |
 | [`run_collector_ring_full_ringhp_steady_debug.py`](./run_collector_ring_full_ringhp_steady_debug.py) | 稳态调试包装器 | 默认从最新 full ringhp 快照短续算，输出 history、restart 和 `T_out_avg` 斜率判据 | 集流环+热管稳态调试首选 |
 | [`run_collector_ring_full_ringhp_energy_audit.py`](./run_collector_ring_full_ringhp_energy_audit.py) | 能量守恒审计包装器 | 从 full ringhp restart 续算并输出 `Q_loop - Q_rejection - dU/dt` 残差 | 集流环+热管整体能量守恒检查首选 |
@@ -189,6 +192,44 @@ all_vols, all_juncs, network, sys_mgr
 | 环闭合 | 6 个 `sector_link_junctions` | 1 个 `ring_closure` |
 | profiler | 内置输出 | 无内置 profiler 输出 |
 | 断点续算 | 支持 | 支持 |
+
+### 3.6 TOPAZ-II 管翅式辐射器算例
+
+`model_topaz2_tube_fin_radiator.py` 是独立 NaK 管翅式辐射器算例，不复用 `RingHP/HPwithFin` 的热管物理。它显式构造 78 根辐射管、上/下各 78 个集流环节点、两个 180 度相对入口和两个 180 度相对出口。每根管使用 `Components.RadiatorPipeWithFin`：管内 NaK 与管壁通过 `FluidSolidCouple` 换热，管外裸壁动态辐射，铜带通过一维准稳态降维翅片模型向空间辐射。
+
+默认工况用于 TOPAZ-II 详细辐射器程序对比：
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" `
+  CoolantLoop\model_topaz2_tube_fin_radiator.py `
+  --inlet-temperature-k 823 `
+  --total-mass-flow-kg-s 1.3 `
+  --target-outlet-temperature-k 727
+```
+
+调参时使用 `--tube-emissivity` 和 `--fin-emissivity` 指定单个工况，或用 `--scan-emissivity-grid` 与 `--tube-emissivity-values`、`--fin-emissivity-values` 做网格扫描。默认 `fin-area-scale=0.35` 使显式净铜带宽度下的总有效辐射面积约为 `7.23 m2`。默认局部阻力采用 `header_k_loss=1.0`、管入口/出口 `K=2.0`、出口 `K=2.0`，用于避免双出口集流环在长时运行中进入非物理循环流。
+
+2026-06-16 更新：该算例已从固定等效辐射面积升级为 `RadiatorPipeWithFin` 显式降维翅片模型。`n_axial=8`、`n_fin_width=8`、`duration=5 s` smoke 已完成，输出有效面积约 `7.233 m2`，翅片根部到端部平均温降约 `8.56 K`。旧等效面积模型的 `eps=0.8175` 单点校准不再作为当前事实；变工况和稳态标定应基于显式翅片模型重新扫描。
+
+稳态回归优先使用包装器：
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" `
+  CoolantLoop\run_topaz2_pipefin_steady_test.py
+```
+
+该包装器默认输出到 `CoolantLoop/topaz2_pipefin_steady_eps080_500s/`，除 history 和 latest state 外，还写出 `*_steady_summary.json`。摘要包含末端混合出口温度、最后 `100 s` 出口温度斜率、总排热、裸管/翅片排热占比、能量残差比例、有效面积、流量相对离散度和翅片根端平均温差。当前显式翅片模型仍需重新标定发射率，因此该回归入口只固化算例可复现性和诊断输出，不把 `Tout=727 K` 设为硬通过条件。
+
+2026-06-16 性能优化：`RadiatorPipeWithFin` 离散翅片求解已启用上一时间步温度场 warm-start，并在 history/summary 中记录 `fin_iteration_mean/max`、`fin_max_delta_*` 和 `fin_warm_start_fraction`。100 s 默认工况对比中，墙钟时间由 `152.88 s` 降至 `143.04 s`，平均翅片迭代数由 `5.44` 降至 `2.33`；出口温度和总排热差异为数值噪声量级。
+
+水力分配诊断优先使用：
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" `
+  CoolantLoop\run_topaz2_pipefin_hydraulic_diagnostics.py
+```
+
+该脚本默认不跑热瞬态，只初始化水力网络并输出 `*_summary.json`、`*_summary.csv`、`*_tube_flows.csv`、`*_pressure_budget.csv`，同时绘制 baseline 和 `hydraulic_calibrated` 两张逐管流量分布图。当前诊断显示默认 `tube_inlet_k_loss=tube_outlet_k_loss=2` 会得到 `min≈0.00944 kg/s`、`max≈0.03809 kg/s`；等效校准预设 `--hydraulic-calibrated` 会把两项支管局阻设为 `100/100`，水力初始化下可得到接近调研结果的 `min≈0.01594 kg/s`、`max≈0.01880 kg/s`。100 s 校准热态复核输出 `tube_flow_rel_spread≈0.171`、`Tout≈726.32 K`、能量残差比例约 `8.57e-4`。该预设用于复现文献流量范围和定位阻力比例问题，不代表已确认真实结构局阻。2026-06-16 起，TOPAZ-II 显式连接件会向 `FlowJunction` 传入自身 `hydraulic_diam`，集管环段使用集管内径，辐射管入口/出口连接使用辐射管内径，避免跨直径控制体连接时沿程压降误取上游控制体 `d_h`。
 
 ## 4. 运行与断点续算
 

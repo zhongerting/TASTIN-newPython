@@ -36,6 +36,8 @@ Hydrodynamics 使用两类基本对象描述流体网络：
 
 控制体负责质量和能量守恒，连接件负责动量方程。复杂通道通过 `FluidChannel` 自动生成一串 `FluidVolume` 和 `FlowJunction`。
 
+`FlowJunction` 支持显式传入 `hydraulic_diam` 表示连接件自身水力直径。若提供该值，沿程摩擦压降优先使用连接件自身直径和连接长度；若未提供，则保持旧逻辑，按两端控制体的 `d_h` 和半节点长度估算。跨不同直径控制体的短接、管口、集管到支管连接应优先显式传入连接件水力直径。
+
 求解器 `HydraulicNetwork` 会把这些对象转译为向量和稀疏矩阵：
 
 ```text
