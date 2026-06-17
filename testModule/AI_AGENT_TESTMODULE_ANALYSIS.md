@@ -674,3 +674,128 @@ Suggested initial pump head from ColdReturnOutletMerge to CoreInletConnector ≈
 ```
 
 The detailed pressure summary for the earlier `0.75/0.75` steady checkpoint is in the generated run directory as `pressure_summary.json`; run artifacts remain untracked and should not be committed unless explicitly requested.
+
+## 21. 2026-06-15 V11 CaseA closed pumped loop
+
+V11 CaseA is implemented in `testModule/test_core_assemble_v11_caseA.py` and `testModule/run_v11_caseA_closed_loop.py`. It reuses the V10 core, collector-ring, radiator-header, cold-return geometry, NaK78 coolant, tuned radiator emissivities, half wire resistance, RK45 solids, and local implicit fluid-solid coupling, but replaces the V10 open inlet/outlet boundaries with a closed pumped loop.
+
+The V11 hydraulic path is:
+
+```text
+CoreInletConnector passive pressure reference
+  -> V8/V9 representative TFE channels
+  -> CoreOutletConnector
+  -> HotOutletBranch_1/2/3
+  -> MacroFlowJunction(multiplier=2) into InletMix_I1/I2/I3
+  -> A1..A6 one explicit collector ring with RingHP heat pipes
+  -> OutletMix_O1/O2/O3
+  -> Manifold_1/2/3
+  -> MacroFlowJunction(multiplier=2) into V10_RadiatorManifoldMerge
+  -> RadiatorInnerHeader_53
+  -> RadiatorOuterHeader_52
+  -> PumpJunction A
+  -> V11_PumpMidNode
+  -> PumpJunction B
+  -> V11_PumpOutletDistributor_51
+  -> ColdReturnBranch_1 + ColdReturnBranch_2_3_Rep(multiplier=2)
+  -> V10_ColdReturnOutletMerge
+  -> CoreInletConnector
+```
+
+Important constraints:
+
+- `V10_InletBoundary_FixedFlow`, `V10_OutletBoundary_FixedPressure`, `J_V10_InletBoundary_to_CoreInletConnector`, and `J_ColdReturnOutletMerge_to_OutletBoundary` are absent in V11.
+- V11 has no fixed-pressure boundary volumes. `CoreInletConnector` is marked with `is_pressure_reference=True` and `target_P` copied from the V10 restart, so pressure is anchored without freezing the node enthalpy or temperature.
+- The two pumps are series `PumpJunction`s between `RadiatorOuterHeader_52` and `V11_PumpOutletDistributor_51`. Default total pump head is `6466.56 Pa`, split equally as `3233.28 Pa` per pump.
+- V11 must not run a cold hydraulic initialization before V10 state injection. The runner first maps the latest V10 state into V11, then rebuilds the pump-after cold-return pressure field so the pump outlet distributor is about one pump total head above `RadiatorOuterHeader_52`.
+- `--enable-pump-head-control` optionally adjusts total pump head at `--pump-control-interval` using a bounded quadratic flow/head correction toward `--target-flow-kg-s` (default `1.3 kg/s`).
+
+Default V10 injection restart:
+
+```text
+testModule/v10_caseA_tune727_ring020_hpfin075_steady_plus1000s/v10_caseA_tune727_ring020_hpfin075_steady_plus1000s_latest_restart.npz
+```
+
+Verified checks:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m py_compile testModule\test_core_assemble_v11_caseA.py testModule\run_v11_caseA_closed_loop.py testModule\test_v11_caseA_topology.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m unittest testModule.test_v11_caseA_topology
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v11_caseA_closed_loop.py --create-init-only --output-dir testModule\v11_caseA_closed_loop_init2 --case-prefix v11_caseA_closed_loop_init2
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v11_caseA_closed_loop.py --restart-in testModule\v11_caseA_closed_loop_init2\v11_caseA_closed_loop_init2_latest_restart.npz --duration 10 --record-interval 5 --restart-interval 5 --max-dt 0.05 --output-dir testModule\v11_caseA_closed_loop_smoke2_10s --case-prefix v11_caseA_closed_loop_smoke2_10s
+```
+
+The corrected `10 s` smoke completed. The final record was approximately `Tin=727.000 K`, `Tcore_out=823.955 K`, `RadiatorOuterHeader_52_out=728.154 K`, `Wpump=1.297338 kg/s`, total pump head `6466.56 Pa`, and `Pel=5527.353 W`.
+
+## 22. 2026-06-16 V12 CaseA open core + TOPAZ-II pipe-fin radiator
+
+V12 CaseA is implemented in `testModule/test_core_assemble_v12_caseA.py` and `testModule/run_v12_caseA_open_loop.py`. It is an independent open-loop case definition and does not call the V10 system builder. The core side reuses the V8 representative-TFE assembly as the common core component source, but V12 defines its own external hydraulic path and replaces the V10 collector-ring/radiator-header chain with the TOPAZ-II 78-tube pipe-fin radiator model from `Components/RadiatorPipeWithFin.py`.
+
+The V12 hydraulic path is:
+
+```text
+V12_InletBoundary_FixedFlow
+  -> Pipe11_CoreInletHeader       (#11, flow-network core inlet header)
+  -> V12_CoreInletDistribution
+  -> V12_CoreInletBranch_1 + V12_CoreInletBranch_2_3_Rep(multiplier=2)
+  -> V12_CoreInletConnector
+  -> V8/V9 representative TFE channels, TEC disabled
+  -> V12_CoreOutletConnector
+  -> Pipe05_CoreOutletToRadiator  (#5, flow-network core outlet header)
+  -> V12_RadiatorInletSplit
+  -> 78 TOPAZ-II pipe-fin radiator tubes with upper/lower ring headers
+  -> V12_RadiatorOutletMix
+  -> Pipe06_RadiatorOutlet        (#6)
+  -> Pipe07_HeatExchangerHotSide  (#7, simplified as one pipe segment)
+  -> Pipe08_ReturnInnerPipe       (#8)
+  -> Pipe09_ValveSegment          (#9, no pump in V12)
+  -> V12_OutletBoundary_FixedPressure
+```
+
+Important constraints:
+
+- V12 remains an open loop: the fixed-flow/fixed-temperature boundary is upstream of flow-network pipe #11, and the only fixed-pressure boundary is `V12_OutletBoundary_FixedPressure` after pipe #9.
+- V12 defaults to no-TEC. Passing `--enable-tec-coupled` uses TEC multipliers `1,6,12,15,0`, fixed voltage `--target-voltage` default `27.2 V`, and `--thermo-update-interval` default `0.5 s`.
+- The radiator defaults to 78 tubes, 8 axial fluid nodes per tube, `K_in=100`, `K_out=100`, `tube_emissivity=0.80`, `fin_emissivity=0.80`, and `fin_area_scale=0.35`.
+- The runner re-applies `--inlet-temperature-k` after hydraulic initialization and after `--restart-in` loading, so the fixed-flow inlet boundary is not overwritten by restart temperature state.
+- `--fluid-solid-coupling-scheme current` is the default. If `local_implicit` is requested, the runner initializes with `current` first and switches compatible fluid-solid couplers after hydraulic initialization, because `SystemManager.initialize_system()` does not pass a positive coupling `dt`.
+- Flow-network pipe dimensions are stored in `latest_state.json` under `flow_network_pipe_specs`. The current values follow the supplied flow-network summary where usable; inconsistent diameter fields were kept conservative for the primary small pipes (`#5/#6/#11` use `dh=0.014 m`, `area=3.8e-4 m2`).
+
+Verified checks:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m py_compile testModule\test_core_assemble_v12_caseA.py testModule\run_v12_caseA_open_loop.py testModule\test_v12_caseA_topology.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m unittest testModule.test_v12_caseA_topology
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v12_caseA_open_loop.py --create-init-only --output-dir testModule\v12_caseA_open_loop_no_tec_init --case-prefix v12_caseA_open_loop_no_tec_init --max-dt 0.05
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v12_caseA_open_loop.py --restart-in testModule\v12_caseA_open_loop_no_tec_init\v12_caseA_open_loop_no_tec_init_latest_restart.npz --duration 1 --record-interval 0.5 --restart-interval 0.5 --max-dt 0.05 --output-dir testModule\v12_caseA_open_loop_no_tec_smoke_1s --case-prefix v12_caseA_open_loop_no_tec_smoke_1s
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v12_caseA_open_loop.py --restart-in testModule\v12_caseA_open_loop_no_tec_smoke_1s\v12_caseA_open_loop_no_tec_smoke_1s_latest_restart.npz --duration 9 --record-interval 1 --restart-interval 3 --max-dt 0.05 --output-dir testModule\v12_caseA_open_loop_no_tec_smoke_10s --case-prefix v12_caseA_open_loop_no_tec_smoke_10s
+```
+
+All checks completed. The 10 s no-TEC smoke reached absolute time `10.0 s`. Final key values were approximately `Tin=753.327 K`, `Tcore_out=749.605 K`, `Tradiator_out_mix=762.519 K`, `radiator_tube_total_flow=1.294995 kg/s`, `tube_mean=0.016603 kg/s`, `tube_min=0.015862 kg/s`, `tube_max=0.018733 kg/s`, and `Qrad=99.783 kW`. The early no-TEC transient is still dominated by initial stored heat in the radiator and flow-network pipes, so this short run is a topology/numerics smoke, not a steady thermal-performance result.
+
+2026-06-17 inlet-temperature restart handling was corrected and the 727 K no-TEC case was rerun from a fresh init:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v12_caseA_open_loop.py --create-init-only --inlet-temperature-k 727 --output-dir testModule\v12_caseA_open_loop_no_tec_init_727K --case-prefix v12_caseA_open_loop_no_tec_init_727K --max-dt 0.05
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v12_caseA_open_loop.py --restart-in testModule\v12_caseA_open_loop_no_tec_init_727K\v12_caseA_open_loop_no_tec_init_727K_latest_restart.npz --inlet-temperature-k 727 --duration 500 --record-interval 50 --restart-interval 50 --max-dt 0.05 --output-dir testModule\v12_caseA_open_loop_no_tec_727K_500s --case-prefix v12_caseA_open_loop_no_tec_727K_500s
+```
+
+The corrected 727 K run reached absolute time `500.0 s`. Final key values were approximately `Tin=727.000 K`, `Tcore_out=824.394 K`, `Tradiator_in=824.394 K`, `Tradiator_out_mix=727.094 K`, `core_delta_p=3857.04 Pa`, `coolant_enthalpy_rise=110.427 kW`, `Qrad=110.083 kW`, `radiator_tube_total_flow=1.300053 kg/s`, `tube_mean=0.0166673 kg/s`, `tube_min=0.0159407 kg/s`, and `tube_max=0.0187879 kg/s`.
+
+TEC-coupled V12 was then enabled from the 727 K no-TEC `500 s` checkpoint. A `1 s` `max_dt=0.05 s` smoke and a `5 s` `max_dt=0.5 s` smoke both completed, then the run continued for `994 s` with `max_dt=0.5 s`, so TEC-coupled physical time totaled `1000 s` and the final absolute time was `1500 s`.
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v12_caseA_open_loop.py --restart-in testModule\v12_caseA_open_loop_no_tec_727K_500s\v12_caseA_open_loop_no_tec_727K_500s_latest_restart.npz --inlet-temperature-k 727 --enable-tec-coupled --thermo-update-interval 0.5 --duration 1 --record-interval 0.5 --restart-interval 0.5 --max-dt 0.05 --output-dir testModule\v12_caseA_open_loop_tec_smoke_1s_from727K500s --case-prefix v12_caseA_open_loop_tec_smoke_1s_from727K500s
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v12_caseA_open_loop.py --restart-in testModule\v12_caseA_open_loop_tec_smoke_1s_from727K500s\v12_caseA_open_loop_tec_smoke_1s_from727K500s_latest_restart.npz --inlet-temperature-k 727 --enable-tec-coupled --thermo-update-interval 0.5 --duration 5 --record-interval 1 --restart-interval 1 --max-dt 0.5 --output-dir testModule\v12_caseA_open_loop_tec_dt05_smoke_5s --case-prefix v12_caseA_open_loop_tec_dt05_smoke_5s
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v12_caseA_open_loop.py --restart-in testModule\v12_caseA_open_loop_tec_dt05_smoke_5s\v12_caseA_open_loop_tec_dt05_smoke_5s_latest_restart.npz --inlet-temperature-k 727 --enable-tec-coupled --thermo-update-interval 0.5 --duration 994 --record-interval 50 --restart-interval 50 --max-dt 0.5 --output-dir testModule\v12_caseA_open_loop_tec_1000s_from727K500s --case-prefix v12_caseA_open_loop_tec_1000s_from727K500s
+```
+
+The final TEC-coupled record at absolute time `1500.0 s` was approximately `Tin=727.000 K`, `Tcore_out=821.148 K`, `Tradiator_in=821.157 K`, `Tradiator_out_mix=725.128 K`, `coolant_enthalpy_rise=106.749 kW`, `Qrad=108.618 kW`, `Pel=4.787 kW`, `I=176.004 A`, `core_delta_p=3856.29 Pa`, `radiator_tube_total_flow=1.299170 kg/s`, `tube_mean=0.0166560 kg/s`, `tube_min=0.0159289 kg/s`, and `tube_max=0.0187753 kg/s`.
+
+To match V11, the TEC wire resistance scale should be `0.5`. Continuing from the V12 TEC `1500 s` checkpoint with `--wire-resistance-scale 0.5` for `200 s` completed:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v12_caseA_open_loop.py --restart-in testModule\v12_caseA_open_loop_tec_1000s_from727K500s\v12_caseA_open_loop_tec_1000s_from727K500s_latest_restart.npz --inlet-temperature-k 727 --enable-tec-coupled --thermo-update-interval 0.5 --wire-resistance-scale 0.5 --duration 200 --record-interval 25 --restart-interval 50 --max-dt 0.5 --output-dir testModule\v12_caseA_open_loop_tec_wire05_200s_from1500s --case-prefix v12_caseA_open_loop_tec_wire05_200s_from1500s
+```
+
+The final record at absolute time `1700.0 s` was approximately `Tin=727.000 K`, `Tcore_out=820.471 K`, `Tradiator_in=820.471 K`, `Tradiator_out_mix=724.995 K`, `coolant_enthalpy_rise=105.982 kW`, `Qrad=108.522 kW`, `Pel=5.416 kW`, `I=199.120 A`, `core_delta_p=3857.19 Pa`, `radiator_tube_total_flow=1.300180 kg/s`, `tube_mean=0.0166690 kg/s`, `tube_min=0.0159419 kg/s`, and `tube_max=0.0187900 kg/s`.
