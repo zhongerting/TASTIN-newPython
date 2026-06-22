@@ -799,3 +799,21 @@ To match V11, the TEC wire resistance scale should be `0.5`. Continuing from the
 ```
 
 The final record at absolute time `1700.0 s` was approximately `Tin=727.000 K`, `Tcore_out=820.471 K`, `Tradiator_in=820.471 K`, `Tradiator_out_mix=724.995 K`, `coolant_enthalpy_rise=105.982 kW`, `Qrad=108.522 kW`, `Pel=5.416 kW`, `I=199.120 A`, `core_delta_p=3857.19 Pa`, `radiator_tube_total_flow=1.300180 kg/s`, `tube_mean=0.0166690 kg/s`, `tube_min=0.0159419 kg/s`, and `tube_max=0.0187900 kg/s`.
+
+## 23. 2026-06-18 V13 CaseA closed core + TOPAZ-II pipe-fin radiator
+
+V13 is implemented in `testModule/test_core_assemble_v13_caseA.py` and
+`testModule/run_v13_caseA_closed_loop.py`. It converts the V12 open-loop
+pipe-fin radiator model into a closed pumped loop by removing the fixed
+temperature/pressure external boundaries and using `V12_CoreInletConnector`
+as the passive pressure reference.
+
+The default TEC update interval in the V13 runner is `1.0 s`. This reduces
+the number of expensive `ThermoCalcModel.calculate()` calls compared with the
+previous exploratory `0.5 s` setting. The TOPAZ-II upper/lower ring headers in
+V13 are currently hydraulic volumes only; they do not have separate solid
+wall radiation boundaries, so radiator thermal tuning is exposed through
+`--tube-emissivity` and `--fin-emissivity` rather than a header emissivity.
+`testModule/run_v13_caseA_eps088_wait_then_to10000.py` is a local helper that
+waits for the active `eps=0.88/0.88` long run to finish and then continues the
+same case to about `10000 s` absolute time.
