@@ -354,7 +354,7 @@ The default full plan covers four separately stored regions. All production
 regions use the same cesium pressure axis:
 
 ```text
-Pcs: 0.02-3.0 torr, 61 log-spaced points
+Pcs: 0.02-5.0 torr, 61 log-spaced points
 ```
 
 `Pcs` is in torr, not Pa. The conversion to `Tcs` uses the same formula as the
@@ -365,10 +365,10 @@ Pcs_torr = 2.45e8 / sqrt(Tcs) * exp(-8910 / Tcs)
 ```
 
 ```text
-core        TE 1300-2150 K, TC 700-900 K,  Vo 0-3.5 V, Pcs 0.02-3.0 torr
-startup     TE 700-1300 K,  TC 500-800 K,  Vo 0-3.5 V, Pcs 0.02-3.0 torr
-high_power  TE 2150-2400 K, TC 750-1000 K, Vo 0-3.5 V, Pcs 0.02-3.0 torr
-accident    TE 700-2400 K,  TC 500-1100 K, Vo 0-3.5 V, Pcs 0.02-3.0 torr
+core        TE 1300-2150 K, TC 700-900 K,  Vo 0-3.5 V, Pcs 0.02-5.0 torr
+startup     TE 700-1300 K,  TC 500-800 K,  Vo 0-3.5 V, Pcs 0.02-5.0 torr
+high_power  TE 2150-2400 K, TC 750-1000 K, Vo 0-3.5 V, Pcs 0.02-5.0 torr
+accident    TE 700-2400 K,  TC 500-1100 K, Vo 0-3.5 V, Pcs 0.02-5.0 torr
 ```
 
 Generate the full manifest and chunk plan:
@@ -407,7 +407,7 @@ As of 2026-06-23, the previously generated full local database under
 `ThermoCalc/emission_database/` used the older pressure ranges
 `0.5-2.0 torr` for `core/startup/high_power` and `0.1-4.0 torr` for
 `accident`. It is now an obsolete pressure-range artifact. Regenerate the
-database before using lookup results for the corrected `0.02-3.0 torr`
+database before using lookup results for the corrected `0.02-5.0 torr`
 coverage.
 
 The old generated database summary was:

@@ -35,7 +35,7 @@ SOURCE_REGIONS = {
     "high_power": 2,
     "accident": 3,
 }
-DEFAULT_PCS_AXIS = (0.02, 3.0, 61, "log")
+DEFAULT_PCS_AXIS = (0.02, 5.0, 61, "log")
 
 REGIONS: dict[str, dict[str, Any]] = {
     "core": {
