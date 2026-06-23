@@ -350,13 +350,18 @@ diagnostic outputs under:
 ThermoCalc/emission_database/
 ```
 
-The default full plan covers four separately stored regions:
+The default full plan covers four separately stored regions. All production
+regions use the same cesium pressure axis:
 
 ```text
-core        TE 1300-2150 K, TC 700-900 K,  Vo 0-3.5 V, Pcs 0.5-2 torr
-startup     TE 700-1300 K,  TC 500-800 K,  Vo 0-3.5 V, Pcs 0.5-2 torr
-high_power  TE 2150-2400 K, TC 750-1000 K, Vo 0-3.5 V, Pcs 0.5-2 torr
-accident    TE 700-2400 K,  TC 500-1100 K, Vo 0-3.5 V, Pcs 0.1-4 torr
+Pcs: 0.02-3.0 torr, 61 log-spaced points
+```
+
+```text
+core        TE 1300-2150 K, TC 700-900 K,  Vo 0-3.5 V, Pcs 0.02-3.0 torr
+startup     TE 700-1300 K,  TC 500-800 K,  Vo 0-3.5 V, Pcs 0.02-3.0 torr
+high_power  TE 2150-2400 K, TC 750-1000 K, Vo 0-3.5 V, Pcs 0.02-3.0 torr
+accident    TE 700-2400 K,  TC 500-1100 K, Vo 0-3.5 V, Pcs 0.02-3.0 torr
 ```
 
 Generate the full manifest and chunk plan:
@@ -365,7 +370,7 @@ Generate the full manifest and chunk plan:
 & "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py plan --db-dir ThermoCalc\emission_database --preset full
 ```
 
-The current full plan contains 18,737,388 points in 78 chunks. Use multiple
+The corrected full plan contains 31,716,828 points in 108 chunks. Use multiple
 workers by assigning stable worker indices:
 
 ```powershell
@@ -391,8 +396,14 @@ For quick regression of the generator itself, use the smoke preset:
 
 ## Current Database Status
 
-As of 2026-06-23, the full local database under
-`ThermoCalc/emission_database/` has been generated once:
+As of 2026-06-23, the previously generated full local database under
+`ThermoCalc/emission_database/` used the older pressure ranges
+`0.5-2.0 torr` for `core/startup/high_power` and `0.1-4.0 torr` for
+`accident`. It is now an obsolete pressure-range artifact. Regenerate the
+database before using lookup results for the corrected `0.02-3.0 torr`
+coverage.
+
+The old generated database summary was:
 
 ```text
 total points: 18,737,388

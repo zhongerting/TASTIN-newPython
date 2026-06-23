@@ -35,6 +35,7 @@ SOURCE_REGIONS = {
     "high_power": 2,
     "accident": 3,
 }
+DEFAULT_PCS_AXIS = (0.02, 3.0, 61, "log")
 
 REGIONS: dict[str, dict[str, Any]] = {
     "core": {
@@ -43,7 +44,7 @@ REGIONS: dict[str, dict[str, Any]] = {
         "te": (1300.0, 2150.0, 86, True),
         "tc": (700.0, 900.0, 41, True),
         "vo": (0.0, 3.5, 71, True),
-        "pcs": (0.5, 2.0, 41, "log"),
+        "pcs": DEFAULT_PCS_AXIS,
         "target_points_per_chunk": 250_000,
         "worker_group": "A",
     },
@@ -53,7 +54,7 @@ REGIONS: dict[str, dict[str, Any]] = {
         "te": (700.0, 1300.0, 31, False),
         "tc": (500.0, 800.0, 31, True),
         "vo": (0.0, 3.5, 36, True),
-        "pcs": (0.5, 2.0, 21, "log"),
+        "pcs": DEFAULT_PCS_AXIS,
         "target_points_per_chunk": 250_000,
         "worker_group": "B",
     },
@@ -63,7 +64,7 @@ REGIONS: dict[str, dict[str, Any]] = {
         "te": (2150.0, 2400.0, 26, True),
         "tc": (750.0, 1000.0, 26, True),
         "vo": (0.0, 3.5, 71, True),
-        "pcs": (0.5, 2.0, 41, "log"),
+        "pcs": DEFAULT_PCS_AXIS,
         "target_points_per_chunk": 250_000,
         "worker_group": "C",
         "drop_te_le": 2150.0,
@@ -74,7 +75,7 @@ REGIONS: dict[str, dict[str, Any]] = {
         "te": (700.0, 2400.0, 86, True),
         "tc": (500.0, 1100.0, 61, True),
         "vo": (0.0, 3.5, 36, True),
-        "pcs": (0.1, 4.0, 31, "log"),
+        "pcs": DEFAULT_PCS_AXIS,
         "target_points_per_chunk": 300_000,
         "worker_group": "D",
     },
