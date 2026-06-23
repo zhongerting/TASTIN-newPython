@@ -363,7 +363,11 @@ f(TE, TC, Vo, phiE, phiC, d_gap, Tcs) -> J / Vd / delta_V / phiE / phiC
 - `CMakeLists.txt`：测试版构建纳入 `emissionLookup.cpp`。
 - `testModule/test_thermocalc_lookup.py`：覆盖单块加载、优化块加载、生产 `calc()` 查表分支和查表/解析速度对比。
 
-旧数据库位于 `ThermoCalc/emission_database/`，使用的是旧铯压范围。旧全量计划含 `18,737,388` 点、`78` 个 chunk；已完成 `startup` 和 `accident` 风险点优化表，`.optimized.npz` 会被包装层优先加载。优化后 `startup+accident` 中原始无效点 `55,506` 个，其中 `43,104` 个按零发射处理，`12,402` 个由邻域插补，未解决点为 `0`。新的 `0.02-5.0 torr` 全量计划保留原 Pcs 点数，仍为 `18,737,388` 点；按当前右边界保留 chunk 逻辑为 `76` 个 chunk。需要重新生成数据库和 dense runtime v2 表。
+旧数据库位于 `ThermoCalc/emission_database/`，使用的是旧铯压范围。旧全量计划含 `18,737,388` 点、`78` 个 chunk；已完成 `startup` 和 `accident` 风险点优化表，`.optimized.npz` 会被包装层优先加载。优化后 `startup+accident` 中原始无效点 `55,506` 个，其中 `43,104` 个按零发射处理，`12,402` 个由邻域插补，未解决点为 `0`。该旧库已不再作为当前压力范围基准。
+
+新的 `0.02-5.0 torr` 全量数据库已经生成在 `ThermoCalc/emission_database/pcs_0p02_5torr/`。它保留原 Pcs 点数和 log spacing 类型，唯一物理网格仍为 `18,737,388` 点，计划 chunk 数为 `76` 个。原始 chunk 文件内部包含相邻块共用的 TE 右边界平面，因此 `summarize --scan-chunks` 的 chunk 计数为 `25,756,400` 点；这不是物理网格变大。
+
+当前新库已完成 `core/startup/high_power/accident` 全 region 优化：原始无效点 `655,530` 个，其中 `107,272` 个按安全零电流处理，`548,258` 个由邻域插补，未解决点为 `0`，优化后安全点覆盖率为 `1.0`。dense runtime v2 已导出到 `ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr/`，包含 `.npz` 和 C++ 直接加载的 `.tedb`。
 
 验证结果：
 
@@ -379,10 +383,10 @@ f(TE, TC, Vo, phiE, phiC, d_gap, Tcs) -> J / Vd / delta_V / phiE / phiC
 
 本轮在不删除原解析法、不替换根目录生产 `.pyd` 的前提下，新增了运行时专用查表格式和 C++ 查询索引：
 
-- `tools/emission_database.py export-runtime` 从 `ThermoCalc/emission_database/` 导出 `ThermoCalc/emission_runtime_db/`，优先读取 `.optimized.npz`，输出 `runtime_manifest.json` 和按 region 分开的 `*.runtime.npz`。
+- `tools/emission_database.py export-runtime-dense` 从 `ThermoCalc/emission_database/pcs_0p02_5torr/` 导出 `ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr/`，优先读取 `.optimized.npz`，输出 `runtime_dense_manifest.json`、按 region 分开的 `*.runtime.v2.npz` 和 C++ 直接加载的 `*.runtime.v2.tedb`。
 - runtime 表只保留 `TE_axis/TC_axis/Vo_axis/Tcs_axis`、`J/Vd/delta_V/phiE/phiC`、`lookup_safe/zero_mask`；默认字段精度为 `float32`，但 `phiE/phiC` 保留，供边界条件继续调用。
 - `zero_mask` 标记安全零电流区；启用 `--zero-compress` 后这些点的 `J` 在 runtime 表中直接写为 `0`，但电压和功函数字段仍参与插值。
-- `ThermoCalcWrapper.load_emission_lookup_database(..., regions=...)` 同时支持旧全量库和 runtime 库；默认只加载 `core`，可用环境变量 `THERMOCALC_LOOKUP_REGIONS=core,startup,high_power,accident` 扩展覆盖。
+- `ThermoCalcWrapper.load_emission_lookup_database(..., regions=...)` 同时支持旧全量库、legacy runtime 库和 dense runtime v2；默认只加载 `core`，可用环境变量 `THERMOCALC_LOOKUP_REGIONS=core,startup,high_power,accident` 扩展覆盖。
 - `emissionLookup.*` 内部按 `region_id/priority` 建索引，对每块维护 bbox，用 TE chunk 直接定位候选块，并缓存上一次命中的块，减少全表线性扫描。
 
 当前定向验证：
@@ -398,12 +402,12 @@ testModule/test_thermocalc_lookup.py
   local speedup: about 20x
 ```
 
-`ThermoCalc/emission_runtime_db/` 和 `ThermoCalc/emission_database/` 都是生成数据，不应提交到 git。若后续需要完整工况覆盖，先导出全 region runtime 表，再设置 `THERMOCALC_LOOKUP_DB` 指向 runtime 目录，并显式设置 `THERMOCALC_LOOKUP_REGIONS`。
+`ThermoCalc/emission_database/`、`ThermoCalc/emission_runtime_db/` 和 `ThermoCalc/emission_runtime_db_v2/` 都是生成数据，不应提交到 git。当前推荐运行路径是 `ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr/`；使用全 region 覆盖时，设置 `THERMOCALC_LOOKUP_DB` 指向该目录，并显式设置 `THERMOCALC_LOOKUP_REGIONS=core,startup,high_power,accident`。
 
 2026-06-23 后续修复：
 
 - `chunk_te_ranges()` 现在为每个 TE chunk 保留右侧边界平面，避免新生成数据库出现 `1300-1310 K` 后直接跳到 `1320-1330 K` 的插值空隙。
-- `export-runtime` 对旧数据库自动拼接下一 chunk 的第一个 TE 平面；现有 core runtime 表由 `1300-1310 K`、`1320-1330 K` 等旧块导出为 `1300-1320 K`、`1320-1340 K` 等连续块，不需要重算原始 1873 万点。
+- `export-runtime` 对旧数据库自动拼接下一 chunk 的第一个 TE 平面；新数据库在原始生成阶段已经保留右边界平面，dense runtime v2 导出时再去除重复拼接平面，唯一物理点数保持 `18,737,388`。
 - 修复 `lookup_emission_points()` 输出数组 stride 为 `0` 的绑定问题；批量 API 现在与单点 `lookup_emission_point()` 一致，可以重新作为 benchmark 使用。
 - 重新导出的 core runtime 表为 `43` 个 chunk、约 `15,276,928` runtime 点、`129.49 MB`；连续 core 随机采样 `200000/200000` 命中，批量查表约 `1.05e6 points/s`。
 - `testModule/test_thermocalc_lookup.py` 已覆盖 runtime 右边界拼接、TE 空隙点命中、批量数组 stride 和批量/单点一致性；本轮局部 benchmark 为查表约 `3.72e6 points/s`、解析约 `9.44e4 points/s`、约 `39x`。
@@ -420,13 +424,13 @@ testModule/test_thermocalc_lookup.py
   -> emission_database.py worker
   -> ThermoCalc/emission_database/chunks/*.npz
   -> summarize / verify / optimize-table
-  -> export-runtime
-  -> ThermoCalc/emission_runtime_db/*.runtime.npz
+  -> export-runtime-dense
+  -> ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr/*.runtime.v2.tedb
 
 运行调用:
   ThermoCalcModel.__init__()
   -> load_emission_lookup_database()
-  -> te_solver.add_emission_runtime_block()
+  -> te_solver.load_emission_dense_file()
   -> emissionLookup.cpp 内存索引
   -> thermionicEmission::calc()
   -> queryEmissionLookup()
@@ -436,8 +440,8 @@ testModule/test_thermocalc_lookup.py
 
 关键边界：
 
-- `ThermoCalc/emission_database/` 是原始/审计库，保留诊断字段和 `.optimized.npz` sidecar，不提交 git。
-- `ThermoCalc/emission_runtime_db/` 是运行库，只保留 `J/Vd/delta_V/phiE/phiC/lookup_safe/zero_mask` 和轴，不提交 git。
+- `ThermoCalc/emission_database/pcs_0p02_5torr/` 是当前 `0.02-5.0 torr` 原始/审计库，保留诊断字段和 `.optimized.npz` sidecar，不提交 git。
+- `ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr/` 是当前推荐运行库，只保留 `J/Vd/delta_V/phiE/phiC/lookup_safe/zero_mask` 和轴，并提供 `.tedb` 给 C++ 直接加载，不提交 git。
 - 自动加载需要同时设置 `THERMOCALC_ENABLE_LOOKUP=1` 和 `THERMOCALC_LOOKUP_DB`；默认只加载 `core`，更广覆盖由 `THERMOCALC_LOOKUP_REGIONS` 控制。
 - 当前查表仅在 `ThermoCalc/build_cp312/Release` 测试版 `.pyd` 中验证，根目录生产 `.pyd` 仍未替换。
 
@@ -446,16 +450,32 @@ testModule/test_thermocalc_lookup.py
 当前推荐的运行时查表格式是 `export-runtime-dense` 生成的 dense runtime v2：
 
 ```text
-ThermoCalc/emission_runtime_db_v2/
+ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr/
   runtime_dense_manifest.json
-  core.runtime.v2.npz
-  core.runtime.v2.tedb
+  core.runtime.v2.npz / core.runtime.v2.tedb
+  startup.runtime.v2.npz / startup.runtime.v2.tedb
+  high_power.runtime.v2.npz / high_power.runtime.v2.tedb
+  accident.runtime.v2.npz / accident.runtime.v2.tedb
 ```
 
 该格式按 region 存储一个连续四维张量，字段为 `J/Vd/delta_V/phiE/phiC`，并把 `lookup_safe` 和 `zero_mask` 压缩为 bit-packed mask。`.npz` 是可移植格式，`.tedb` 是 C++ 直接加载格式；包装层发现 `runtime_dense_manifest.json` 后会优先加载 `.tedb`，否则回退到 `.npz`。
 
-旧 core dense v2 表从旧压力范围本地全量库导出，形状为 `86 x 41 x 71 x 41`，共 `10,264,186` 点；`NPZ` 约 `86.87 MiB`，`TEDB` 约 `198.22 MiB`，`TEDB` 加载约 `0.167 s`。连续 core 随机 `200000` 点批量查表约 `1.49e6 points/s`；聚焦回归 `testModule/test_thermocalc_lookup.py` 中查表约 `3.55e6 points/s`、解析法约 `9.87e4 points/s`、约 `36x`。
+2026-06-23 压力范围修正后的全量库将 `core/startup/high_power/accident` 的铯压范围改为 `0.02-5.0 torr`，但保留原 Pcs 点数和 log spacing 类型：`core/high_power=41`、`startup=21`、`accident=31`。这里 `Pcs` 单位明确为 torr，不是 Pa；换算沿用 C++ 生产模型公式 `Pcs_torr = 2.45e8 / sqrt(Tcs) * exp(-8910 / Tcs)`；该范围对应 `Tcs ≈ 441.44-614.62 K`，覆盖当前 `Tcs=600 K` 算例。
 
-2026-06-23 压力范围修正：新的全量 plan 将 `core/startup/high_power/accident` 的铯压范围改为 `0.02-5.0 torr`，但保留原 Pcs 点数和 log spacing 类型：`core/high_power=41`、`startup=21`、`accident=31`。这里 `Pcs` 单位明确为 torr，不是 Pa；换算沿用 C++ 生产模型公式 `Pcs_torr = 2.45e8 / sqrt(Tcs) * exp(-8910 / Tcs)`；该范围对应 `Tcs ≈ 441.44-614.62 K`，覆盖当前 `Tcs=600 K` 算例。此前已经生成的 `ThermoCalc/emission_database/` 和 `ThermoCalc/emission_runtime_db_v2/` 属于旧压力范围产物，后续正式查表使用前需要重新执行 `plan -> worker -> summarize/verify -> optimize-table -> export-runtime-dense`。
+当前 corrected dense runtime v2 汇总：
+
+```text
+total_points: 18,737,388
+total_size_bytes: 537,914,570
+zero_compress: true
+zero_j_threshold: 1e-3
+
+core        shape 86 x 41 x 71 x 41, points 10,264,186, NPZ 87,074,650 bytes, TEDB 207,851,764 bytes
+startup     shape 31 x 31 x 36 x 21, points    726,516, NPZ  5,368,120 bytes, TEDB  14,712,989 bytes
+high_power  shape 25 x 26 x 71 x 41, points  1,892,150, NPZ 18,317,488 bytes, TEDB  38,317,432 bytes
+accident    shape 86 x 61 x 36 x 31, points  5,854,536, NPZ 47,715,973 bytes, TEDB 118,556,154 bytes
+```
+
+加载 smoke 已通过：`load_emission_lookup_database("ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr", regions=["core","startup","high_power","accident"], force=True)` 返回 `4`，`emission_lookup_dense_region_count()` 返回 `4`，`lookup_emission_point(1800, 800, 1.0, 600, 0.5)` 命中 `core`，`lookup_emission_point(1000, 650, 0.5, 600, 0.5)` 命中 `startup`。
 
 `ThermoCalc/emission_runtime_db_v2/` 是生成数据，不提交 git。完整复现命令、字段说明和 v1/v2 对比维护在 [`EMISSION_SCAN_GUIDE.md`](./EMISSION_SCAN_GUIDE.md)。

@@ -407,12 +407,38 @@ For quick regression of the generator itself, use the smoke preset:
 
 ## Current Database Status
 
-As of 2026-06-23, the previously generated full local database under
-`ThermoCalc/emission_database/` used the older pressure ranges
-`0.5-2.0 torr` for `core/startup/high_power` and `0.1-4.0 torr` for
-`accident`. It is now an obsolete pressure-range artifact. Regenerate the
-database before using lookup results for the corrected `0.02-5.0 torr`
-coverage.
+As of 2026-06-23, the corrected `0.02-5.0 torr` local database has been
+generated under:
+
+```text
+ThermoCalc/emission_database/pcs_0p02_5torr/
+```
+
+Generation status:
+
+```text
+planned unique grid points: 18,737,388
+planned chunks: 76
+raw chunk files: 76 / 76
+raw summary files: 76 / 76
+missing chunks: 0
+```
+
+The raw `summarize --scan-chunks` result counts duplicated TE boundary planes
+inside chunk files, so its `done_points` is larger than the unique grid count:
+
+```text
+raw chunk-counted done points: 25,756,400
+raw chunk-counted converged points: 24,857,196
+raw chunk-counted failed or non-finite points: 899,204
+finite rate over done points: 1.0
+```
+
+The unique physical grid count remains `18,737,388`, from `manifest.json`.
+
+The previously generated full local database under `ThermoCalc/emission_database/`
+used the older pressure ranges `0.5-2.0 torr` for `core/startup/high_power` and
+`0.1-4.0 torr` for `accident`. It is now an obsolete pressure-range artifact.
 
 The old generated database summary was:
 
@@ -439,23 +465,24 @@ emission_database/
 
 ## Optimized Lookup Sidecars
 
-The original analytic scan contains non-converged points in startup and accident
-regions. Direct analytic fallback is not useful there because the fallback often
-fails for the same reason. The current table therefore supports optimized
-sidecars:
+The analytic scan can contain non-converged points. Direct analytic fallback is
+not useful there because the fallback often fails for the same reason. The table
+therefore supports optimized sidecars:
 
 ```powershell
-& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py optimize-table --db-dir ThermoCalc\emission_database --zero-j-threshold 1e-3 --region startup --region accident
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py optimize-table --db-dir ThermoCalc\emission_database\pcs_0p02_5torr --zero-j-threshold 1e-3 --region core --region startup --region high_power --region accident
 ```
 
-Current optimized result:
+Current `pcs_0p02_5torr` optimized result:
 
 ```text
-regions optimized: startup, accident
-raw invalid points: 55,506
-zero-filled points: 43,104
-neighbor-imputed points: 12,402
+regions optimized: core, startup, high_power, accident
+total points: 18,737,388
+raw invalid points: 655,530
+zero-filled points: 107,272
+neighbor-imputed points: 548,258
 unresolved points: 0
+optimized safe rate: 1.0
 ```
 
 The optimizer writes `.optimized.npz` files next to raw chunks. The Python
@@ -504,7 +531,7 @@ plane directly.
 Dense runtime v2 is now the recommended local runtime format:
 
 ```powershell
-& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py export-runtime-dense --db-dir ThermoCalc\emission_database --out-dir ThermoCalc\emission_runtime_db_v2 --format both --region core --dtype float32 --zero-compress
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py export-runtime-dense --db-dir ThermoCalc\emission_database\pcs_0p02_5torr --out-dir ThermoCalc\emission_runtime_db_v2\pcs_0p02_5torr --format both --dtype float32 --zero-compress
 ```
 
 It writes `runtime_dense_manifest.json`, one `*.runtime.v2.npz` per region,
@@ -520,8 +547,36 @@ zero_mask_bits
 
 This removes boolean-array overhead and avoids duplicate stitched TE planes.
 `phiE/phiC` remain stored because they are still needed by upper-level boundary
-handling. `ThermoCalc/emission_runtime_db_v2/` is generated runtime data and is
-ignored by git.
+handling.
+
+The current corrected dense runtime v2 output is:
+
+```text
+ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr/
+  runtime_dense_manifest.json
+  core.runtime.v2.npz / core.runtime.v2.tedb
+  startup.runtime.v2.npz / startup.runtime.v2.tedb
+  high_power.runtime.v2.npz / high_power.runtime.v2.tedb
+  accident.runtime.v2.npz / accident.runtime.v2.tedb
+```
+
+Current output summary:
+
+```text
+region_count: 4
+total_points: 18,737,388
+total_size_bytes: 537,914,570
+zero_compress: true
+zero_j_threshold: 1e-3
+
+core        shape 86 x 41 x 71 x 41, points 10,264,186, NPZ 87,074,650 bytes, TEDB 207,851,764 bytes
+startup     shape 31 x 31 x 36 x 21, points    726,516, NPZ  5,368,120 bytes, TEDB  14,712,989 bytes
+high_power  shape 25 x 26 x 71 x 41, points  1,892,150, NPZ 18,317,488 bytes, TEDB  38,317,432 bytes
+accident    shape 86 x 61 x 36 x 31, points  5,854,536, NPZ 47,715,973 bytes, TEDB 118,556,154 bytes
+```
+
+`ThermoCalc/emission_runtime_db_v2/` is generated runtime data and is ignored by
+git.
 
 ## Production Lookup Path
 
@@ -539,7 +594,7 @@ It is enabled only when both environment variables are set:
 
 ```powershell
 $env:THERMOCALC_ENABLE_LOOKUP = "1"
-$env:THERMOCALC_LOOKUP_DB = "E:\项目任务\五院-电源\source_code\TASTIN-python\ThermoCalc\emission_database"
+$env:THERMOCALC_LOOKUP_DB = "E:\项目任务\五院-电源\source_code\TASTIN-python\ThermoCalc\emission_runtime_db_v2\pcs_0p02_5torr"
 ```
 
 Use `THERMOCALC_PYD_DIR` to test the new extension without replacing the root
@@ -557,7 +612,8 @@ through the original analytic calculation.
 database (`manifest.json` + `chunk_plan.json`), the legacy compact runtime
 database (`runtime_manifest.json`), and dense runtime v2
 (`runtime_dense_manifest.json`). For production-style testing, point
-`THERMOCALC_LOOKUP_DB` at `ThermoCalc/emission_runtime_db_v2` or
+`THERMOCALC_LOOKUP_DB` at `ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr`,
+`ThermoCalc/emission_runtime_db_v2`, or
 `ThermoCalc/emission_runtime_db` rather than the full analytic scan directory.
 
 The default loaded scenario is `core` to reduce memory and startup cost. Set
@@ -573,36 +629,35 @@ last-hit cache before running the four-dimensional interpolator.
 
 ## Validation Snapshot
 
-Validated commands and results:
+Current corrected database validation:
 
 ```text
-testModule/test_thermocalc_lookup.py
-  passed
-  dense runtime export/load path covered
-  lookup batch: about 3.55e6 points/s in the focused regression
-  analytic local solver: about 9.87e4 points/s
-  local speedup: about 36x
-  runtime core continuous random sample: 200000 / 200000 found
+raw database: ThermoCalc/emission_database/pcs_0p02_5torr/
+runtime database: ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr/
+planned unique grid points: 18,737,388
+planned chunks: 76
+raw chunk files: 76 / 76
+raw summary files: 76 / 76
+optimized safe rate: 1.0
+unresolved optimized points: 0
+dense runtime v2 total size: 537,914,570 bytes
 ```
 
-Dense runtime v2 core export from the current local full database:
+Dense runtime v2 loading smoke:
 
 ```text
-region: core
-shape: 86 x 41 x 71 x 41
-points: 10,264,186
-lookup_safe_points: 10,264,186
-zero_mask_points: 5,718,001
-NPZ size: 86.87 MiB
-TEDB size: 198.22 MiB
-TEDB load time: about 0.167 s
-batch lookup: about 1.49e6 points/s for 200,000 continuous random core points
+load_emission_lookup_database(..., regions=["core","startup","high_power","accident"], force=True)
+  loaded regions: 4
+  dense region count: 4
+  legacy block count: 0
+  core sample lookup: found=True, source=core
+  startup sample lookup: found=True, source=startup
 ```
 
-For comparison, the previous legacy runtime core export was about `129.49 MiB`,
-loaded more slowly, and measured about `1.05e6 points/s` on the same continuous
-random core benchmark. Dense runtime v2 is therefore the preferred local
-runtime format when the table is regenerated.
+Earlier focused regressions measured dense lookup at about `3.55e6 points/s`
+inside `testModule/test_thermocalc_lookup.py`, versus analytic local solver
+speed of about `9.87e4 points/s`. Re-run that benchmark after replacing or
+selecting the desired `.pyd` if exact machine-local speed is needed.
 
 V13 restart smoke with lookup enabled:
 
