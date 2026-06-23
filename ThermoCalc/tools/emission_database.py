@@ -249,7 +249,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "te_solver_pyd": pyd_info(),
         "diagnostic_interface": "te_solver.calc_emission_point",
         "d_gap": float(args.d_gap),
-        "pressure_formula": "Pcs = 2.45e8 / sqrt(Tcs) * exp(-8910 / Tcs)",
+        "pressure_unit": "torr",
+        "pressure_formula": "Pcs_torr = 2.45e8 / sqrt(Tcs) * exp(-8910 / Tcs)",
         "field_groups": {
             "float_fields": list(FLOAT_FIELDS),
             "int_fields": list(INT_FIELDS),

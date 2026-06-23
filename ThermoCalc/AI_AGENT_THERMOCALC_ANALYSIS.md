@@ -456,6 +456,6 @@ ThermoCalc/emission_runtime_db_v2/
 
 旧 core dense v2 表从旧压力范围本地全量库导出，形状为 `86 x 41 x 71 x 41`，共 `10,264,186` 点；`NPZ` 约 `86.87 MiB`，`TEDB` 约 `198.22 MiB`，`TEDB` 加载约 `0.167 s`。连续 core 随机 `200000` 点批量查表约 `1.49e6 points/s`；聚焦回归 `testModule/test_thermocalc_lookup.py` 中查表约 `3.55e6 points/s`、解析法约 `9.87e4 points/s`、约 `36x`。
 
-2026-06-23 压力范围修正：新的全量 plan 将 `core/startup/high_power/accident` 的铯压轴统一为 `0.02-3.0 torr`、`61` 个 log-spaced 点。此前已经生成的 `ThermoCalc/emission_database/` 和 `ThermoCalc/emission_runtime_db_v2/` 属于旧压力范围产物，后续正式查表使用前需要重新执行 `plan -> worker -> summarize/verify -> optimize-table -> export-runtime-dense`。
+2026-06-23 压力范围修正：新的全量 plan 将 `core/startup/high_power/accident` 的铯压轴统一为 `0.02-3.0 torr`、`61` 个 log-spaced 点。这里 `Pcs` 单位明确为 torr，不是 Pa；换算沿用 C++ 生产模型公式 `Pcs_torr = 2.45e8 / sqrt(Tcs) * exp(-8910 / Tcs)`。此前已经生成的 `ThermoCalc/emission_database/` 和 `ThermoCalc/emission_runtime_db_v2/` 属于旧压力范围产物，后续正式查表使用前需要重新执行 `plan -> worker -> summarize/verify -> optimize-table -> export-runtime-dense`。
 
 `ThermoCalc/emission_runtime_db_v2/` 是生成数据，不提交 git。完整复现命令、字段说明和 v1/v2 对比维护在 [`EMISSION_SCAN_GUIDE.md`](./EMISSION_SCAN_GUIDE.md)。

@@ -357,6 +357,13 @@ regions use the same cesium pressure axis:
 Pcs: 0.02-3.0 torr, 61 log-spaced points
 ```
 
+`Pcs` is in torr, not Pa. The conversion to `Tcs` uses the same formula as the
+C++ production model:
+
+```text
+Pcs_torr = 2.45e8 / sqrt(Tcs) * exp(-8910 / Tcs)
+```
+
 ```text
 core        TE 1300-2150 K, TC 700-900 K,  Vo 0-3.5 V, Pcs 0.02-3.0 torr
 startup     TE 700-1300 K,  TC 500-800 K,  Vo 0-3.5 V, Pcs 0.02-3.0 torr
