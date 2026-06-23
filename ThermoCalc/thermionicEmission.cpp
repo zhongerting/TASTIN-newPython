@@ -1,5 +1,18 @@
 #include "thermionicEmission.h"
+#include "emissionLookup.h"
 #include <iostream>
+#include <limits>
+
+namespace {
+bool allFinite(const std::vector<double>& values) {
+	for (double value : values) {
+		if (!std::isfinite(value)) {
+			return false;
+		}
+	}
+	return true;
+}
+}
 
 thermionicEmission::thermionicEmission() {
 
@@ -36,6 +49,18 @@ void thermionicEmission::initial() {
 }
 
 double thermionicEmission::calc() {
+	if (isEmissionLookupEnabled()) {
+		EmissionLookupQueryResult lookup = queryEmissionLookup(TE, TC, Vo, Tcs, d);
+		if (lookup.found) {
+			J = lookup.J;
+			Vd = lookup.Vd;
+			delta_V = lookup.delta_V;
+			phiE = lookup.phiE;
+			phiC = lookup.phiC;
+			return J;
+		}
+	}
+
 	double gap = 0.05;
 
 	double Jtemp;
@@ -51,6 +76,281 @@ double thermionicEmission::calc() {
 		}
 	}
 	return J;
+}
+
+ThermionicEmissionDiagnosticResult thermionicEmission::calcDiagnostics(bool quiet) {
+	const double gap = 0.05;
+	ThermionicEmissionDiagnosticResult result;
+
+	initial();
+
+	auto mark_result_finite = [&]() {
+		result.finite =
+			std::isfinite(result.J) &&
+			std::isfinite(result.Vd) &&
+			std::isfinite(result.delta_V) &&
+			std::isfinite(result.phiE) &&
+			std::isfinite(result.phiC);
+	};
+
+	auto obstructed = [&]() {
+		auto equations = [&](std::vector<double>& x) {
+			double V_b = x[0], J_e = x[1], J = x[2], V_d = x[3];
+			double V_c = x[4], V_e = x[5], T_ec = x[6], R_GCD = x[7], K_DL = x[8];
+
+			std::vector<double> F(9);
+			F[0] = V_b - (Vo - (phiE - phiC) + V_d);
+			F[1] = J_e - A * TE * TE * exp(-(phiE + V_b) / (k * TE));
+			F[2] = J - J_e / (1 + (0.75 * K_DL + R_GCD) * exp(-V_e / (k * TeE)));
+			F[3] = V_d - (2 * k * (TeE - TE) * (J_e / J - 1) + 2 * k * (T_ec - TE) + 2 * k * (T_ec - TC) * (JC / J));
+			F[4] = V_c - (3 * k * (TeE - T_ec) - 2 * k * (T_ec - TC) * (JC / J));
+			F[5] = V_e - (V_d + V_c);
+			F[6] = T_ec - (3 * TeE + 2 * TC * (JC / J)) / (log((5.5) / (1 + JC / J)) + 2 * JC / J + 3);
+			F[7] = R_GCD - ((1 + JC / J) * exp(V_c / (k * T_ec)) - 1);
+			F[8] = K_DL - (17 * P * d + 3.4e7 * J * d / pow((TeE) / 2, 2.5));
+			return F;
+		};
+
+		std::vector<double> x(9);
+		x[0] = 0.0;
+		x[1] = A * (pow(TE, 2)) * exp(-phiE / k / TE);
+		x[2] = x[1];
+		x[3] = phiE - phiC - Vo;
+		x[4] = 0.;
+		x[5] = x[3];
+		x[6] = TC;
+		x[7] = R;
+		x[8] = d_lambdaEA;
+
+		std::vector<double> F;
+		double error = std::numeric_limits<double>::infinity();
+		const int max_iterations = 100000;
+		const double tolerance = 1e-3;
+		bool converged = false;
+
+		for (int iter = 0; iter < max_iterations; ++iter) {
+			F = equations(x);
+			error = 0.0;
+
+			if (!allFinite(F) || !allFinite(x)) {
+				error = std::numeric_limits<double>::infinity();
+				result.obstructed_iterations = iter + 1;
+				break;
+			}
+
+			for (int i = 0; i < 9; ++i) {
+				error += F[i] * F[i];
+				x[i] -= F[i] * 0.15;
+			}
+
+			result.obstructed_iterations = iter + 1;
+			if (sqrt(error) < tolerance) {
+				converged = true;
+				break;
+			}
+
+			if (x[2] > 0. && x[2] < 1e-6) {
+				x[2] = 0.0;
+				converged = true;
+				break;
+			}
+		}
+
+		if (!converged && !quiet) {
+			std::cout << "Failed to converge after " << max_iterations << " iterations." << std::endl;
+		}
+
+		result.obstructed_residual = sqrt(error);
+		result.converged = converged;
+		Vd = x[3];
+		VC = x[4];
+		VE = x[5];
+		JE = x[1];
+		J = x[2];
+		TeC = x[6];
+		d_lambdaE = x[8];
+		delta_V = x[0];
+		return J;
+	};
+
+	auto transition = [&]() {
+		double JET = A * TE * TE * exp(-phiE / k / TE);
+		double JCT = A * TC * TC * exp(-phiC / k / TC);
+		double TeET = TeE;
+
+		auto equations = [&](std::vector<double>& x) {
+			double VoT = x[0], JT = x[1], VdT = x[2], VCT = x[3];
+			double VET = x[4], TeCT = x[5], RT = x[6], k_dlT = x[7];
+
+			std::vector<double> F(8);
+			F[0] = VoT - (phiE - phiC - VdT);
+			F[1] = JT - (JET / (1. + (0.75 * k_dlT + RT) * exp(-1. * VET / (k * TeET))));
+			F[2] = VdT - (2. * k * (TeET - TE) * (JET / JT - 1.) + 2. * k * (TeCT - TE) + 2. * k * (TeCT - TC) * (JCT / JT));
+			F[3] = VCT - (3. * k * (TeET - TeCT) - 2. * k * (TeCT - TC) * (JCT / JT));
+			F[4] = VET - (VdT + VCT);
+			F[5] = TeCT - ((3. * TeET + 2. * TC * (JCT / JT)) / (log((5. + 0.5) / (1. + JCT / JT)) + 2. * JCT / JT + 3.));
+			F[6] = RT - ((1. + JCT / JT) * exp(VCT / (k * TeCT)) - 1.);
+			F[7] = k_dlT - (17. * P * d + 3.4e7 * JT * d / pow(TeET, 2.5));
+			return F;
+		};
+
+		std::vector<double> x(8);
+		x[0] = Vo;
+		x[1] = JET;
+		x[2] = phiE - phiC - Vo;
+		x[3] = 0.;
+		x[4] = x[2];
+		x[5] = TC;
+		x[6] = R;
+		x[7] = 17. * P * d + 3.4e7 * x[1] * d / pow(TeET, 2.5);
+
+		std::vector<double> F;
+		double error = std::numeric_limits<double>::infinity();
+		const int max_iterations = 10000;
+		const double tolerance = 1e-3;
+		bool converged = false;
+
+		for (int iter = 0; iter < max_iterations; ++iter) {
+			F = equations(x);
+			error = 0.0;
+
+			if (!allFinite(F) || !allFinite(x)) {
+				error = std::numeric_limits<double>::infinity();
+				result.transition_iterations = iter + 1;
+				break;
+			}
+
+			for (int i = 0; i < 8; ++i) {
+				error += F[i] * F[i];
+				x[i] -= F[i] * 0.15;
+			}
+
+			result.transition_iterations = iter + 1;
+			if (sqrt(error) < tolerance) {
+				converged = true;
+				break;
+			}
+
+			if (x[2] > 0. && x[2] < 1e-6) {
+				x[2] = 0.0;
+				converged = true;
+				break;
+			}
+		}
+
+		if (!converged && !quiet) {
+			std::cout << "Failed to converge after " << max_iterations << " iterations." << std::endl;
+		}
+
+		result.transition_residual = sqrt(error);
+		JT = x[1];
+		VdT = x[2];
+		VET = x[4];
+		return converged;
+	};
+
+	auto saturation = [&]() {
+		double JST = A * (pow(TE, 2.)) * exp(-1. * phiE / (k * TE));
+		auto equations = [&](std::vector<double>& x) {
+			double vb = x[0], vd = x[1], vc = x[2], ve = x[3];
+			double js = x[4], j = x[5], tec = x[6], k_dl = x[7];
+
+			std::vector<double> F(8);
+			F[0] = vb - (Vo - (phiE - phiC) + VdT);
+			F[1] = vd - (VdT - vb);
+			F[2] = vc - (3. * k * (TeE - tec) - 2. * k * (tec - TC) * (JC / j));
+			F[3] = ve - (VET - vb);
+			F[4] = js - (JST * (1. - vb / 3.9) * exp(615. / TE * pow((-1. * vb / 3.9 * JST), 0.25)));
+			F[5] = j - (js / (1. + (JST / JT - 1.) * exp(vb / (k * TeE))));
+			F[6] = tec - ((3. * TeE + 2. * TC * (JC / j)) / (log((5. + 0.5) / (1. + JC / j)) + 2. * JC / j + 3.));
+			F[7] = k_dl - (17. * P * d + 3.4E7 * j * d / pow(TeE, 2.5));
+			return F;
+		};
+
+		std::vector<double> x(8);
+		x[0] = delta_V;
+		x[1] = Vd;
+		x[2] = VC;
+		x[3] = VE;
+		x[4] = JST;
+		x[5] = J;
+		x[6] = TeC;
+		x[7] = d_lambdaE;
+
+		std::vector<double> F;
+		double error = std::numeric_limits<double>::infinity();
+		const int max_iterations = 10000;
+		const double tolerance = 1e-3;
+		bool converged = false;
+
+		for (int iter = 0; iter < max_iterations; ++iter) {
+			F = equations(x);
+			error = 0.0;
+
+			if (!allFinite(F) || !allFinite(x)) {
+				error = std::numeric_limits<double>::infinity();
+				result.saturation_iterations = iter + 1;
+				break;
+			}
+
+			for (int i = 0; i < 8; ++i) {
+				error += F[i] * F[i];
+				x[i] -= F[i] * 0.15;
+			}
+
+			result.saturation_iterations = iter + 1;
+			if (sqrt(error) < tolerance) {
+				converged = true;
+				break;
+			}
+
+			if (0 < x[2] && x[2] < 1e-6) {
+				x[2] = 0.0;
+				converged = true;
+				break;
+			}
+		}
+
+		if (!converged && !quiet) {
+			std::cout << "Failed to converge after " << max_iterations << " iterations." << std::endl;
+		}
+
+		result.saturation_residual = sqrt(error);
+		return std::make_pair(x[5], converged);
+	};
+
+	double Jtemp = obstructed();
+	J = Jtemp;
+	result.regime = 0;
+	bool converged = result.converged;
+
+	if (delta_V <= 0.) {
+		bool transition_converged = transition();
+		auto sat = saturation();
+		J = sat.first;
+		converged = converged && transition_converged && sat.second;
+		result.regime = 1;
+		if (abs(delta_V) < gap) {
+			J = (J - Jtemp) / (-gap) * delta_V + Jtemp;
+			result.regime = 2;
+		}
+	}
+
+	result.J = J;
+	result.Vd = Vd;
+	result.delta_V = delta_V;
+	result.phiE = phiE;
+	result.phiC = phiC;
+	result.iteration_count =
+		result.obstructed_iterations +
+		result.transition_iterations +
+		result.saturation_iterations;
+	result.converged = converged;
+	mark_result_finite();
+	if (!result.finite) {
+		result.regime = -1;
+	}
+	return result;
 }
 
 double thermionicEmission::obstructedCalc() {

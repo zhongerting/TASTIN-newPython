@@ -2,6 +2,7 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
+#include <cmath>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -12,7 +13,9 @@ namespace py = pybind11;
 using namespace std;
 
 #include "circuitTECs.h"
+#include "emissionLookup.h"
 #include "singleThermionicEnergyConversion.h"
+#include "thermionicEmission.h"
 
 // -------------------------------------------------------------------------
 // 1. 枚举与辅助结构体定义
@@ -212,6 +215,283 @@ std::unique_ptr<circuitTECs> create_circuit(const InputData& data) {
     return circuit;
 }
 
+py::dict calc_emission_point(double TE, double TC, double Vo, double Tcs, double d_gap) {
+    if (!std::isfinite(TE) || !std::isfinite(TC) || !std::isfinite(Vo) ||
+        !std::isfinite(Tcs) || !std::isfinite(d_gap)) {
+        throw py::value_error("TE, TC, Vo, Tcs, and d_gap must be finite.");
+    }
+    if (TE <= 0.0 || TC <= 0.0 || Tcs <= 0.0 || d_gap <= 0.0) {
+        throw py::value_error("TE, TC, Tcs, and d_gap must be positive.");
+    }
+
+    std::vector<double> input = { TE, TC, Tcs, d_gap, Vo, -1.0, -1.0, -1.0 };
+    thermionicEmission unit(input);
+    ThermionicEmissionDiagnosticResult result = unit.calcDiagnostics(true);
+
+    py::dict out;
+    out["J"] = result.J;
+    out["Vd"] = result.Vd;
+    out["delta_V"] = result.delta_V;
+    out["phiE"] = result.phiE;
+    out["phiC"] = result.phiC;
+    out["regime"] = result.regime;
+    out["converged"] = result.converged;
+    out["finite_flag"] = result.finite;
+    out["iteration_count"] = result.iteration_count;
+    out["obstructed_iterations"] = result.obstructed_iterations;
+    out["transition_iterations"] = result.transition_iterations;
+    out["saturation_iterations"] = result.saturation_iterations;
+    out["obstructed_residual"] = result.obstructed_residual;
+    out["transition_residual"] = result.transition_residual;
+    out["saturation_residual"] = result.saturation_residual;
+    return out;
+}
+
+py::dict calc_emission_point_production(double TE, double TC, double Vo, double Tcs, double d_gap) {
+    if (!std::isfinite(TE) || !std::isfinite(TC) || !std::isfinite(Vo) ||
+        !std::isfinite(Tcs) || !std::isfinite(d_gap)) {
+        throw py::value_error("TE, TC, Vo, Tcs, and d_gap must be finite.");
+    }
+    if (TE <= 0.0 || TC <= 0.0 || Tcs <= 0.0 || d_gap <= 0.0) {
+        throw py::value_error("TE, TC, Tcs, and d_gap must be positive.");
+    }
+    std::vector<double> input = { TE, TC, Tcs, d_gap, Vo, -1.0, -1.0, -1.0 };
+    thermionicEmission unit(input);
+    double J = unit.calc();
+    py::dict out;
+    out["J"] = J;
+    out["Vd"] = unit.Vd;
+    out["delta_V"] = unit.delta_V;
+    out["phiE"] = unit.phiE;
+    out["phiC"] = unit.phiC;
+    return out;
+}
+
+std::vector<double> array_to_vector_1d(const py::array_t<double>& arr, const char* name) {
+    if (arr.ndim() != 1) {
+        throw py::value_error(string(name) + " must be one-dimensional.");
+    }
+    auto r = arr.unchecked<1>();
+    std::vector<double> values(static_cast<std::size_t>(r.shape(0)));
+    for (py::ssize_t i = 0; i < r.shape(0); ++i) {
+        values[static_cast<std::size_t>(i)] = r(i);
+    }
+    return values;
+}
+
+std::vector<float> array_to_vector_flat_float64(const py::array_t<double>& arr, const char* name, std::size_t expected) {
+    if (static_cast<std::size_t>(arr.size()) != expected) {
+        throw py::value_error(string(name) + " size does not match axis product.");
+    }
+    py::array_t<double, py::array::c_style | py::array::forcecast> c_arr(arr);
+    py::buffer_info info = c_arr.request();
+    const double* ptr = static_cast<const double*>(info.ptr);
+    std::vector<float> values(expected);
+    for (std::size_t i = 0; i < expected; ++i) {
+        values[i] = static_cast<float>(ptr[i]);
+    }
+    return values;
+}
+
+std::vector<float> array_to_vector_flat_float32(const py::array_t<float>& arr, const char* name, std::size_t expected) {
+    if (static_cast<std::size_t>(arr.size()) != expected) {
+        throw py::value_error(string(name) + " size does not match axis product.");
+    }
+    py::array_t<float, py::array::c_style | py::array::forcecast> c_arr(arr);
+    py::buffer_info info = c_arr.request();
+    const float* ptr = static_cast<const float*>(info.ptr);
+    std::vector<float> values(expected);
+    for (std::size_t i = 0; i < expected; ++i) {
+        values[i] = ptr[i];
+    }
+    return values;
+}
+
+std::vector<uint8_t> array_to_vector_flat_u8(const py::array_t<uint8_t>& arr, const char* name, std::size_t expected) {
+    if (static_cast<std::size_t>(arr.size()) != expected) {
+        throw py::value_error(string(name) + " size does not match axis product.");
+    }
+    py::array_t<uint8_t, py::array::c_style | py::array::forcecast> c_arr(arr);
+    py::buffer_info info = c_arr.request();
+    const uint8_t* ptr = static_cast<const uint8_t*>(info.ptr);
+    std::vector<uint8_t> values(expected);
+    for (std::size_t i = 0; i < expected; ++i) {
+        values[i] = ptr[i];
+    }
+    return values;
+}
+
+void add_emission_lookup_block(
+    const std::string& name,
+    int priority,
+    const py::array_t<double>& TE_axis,
+    const py::array_t<double>& TC_axis,
+    const py::array_t<double>& Vo_axis,
+    const py::array_t<double>& Tcs_axis,
+    const py::array_t<double>& J,
+    const py::array_t<double>& Vd,
+    const py::array_t<double>& delta_V,
+    const py::array_t<double>& phiE,
+    const py::array_t<double>& phiC,
+    const py::array_t<uint8_t>& lookup_safe)
+{
+    EmissionLookupBlock block;
+    block.name = name;
+    block.priority = priority;
+    block.TE_axis = array_to_vector_1d(TE_axis, "TE_axis");
+    block.TC_axis = array_to_vector_1d(TC_axis, "TC_axis");
+    block.Vo_axis = array_to_vector_1d(Vo_axis, "Vo_axis");
+    block.Tcs_axis = array_to_vector_1d(Tcs_axis, "Tcs_axis");
+    const std::size_t n = block.TE_axis.size() * block.TC_axis.size() * block.Vo_axis.size() * block.Tcs_axis.size();
+    block.J = array_to_vector_flat_float64(J, "J", n);
+    block.Vd = array_to_vector_flat_float64(Vd, "Vd", n);
+    block.delta_V = array_to_vector_flat_float64(delta_V, "delta_V", n);
+    block.phiE = array_to_vector_flat_float64(phiE, "phiE", n);
+    block.phiC = array_to_vector_flat_float64(phiC, "phiC", n);
+    block.lookup_safe = array_to_vector_flat_u8(lookup_safe, "lookup_safe", n);
+    addEmissionLookupBlock(block);
+}
+
+void add_emission_runtime_block(
+    const std::string& name,
+    int priority,
+    int region_id,
+    const py::array_t<double>& TE_axis,
+    const py::array_t<double>& TC_axis,
+    const py::array_t<double>& Vo_axis,
+    const py::array_t<double>& Tcs_axis,
+    const py::array_t<float>& J,
+    const py::array_t<float>& Vd,
+    const py::array_t<float>& delta_V,
+    const py::array_t<float>& phiE,
+    const py::array_t<float>& phiC,
+    const py::array_t<uint8_t>& lookup_safe,
+    const py::array_t<uint8_t>& zero_mask)
+{
+    EmissionLookupBlock block;
+    block.name = name;
+    block.priority = priority;
+    block.region_id = region_id;
+    block.TE_axis = array_to_vector_1d(TE_axis, "TE_axis");
+    block.TC_axis = array_to_vector_1d(TC_axis, "TC_axis");
+    block.Vo_axis = array_to_vector_1d(Vo_axis, "Vo_axis");
+    block.Tcs_axis = array_to_vector_1d(Tcs_axis, "Tcs_axis");
+    const std::size_t n = block.TE_axis.size() * block.TC_axis.size() * block.Vo_axis.size() * block.Tcs_axis.size();
+    block.J = array_to_vector_flat_float32(J, "J", n);
+    block.Vd = array_to_vector_flat_float32(Vd, "Vd", n);
+    block.delta_V = array_to_vector_flat_float32(delta_V, "delta_V", n);
+    block.phiE = array_to_vector_flat_float32(phiE, "phiE", n);
+    block.phiC = array_to_vector_flat_float32(phiC, "phiC", n);
+    block.lookup_safe = array_to_vector_flat_u8(lookup_safe, "lookup_safe", n);
+    block.zero_mask = array_to_vector_flat_u8(zero_mask, "zero_mask", n);
+    addEmissionLookupBlock(block);
+}
+
+void add_emission_dense_region(
+    const std::string& name,
+    int priority,
+    int region_id,
+    double d_gap,
+    const py::array_t<double>& TE_axis,
+    const py::array_t<double>& TC_axis,
+    const py::array_t<double>& Vo_axis,
+    const py::array_t<double>& Tcs_axis,
+    const py::array_t<float>& J,
+    const py::array_t<float>& Vd,
+    const py::array_t<float>& delta_V,
+    const py::array_t<float>& phiE,
+    const py::array_t<float>& phiC,
+    const py::array_t<uint8_t>& lookup_safe_bits,
+    const py::array_t<uint8_t>& zero_mask_bits,
+    std::size_t point_count)
+{
+    DenseEmissionLookupRegion region;
+    region.name = name;
+    region.priority = priority;
+    region.region_id = region_id;
+    region.d_gap = d_gap;
+    region.TE_axis = array_to_vector_1d(TE_axis, "TE_axis");
+    region.TC_axis = array_to_vector_1d(TC_axis, "TC_axis");
+    region.Vo_axis = array_to_vector_1d(Vo_axis, "Vo_axis");
+    region.Tcs_axis = array_to_vector_1d(Tcs_axis, "Tcs_axis");
+    const std::size_t n = region.TE_axis.size() * region.TC_axis.size() * region.Vo_axis.size() * region.Tcs_axis.size();
+    if (point_count != n) {
+        throw py::value_error("point_count does not match dense axis product.");
+    }
+    const std::size_t bit_bytes = (n + 7u) / 8u;
+    region.point_count = n;
+    region.J = array_to_vector_flat_float32(J, "J", n);
+    region.Vd = array_to_vector_flat_float32(Vd, "Vd", n);
+    region.delta_V = array_to_vector_flat_float32(delta_V, "delta_V", n);
+    region.phiE = array_to_vector_flat_float32(phiE, "phiE", n);
+    region.phiC = array_to_vector_flat_float32(phiC, "phiC", n);
+    region.lookup_safe_bits = array_to_vector_flat_u8(lookup_safe_bits, "lookup_safe_bits", bit_bytes);
+    region.zero_mask_bits = array_to_vector_flat_u8(zero_mask_bits, "zero_mask_bits", bit_bytes);
+    addEmissionDenseRegion(region);
+}
+
+py::dict lookup_emission_point(double TE, double TC, double Vo, double Tcs, double d_gap) {
+    EmissionLookupQueryResult result = queryEmissionLookup(TE, TC, Vo, Tcs, d_gap);
+    py::dict out;
+    out["found"] = result.found;
+    out["source"] = result.source;
+    out["J"] = result.J;
+    out["Vd"] = result.Vd;
+    out["delta_V"] = result.delta_V;
+    out["phiE"] = result.phiE;
+    out["phiC"] = result.phiC;
+    return out;
+}
+
+py::dict lookup_emission_points(
+    const py::array_t<double>& TE,
+    const py::array_t<double>& TC,
+    const py::array_t<double>& Vo,
+    const py::array_t<double>& Tcs,
+    double d_gap)
+{
+    if (TE.ndim() != 1 || TC.ndim() != 1 || Vo.ndim() != 1 || Tcs.ndim() != 1) {
+        throw py::value_error("TE, TC, Vo, and Tcs must be one-dimensional arrays.");
+    }
+    const py::ssize_t n = TE.shape(0);
+    if (TC.shape(0) != n || Vo.shape(0) != n || Tcs.shape(0) != n) {
+        throw py::value_error("TE, TC, Vo, and Tcs must have the same length.");
+    }
+    auto te = TE.unchecked<1>();
+    auto tc = TC.unchecked<1>();
+    auto vo = Vo.unchecked<1>();
+    auto tcs = Tcs.unchecked<1>();
+    py::array_t<double> J({ n }, { static_cast<py::ssize_t>(sizeof(double)) });
+    py::array_t<double> Vd({ n }, { static_cast<py::ssize_t>(sizeof(double)) });
+    py::array_t<double> delta_V({ n }, { static_cast<py::ssize_t>(sizeof(double)) });
+    py::array_t<double> phiE({ n }, { static_cast<py::ssize_t>(sizeof(double)) });
+    py::array_t<double> phiC({ n }, { static_cast<py::ssize_t>(sizeof(double)) });
+    py::array_t<uint8_t> found({ n }, { static_cast<py::ssize_t>(sizeof(uint8_t)) });
+    auto j_out = J.mutable_unchecked<1>();
+    auto vd_out = Vd.mutable_unchecked<1>();
+    auto dv_out = delta_V.mutable_unchecked<1>();
+    auto pe_out = phiE.mutable_unchecked<1>();
+    auto pc_out = phiC.mutable_unchecked<1>();
+    auto found_out = found.mutable_unchecked<1>();
+    for (py::ssize_t i = 0; i < n; ++i) {
+        EmissionLookupQueryResult result = queryEmissionLookup(te(i), tc(i), vo(i), tcs(i), d_gap);
+        found_out(i) = result.found ? 1 : 0;
+        j_out(i) = result.J;
+        vd_out(i) = result.Vd;
+        dv_out(i) = result.delta_V;
+        pe_out(i) = result.phiE;
+        pc_out(i) = result.phiC;
+    }
+    py::dict out;
+    out["found"] = found;
+    out["J"] = J;
+    out["Vd"] = Vd;
+    out["delta_V"] = delta_V;
+    out["phiE"] = phiE;
+    out["phiC"] = phiC;
+    return out;
+}
+
 // -------------------------------------------------------------------------
 // 4. Pybind11 模块定义
 // -------------------------------------------------------------------------
@@ -310,5 +590,108 @@ PYBIND11_MODULE(te_solver, m) {
 
     // 5. 绑定工厂函数
     m.def("create_circuit", &create_circuit, "Create and initialize the circuit from InputData");
+    m.def("clear_emission_lookup", &clearEmissionLookup);
+    m.def("set_emission_lookup_enabled", &setEmissionLookupEnabled, py::arg("enabled"));
+    m.def("is_emission_lookup_enabled", &isEmissionLookupEnabled);
+    m.def("emission_lookup_block_count", &emissionLookupBlockCount);
+    m.def("emission_lookup_region_count", &emissionLookupRegionCount);
+    m.def("emission_lookup_dense_region_count", &emissionLookupDenseRegionCount);
+    m.def(
+        "add_emission_lookup_block",
+        &add_emission_lookup_block,
+        py::arg("name"),
+        py::arg("priority"),
+        py::arg("TE_axis"),
+        py::arg("TC_axis"),
+        py::arg("Vo_axis"),
+        py::arg("Tcs_axis"),
+        py::arg("J"),
+        py::arg("Vd"),
+        py::arg("delta_V"),
+        py::arg("phiE"),
+        py::arg("phiC"),
+        py::arg("lookup_safe")
+    );
+    m.def(
+        "add_emission_runtime_block",
+        &add_emission_runtime_block,
+        py::arg("name"),
+        py::arg("priority"),
+        py::arg("region_id"),
+        py::arg("TE_axis"),
+        py::arg("TC_axis"),
+        py::arg("Vo_axis"),
+        py::arg("Tcs_axis"),
+        py::arg("J"),
+        py::arg("Vd"),
+        py::arg("delta_V"),
+        py::arg("phiE"),
+        py::arg("phiC"),
+        py::arg("lookup_safe"),
+        py::arg("zero_mask")
+    );
+    m.def(
+        "add_emission_dense_region",
+        &add_emission_dense_region,
+        py::arg("name"),
+        py::arg("priority"),
+        py::arg("region_id"),
+        py::arg("d_gap"),
+        py::arg("TE_axis"),
+        py::arg("TC_axis"),
+        py::arg("Vo_axis"),
+        py::arg("Tcs_axis"),
+        py::arg("J"),
+        py::arg("Vd"),
+        py::arg("delta_V"),
+        py::arg("phiE"),
+        py::arg("phiC"),
+        py::arg("lookup_safe_bits"),
+        py::arg("zero_mask_bits"),
+        py::arg("point_count")
+    );
+    m.def(
+        "load_emission_dense_file",
+        &loadEmissionDenseFile,
+        py::arg("path")
+    );
+    m.def(
+        "lookup_emission_point",
+        &lookup_emission_point,
+        py::arg("TE"),
+        py::arg("TC"),
+        py::arg("Vo"),
+        py::arg("Tcs"),
+        py::arg("d_gap") = 0.5
+    );
+    m.def(
+        "lookup_emission_points",
+        &lookup_emission_points,
+        py::arg("TE"),
+        py::arg("TC"),
+        py::arg("Vo"),
+        py::arg("Tcs"),
+        py::arg("d_gap") = 0.5
+    );
+    m.def(
+        "calc_emission_point",
+        &calc_emission_point,
+        py::arg("TE"),
+        py::arg("TC"),
+        py::arg("Vo"),
+        py::arg("Tcs"),
+        py::arg("d_gap") = 0.5,
+        "Evaluate one local thermionic-emission point with diagnostic metadata."
+    );
+    m.def(
+        "calc_emission_point_production",
+        &calc_emission_point_production,
+        py::arg("TE"),
+        py::arg("TC"),
+        py::arg("Vo"),
+        py::arg("Tcs"),
+        py::arg("d_gap") = 0.5,
+        "Evaluate one local thermionic-emission point through production calc()."
+    );
 }
 

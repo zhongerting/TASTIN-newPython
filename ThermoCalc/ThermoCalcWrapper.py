@@ -3,6 +3,7 @@ import sys
 import numpy as np
 import time
 import logging
+from pathlib import Path
 
 from profiler import TEASAProfiler
 
@@ -16,8 +17,14 @@ logger = logging.getLogger(__name__)
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
 # 将该目录置于系统搜索路径的最高优先级 (Index 0)
+_pyd_dir = os.environ.get("THERMOCALC_PYD_DIR")
+if _pyd_dir:
+    _pyd_dir = os.path.abspath(_pyd_dir)
+    if _pyd_dir not in sys.path:
+        sys.path.insert(0, _pyd_dir)
+
 if current_dir not in sys.path:
-    sys.path.insert(0, current_dir)
+    sys.path.insert(1 if _pyd_dir else 0, current_dir)
 
 # =========================================================
 # 宽容导入机制 (Graceful Import)
@@ -32,6 +39,179 @@ except ImportError as e:
                    f"Detail: {e}")
 
 
+_LOOKUP_LOADED_DB = None
+_LOOKUP_LOADED_REGIONS = None
+
+
+def _env_flag(name: str) -> bool:
+    value = os.environ.get(name, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_lookup_regions(regions=None):
+    if regions is None:
+        text = os.environ.get("THERMOCALC_LOOKUP_REGIONS", "").strip()
+        if text:
+            regions = [part.strip() for part in text.split(",") if part.strip()]
+    if regions is None:
+        return ("core",)
+    if isinstance(regions, str):
+        regions = [part.strip() for part in regions.split(",") if part.strip()]
+    result = tuple(str(region).strip() for region in regions if str(region).strip())
+    return result or ("core",)
+
+
+def _load_runtime_lookup_database(db_path: Path, manifest: dict, regions: tuple[str, ...]) -> int:
+    if not hasattr(te_solver, "add_emission_runtime_block"):
+        raise RuntimeError("te_solver does not expose runtime lookup API.")
+    wanted = set(regions)
+    for chunk in manifest["chunks"]:
+        region = str(chunk["region"])
+        if region not in wanted:
+            continue
+        data_path = db_path / chunk["output"]
+        with np.load(data_path, allow_pickle=False) as data:
+            te_solver.add_emission_runtime_block(
+                str(chunk["chunk_id"]),
+                int(chunk["priority"]),
+                int(chunk["region_id"]),
+                np.asarray(data["TE_axis"], dtype=np.float64),
+                np.asarray(data["TC_axis"], dtype=np.float64),
+                np.asarray(data["Vo_axis"], dtype=np.float64),
+                np.asarray(data["Tcs_axis"], dtype=np.float64),
+                np.asarray(data["J"], dtype=np.float32),
+                np.asarray(data["Vd"], dtype=np.float32),
+                np.asarray(data["delta_V"], dtype=np.float32),
+                np.asarray(data["phiE"], dtype=np.float32),
+                np.asarray(data["phiC"], dtype=np.float32),
+                np.asarray(data["lookup_safe"], dtype=np.uint8),
+                np.asarray(data["zero_mask"], dtype=np.uint8),
+            )
+    return int(te_solver.emission_lookup_block_count())
+
+
+def _load_dense_runtime_lookup_database(db_path: Path, manifest: dict, regions: tuple[str, ...]) -> int:
+    if not hasattr(te_solver, "add_emission_dense_region"):
+        raise RuntimeError("te_solver does not expose dense runtime lookup API.")
+    wanted = set(regions)
+    for region_name, meta in manifest["regions"].items():
+        region = str(region_name)
+        if region not in wanted:
+            continue
+        outputs = dict(meta.get("outputs", {}))
+        binary_output = outputs.get("binary")
+        if binary_output and hasattr(te_solver, "load_emission_dense_file"):
+            te_solver.load_emission_dense_file(str(db_path / binary_output))
+            continue
+        npz_output = outputs.get("npz")
+        if not npz_output:
+            raise FileNotFoundError(f"Dense runtime region {region} has no loadable npz/binary output.")
+        data_path = db_path / npz_output
+        with np.load(data_path, allow_pickle=False) as data:
+            point_count = int(np.prod(data["J"].shape))
+            te_solver.add_emission_dense_region(
+                region,
+                int(meta["priority"]),
+                int(meta["region_id"]),
+                float(meta.get("d_gap", manifest.get("d_gap", 0.5))),
+                np.asarray(data["TE_axis"], dtype=np.float64),
+                np.asarray(data["TC_axis"], dtype=np.float64),
+                np.asarray(data["Vo_axis"], dtype=np.float64),
+                np.asarray(data["Tcs_axis"], dtype=np.float64),
+                np.asarray(data["J"], dtype=np.float32),
+                np.asarray(data["Vd"], dtype=np.float32),
+                np.asarray(data["delta_V"], dtype=np.float32),
+                np.asarray(data["phiE"], dtype=np.float32),
+                np.asarray(data["phiC"], dtype=np.float32),
+                np.asarray(data["lookup_safe_bits"], dtype=np.uint8),
+                np.asarray(data["zero_mask_bits"], dtype=np.uint8),
+                point_count,
+            )
+    if hasattr(te_solver, "emission_lookup_dense_region_count"):
+        return int(te_solver.emission_lookup_dense_region_count())
+    return int(te_solver.emission_lookup_region_count())
+
+
+def _load_full_lookup_database(db_path: Path, manifest: dict, plan: dict, regions: tuple[str, ...]) -> int:
+    wanted = set(regions)
+    for chunk in plan["chunks"]:
+        region = str(chunk["region"])
+        if region not in wanted:
+            continue
+        priority = int(manifest["regions"][region]["priority"])
+        raw_path = db_path / chunk["output"]
+        data_path = raw_path.with_suffix(".optimized.npz")
+        if not data_path.exists():
+            data_path = raw_path
+        with np.load(data_path, allow_pickle=False) as data:
+            if "lookup_safe_flag" in data.files:
+                safe = np.asarray(data["lookup_safe_flag"], dtype=np.uint8)
+            else:
+                safe = np.asarray(data["done"] & data["finite_flag"] & data["converged"], dtype=np.uint8)
+            te_solver.add_emission_lookup_block(
+                str(chunk["chunk_id"]),
+                priority,
+                np.asarray(data["TE_axis"], dtype=np.float64),
+                np.asarray(data["TC_axis"], dtype=np.float64),
+                np.asarray(data["Vo_axis"], dtype=np.float64),
+                np.asarray(data["Tcs_axis"], dtype=np.float64),
+                np.asarray(data["J"], dtype=np.float64),
+                np.asarray(data["Vd"], dtype=np.float64),
+                np.asarray(data["delta_V"], dtype=np.float64),
+                np.asarray(data["phiE"], dtype=np.float64),
+                np.asarray(data["phiC"], dtype=np.float64),
+                safe,
+            )
+    return int(te_solver.emission_lookup_block_count())
+
+
+def load_emission_lookup_database(db_dir: str, *, enable: bool = True, force: bool = False, regions=None) -> int:
+    """Load the emission lookup database into the C++ te_solver singleton."""
+    global _LOOKUP_LOADED_DB, _LOOKUP_LOADED_REGIONS
+    if not HAS_TE_SOLVER:
+        raise RuntimeError("te_solver is unavailable; cannot load emission lookup database.")
+    required = ("clear_emission_lookup", "add_emission_lookup_block", "set_emission_lookup_enabled")
+    missing = [name for name in required if not hasattr(te_solver, name)]
+    if missing:
+        raise RuntimeError(f"te_solver does not expose lookup API: {missing}")
+
+    db_path = Path(db_dir).resolve()
+    region_tuple = _normalize_lookup_regions(regions)
+    if _LOOKUP_LOADED_DB == str(db_path) and _LOOKUP_LOADED_REGIONS == region_tuple and not force:
+        te_solver.set_emission_lookup_enabled(bool(enable))
+        return int(te_solver.emission_lookup_block_count())
+
+    dense_manifest_path = db_path / "runtime_dense_manifest.json"
+    runtime_manifest_path = db_path / "runtime_manifest.json"
+    manifest_path = db_path / "manifest.json"
+    plan_path = db_path / "chunk_plan.json"
+    if not dense_manifest_path.exists() and not runtime_manifest_path.exists() and (not manifest_path.exists() or not plan_path.exists()):
+        raise FileNotFoundError(f"Missing emission lookup manifest/chunk_plan under {db_path}")
+
+    import json
+
+    te_solver.clear_emission_lookup()
+    if dense_manifest_path.exists():
+        with dense_manifest_path.open("r", encoding="utf-8") as f:
+            dense_manifest = json.load(f)
+        loaded_blocks = _load_dense_runtime_lookup_database(db_path, dense_manifest, region_tuple)
+    elif runtime_manifest_path.exists():
+        with runtime_manifest_path.open("r", encoding="utf-8") as f:
+            runtime_manifest = json.load(f)
+        loaded_blocks = _load_runtime_lookup_database(db_path, runtime_manifest, region_tuple)
+    else:
+        with manifest_path.open("r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        with plan_path.open("r", encoding="utf-8") as f:
+            plan = json.load(f)
+        loaded_blocks = _load_full_lookup_database(db_path, manifest, plan, region_tuple)
+
+    te_solver.set_emission_lookup_enabled(bool(enable))
+    _LOOKUP_LOADED_DB = str(db_path)
+    _LOOKUP_LOADED_REGIONS = region_tuple
+    return int(loaded_blocks)
+
+
 class ThermoCalcModel:
     """
     热离子能量转换器 (TEC) 的纯 Python 封装外壳
@@ -41,6 +221,11 @@ class ThermoCalcModel:
     def __init__(self, n_elements: int, n_nodes: int):
         self.N_elem = n_elements
         self.n_node = n_nodes
+
+        lookup_db = os.environ.get("THERMOCALC_LOOKUP_DB")
+        if lookup_db and _env_flag("THERMOCALC_ENABLE_LOOKUP"):
+            loaded_blocks = load_emission_lookup_database(lookup_db, enable=True)
+            logger.info("Loaded ThermoCalc emission lookup database: %s blocks", loaded_blocks)
 
         # 保存底层的 C++ 计算核心对象
         self._circuit = None
