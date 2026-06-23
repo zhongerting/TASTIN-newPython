@@ -115,6 +115,8 @@ TEC C++ 支路
 
 `ThermoCalc/THERMOCALC_ANALYSIS.md` 和 `ThermoCalc/NONUNIFORM_GRID_GUIDE.md` 是历史或专题材料，不是当前 ThermoCalc 源码事实基准。
 
+涉及热离子查表数据库、runtime 表、扫描/优化/导出/加载流程时，先读 [`ThermoCalc/EMISSION_SCAN_GUIDE.md`](./ThermoCalc/EMISSION_SCAN_GUIDE.md) 的 `End-to-End Lookup Workflow`，不要在本文展开流程细节。
+
 ## 5. 两条主要系统路径
 
 ### 5.1 堆芯全系统路径
