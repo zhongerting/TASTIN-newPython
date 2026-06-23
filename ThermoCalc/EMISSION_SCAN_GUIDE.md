@@ -82,6 +82,224 @@ lookup table yet. Future lookup-table acceleration must remain optional and
 fall back to the analytic solver for table misses, failed neighborhoods, or
 non-finite interpolation results.
 
+## End-to-End Lookup Workflow
+
+The thermionic lookup workflow has two separate phases: an offline data
+generation phase and a runtime calculation phase. The original analytic solver
+remains the source of truth in the offline phase and remains the fallback in the
+runtime phase.
+
+```text
+offline:
+  thermionicEmission::calcDiagnostics()
+    -> emission_database.py plan / worker
+    -> ThermoCalc/emission_database/
+    -> summarize / verify / optimize-table
+    -> emission_database.py export-runtime
+    -> ThermoCalc/emission_runtime_db/
+
+runtime:
+  ThermoCalcWrapper.py
+    -> load_emission_lookup_database()
+    -> te_solver.add_emission_runtime_block()
+    -> emissionLookup.cpp in-memory store
+    -> thermionicEmission::calc()
+    -> queryEmissionLookup()
+    -> hit: return lookup J/Vd/delta_V/phiE/phiC
+    -> miss: execute original analytic calc()
+```
+
+### 1. Define The Scan Grid
+
+`emission_database.py plan` builds the scan axes and chunk plan. The axes are
+stored under `ThermoCalc/emission_database/axes/`, and the chunk layout is
+stored in `chunk_plan.json`.
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py plan --db-dir ThermoCalc\emission_database --preset full
+```
+
+The scan variables are:
+
+```text
+TE   emitter temperature
+TC   collector temperature
+Vo   output/electrode voltage parameter
+Pcs  cesium pressure
+Tcs  cesium temperature converted from Pcs
+```
+
+The table is split into regions: `core`, `startup`, `high_power`, and
+`accident`. Region priority is used at runtime when regions overlap; lower
+priority numbers are preferred.
+
+### 2. Generate Raw Diagnostic Chunks
+
+`emission_database.py worker` reads `chunk_plan.json`, calculates assigned
+chunks, and writes raw `.npz` files under `ThermoCalc/emission_database/chunks/`.
+Each point calls the diagnostic C++ path:
+
+```text
+te_solver.calc_emission_point()
+  -> thermionicEmission::calcDiagnostics()
+```
+
+The raw chunk files contain both runtime fields and diagnostic fields:
+
+```text
+runtime fields:
+  J, Vd, delta_V, phiE, phiC
+
+diagnostic fields:
+  converged, finite_flag, done
+  regime, iteration_count, error_code
+  valid_for_interpolation, near_failed_region
+  zero_emission_flag, high_risk_flag, source_region_id
+```
+
+Typical parallel generation uses multiple workers:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py worker --db-dir ThermoCalc\emission_database --worker-id w0 --worker-index 0 --worker-count 6
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py worker --db-dir ThermoCalc\emission_database --worker-id w1 --worker-index 1 --worker-count 6
+```
+
+### 3. Summarize, Verify, And Optimize
+
+After raw chunks are generated, `summarize` writes audit outputs under
+`ThermoCalc/emission_database/summaries/`, and `verify` compares sampled table
+points against the diagnostic analytic solver.
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py summarize --db-dir ThermoCalc\emission_database --scan-chunks
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py verify --db-dir ThermoCalc\emission_database --samples 200
+```
+
+`optimize-table` is used for regions where the raw analytic scan has known
+non-converged points. It writes `.optimized.npz` sidecars next to raw chunks.
+Those sidecars are preferred by the runtime exporter and loader.
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py optimize-table --db-dir ThermoCalc\emission_database --zero-j-threshold 1e-3 --region startup --region accident
+```
+
+The optimization policy is:
+
+```text
+safe zero-emission points:
+  set J = 0 and keep voltage/work-function fields
+
+remaining isolated invalid points:
+  use neighbor imputation where available
+
+unresolved points:
+  stay unsafe and will not be used for interpolation
+```
+
+### 4. Export The Runtime Database
+
+The raw database is audit-friendly but too large and too detailed for normal
+runtime use. `export-runtime` creates the compact runtime database under
+`ThermoCalc/emission_runtime_db/`.
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py export-runtime --db-dir ThermoCalc\emission_database --out-dir ThermoCalc\emission_runtime_db --dtype float32 --zero-compress
+```
+
+The runtime export keeps only:
+
+```text
+TE_axis, TC_axis, Vo_axis, Tcs_axis
+J, Vd, delta_V, phiE, phiC
+lookup_safe, zero_mask
+```
+
+It also stitches the first TE plane from the next source chunk onto the current
+runtime chunk when needed. This is what makes legacy chunks such as
+`1300-1310 K` and `1320-1330 K` become continuous runtime chunks such as
+`1300-1320 K` and `1320-1340 K`.
+
+### 5. Load The Runtime Database
+
+At runtime, use the test extension and enable lookup explicitly:
+
+```powershell
+$env:THERMOCALC_PYD_DIR = "E:\项目任务\五院-电源\source_code\TASTIN-python\ThermoCalc\build_cp312\Release"
+$env:THERMOCALC_ENABLE_LOOKUP = "1"
+$env:THERMOCALC_LOOKUP_DB = "E:\项目任务\五院-电源\source_code\TASTIN-python\ThermoCalc\emission_runtime_db"
+$env:THERMOCALC_LOOKUP_REGIONS = "core"
+```
+
+`ThermoCalcModel.__init__()` calls `load_emission_lookup_database()` when
+`THERMOCALC_ENABLE_LOOKUP=1` and `THERMOCALC_LOOKUP_DB` is set. The loader
+detects `runtime_manifest.json`, reads selected region chunks, and calls:
+
+```text
+te_solver.clear_emission_lookup()
+te_solver.add_emission_runtime_block(...)
+te_solver.set_emission_lookup_enabled(True)
+```
+
+The selected regions default to `core`. Set
+`THERMOCALC_LOOKUP_REGIONS=core,startup,high_power,accident` when the system
+needs full startup, high-power, and accident coverage.
+
+### 6. Query During TEC Calculation
+
+The production path enters C++ through `CircuitTECs.calc()` and eventually calls
+`thermionicEmission::calc()` for each local emission solve. `calc()` first asks
+the in-memory lookup store:
+
+```text
+queryEmissionLookup(TE, TC, Vo, Tcs, d_gap)
+```
+
+The C++ store checks:
+
+```text
+d_gap support
+last-block cache
+region priority
+TE chunk index
+chunk bounding box
+axis location
+lookup_safe on all interpolation corners
+finite interpolated fields
+```
+
+A safe hit directly fills:
+
+```text
+J, Vd, delta_V, phiE, phiC
+```
+
+and returns without running the analytic iteration. A miss falls through to the
+original analytic `thermionicEmission::calc()` logic. This fallback is deliberate
+so the lookup path remains optional and does not remove the existing solver.
+
+### 7. Verify The Full Chain
+
+Use the focused lookup regression after changing table generation, runtime
+export, bindings, or C++ interpolation:
+
+```powershell
+$env:THERMOCALC_PYD_DIR = "E:\项目任务\五院-电源\source_code\TASTIN-python\ThermoCalc\build_cp312\Release"
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_lookup.py
+```
+
+This test covers:
+
+```text
+raw chunk loading
+optimized sidecar loading
+runtime export/load
+TE boundary stitching
+single-point lookup
+batch lookup output layout
+production calc() lookup branch
+lookup-vs-analytic speed comparison
+```
+
 ## Emission Database Generator
 
 The larger optional lookup-table dataset is managed by:

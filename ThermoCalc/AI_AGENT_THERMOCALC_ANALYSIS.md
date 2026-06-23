@@ -407,3 +407,36 @@ testModule/test_thermocalc_lookup.py
 - 修复 `lookup_emission_points()` 输出数组 stride 为 `0` 的绑定问题；批量 API 现在与单点 `lookup_emission_point()` 一致，可以重新作为 benchmark 使用。
 - 重新导出的 core runtime 表为 `43` 个 chunk、约 `15,276,928` runtime 点、`129.49 MB`；连续 core 随机采样 `200000/200000` 命中，批量查表约 `1.05e6 points/s`。
 - `testModule/test_thermocalc_lookup.py` 已覆盖 runtime 右边界拼接、TE 空隙点命中、批量数组 stride 和批量/单点一致性；本轮局部 benchmark 为查表约 `3.72e6 points/s`、解析约 `9.44e4 points/s`、约 `39x`。
+
+## 16. 热离子查表完整流程索引
+
+热离子查表当前分为离线数据生成和运行时调用两条链，详细步骤维护在 [`EMISSION_SCAN_GUIDE.md`](./EMISSION_SCAN_GUIDE.md) 的 `End-to-End Lookup Workflow`。
+
+最小流程如下：
+
+```text
+离线生成:
+  emission_database.py plan
+  -> emission_database.py worker
+  -> ThermoCalc/emission_database/chunks/*.npz
+  -> summarize / verify / optimize-table
+  -> export-runtime
+  -> ThermoCalc/emission_runtime_db/*.runtime.npz
+
+运行调用:
+  ThermoCalcModel.__init__()
+  -> load_emission_lookup_database()
+  -> te_solver.add_emission_runtime_block()
+  -> emissionLookup.cpp 内存索引
+  -> thermionicEmission::calc()
+  -> queryEmissionLookup()
+  -> 命中则返回 J/Vd/delta_V/phiE/phiC
+  -> 未命中则回退原解析 calc()
+```
+
+关键边界：
+
+- `ThermoCalc/emission_database/` 是原始/审计库，保留诊断字段和 `.optimized.npz` sidecar，不提交 git。
+- `ThermoCalc/emission_runtime_db/` 是运行库，只保留 `J/Vd/delta_V/phiE/phiC/lookup_safe/zero_mask` 和轴，不提交 git。
+- 自动加载需要同时设置 `THERMOCALC_ENABLE_LOOKUP=1` 和 `THERMOCALC_LOOKUP_DB`；默认只加载 `core`，更广覆盖由 `THERMOCALC_LOOKUP_REGIONS` 控制。
+- 当前查表仅在 `ThermoCalc/build_cp312/Release` 测试版 `.pyd` 中验证，根目录生产 `.pyd` 仍未替换。
