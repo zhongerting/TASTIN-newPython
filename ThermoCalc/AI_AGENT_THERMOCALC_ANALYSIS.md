@@ -374,3 +374,28 @@ f(TE, TC, Vo, phiE, phiC, d_gap, Tcs) -> J / Vd / delta_V / phiE / phiC
 - 查表 warm-start 后 TEC 单次更新约 `1.8 s`；setup 阶段导线电阻重建后的首次 TEC 约 `7.81 s`。
 
 当前判断：查表路径已经把 TEC 从主要瓶颈之一降为次要瓶颈；V13 长算主耗时转移到导热求解和系统层调度。后续若继续优化速度，优先检查导热 solid 数量、辐射器管壁求解、coupler/组件调度开销，以及 `circuitTECs` 外层迭代次数，而不是继续只优化局部 `thermionicEmission` 单点。
+
+## 15. 2026-06-23 runtime 查表压缩与索引
+
+本轮在不删除原解析法、不替换根目录生产 `.pyd` 的前提下，新增了运行时专用查表格式和 C++ 查询索引：
+
+- `tools/emission_database.py export-runtime` 从 `ThermoCalc/emission_database/` 导出 `ThermoCalc/emission_runtime_db/`，优先读取 `.optimized.npz`，输出 `runtime_manifest.json` 和按 region 分开的 `*.runtime.npz`。
+- runtime 表只保留 `TE_axis/TC_axis/Vo_axis/Tcs_axis`、`J/Vd/delta_V/phiE/phiC`、`lookup_safe/zero_mask`；默认字段精度为 `float32`，但 `phiE/phiC` 保留，供边界条件继续调用。
+- `zero_mask` 标记安全零电流区；启用 `--zero-compress` 后这些点的 `J` 在 runtime 表中直接写为 `0`，但电压和功函数字段仍参与插值。
+- `ThermoCalcWrapper.load_emission_lookup_database(..., regions=...)` 同时支持旧全量库和 runtime 库；默认只加载 `core`，可用环境变量 `THERMOCALC_LOOKUP_REGIONS=core,startup,high_power,accident` 扩展覆盖。
+- `emissionLookup.*` 内部按 `region_id/priority` 建索引，对每块维护 bbox，用 TE chunk 直接定位候选块，并缓存上一次命中的块，减少全表线性扫描。
+
+当前定向验证：
+
+```text
+cmake --build ThermoCalc\build_cp312 --config Release
+python -m py_compile ThermoCalc\ThermoCalcWrapper.py ThermoCalc\tools\emission_database.py testModule\test_thermocalc_lookup.py
+testModule/test_thermocalc_lookup.py
+  passed
+  runtime export/load path covered
+  lookup batch: about 1.12e6 points/s in this run
+  analytic local solver: about 5.60e4 points/s
+  local speedup: about 20x
+```
+
+`ThermoCalc/emission_runtime_db/` 和 `ThermoCalc/emission_database/` 都是生成数据，不应提交到 git。若后续需要完整工况覆盖，先导出全 region runtime 表，再设置 `THERMOCALC_LOOKUP_DB` 指向 runtime 目录，并显式设置 `THERMOCALC_LOOKUP_REGIONS`。

@@ -40,6 +40,7 @@ except ImportError as e:
 
 
 _LOOKUP_LOADED_DB = None
+_LOOKUP_LOADED_REGIONS = None
 
 
 def _env_flag(name: str) -> bool:
@@ -47,36 +48,54 @@ def _env_flag(name: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def load_emission_lookup_database(db_dir: str, *, enable: bool = True, force: bool = False) -> int:
-    """Load the emission lookup database into the C++ te_solver singleton."""
-    global _LOOKUP_LOADED_DB
-    if not HAS_TE_SOLVER:
-        raise RuntimeError("te_solver is unavailable; cannot load emission lookup database.")
-    required = ("clear_emission_lookup", "add_emission_lookup_block", "set_emission_lookup_enabled")
-    missing = [name for name in required if not hasattr(te_solver, name)]
-    if missing:
-        raise RuntimeError(f"te_solver does not expose lookup API: {missing}")
+def _normalize_lookup_regions(regions=None):
+    if regions is None:
+        text = os.environ.get("THERMOCALC_LOOKUP_REGIONS", "").strip()
+        if text:
+            regions = [part.strip() for part in text.split(",") if part.strip()]
+    if regions is None:
+        return ("core",)
+    if isinstance(regions, str):
+        regions = [part.strip() for part in regions.split(",") if part.strip()]
+    result = tuple(str(region).strip() for region in regions if str(region).strip())
+    return result or ("core",)
 
-    db_path = Path(db_dir).resolve()
-    if _LOOKUP_LOADED_DB == str(db_path) and not force:
-        te_solver.set_emission_lookup_enabled(bool(enable))
-        return int(te_solver.emission_lookup_block_count())
 
-    manifest_path = db_path / "manifest.json"
-    plan_path = db_path / "chunk_plan.json"
-    if not manifest_path.exists() or not plan_path.exists():
-        raise FileNotFoundError(f"Missing emission lookup manifest/chunk_plan under {db_path}")
+def _load_runtime_lookup_database(db_path: Path, manifest: dict, regions: tuple[str, ...]) -> int:
+    if not hasattr(te_solver, "add_emission_runtime_block"):
+        raise RuntimeError("te_solver does not expose runtime lookup API.")
+    wanted = set(regions)
+    for chunk in manifest["chunks"]:
+        region = str(chunk["region"])
+        if region not in wanted:
+            continue
+        data_path = db_path / chunk["output"]
+        with np.load(data_path, allow_pickle=False) as data:
+            te_solver.add_emission_runtime_block(
+                str(chunk["chunk_id"]),
+                int(chunk["priority"]),
+                int(chunk["region_id"]),
+                np.asarray(data["TE_axis"], dtype=np.float64),
+                np.asarray(data["TC_axis"], dtype=np.float64),
+                np.asarray(data["Vo_axis"], dtype=np.float64),
+                np.asarray(data["Tcs_axis"], dtype=np.float64),
+                np.asarray(data["J"], dtype=np.float32),
+                np.asarray(data["Vd"], dtype=np.float32),
+                np.asarray(data["delta_V"], dtype=np.float32),
+                np.asarray(data["phiE"], dtype=np.float32),
+                np.asarray(data["phiC"], dtype=np.float32),
+                np.asarray(data["lookup_safe"], dtype=np.uint8),
+                np.asarray(data["zero_mask"], dtype=np.uint8),
+            )
+    return int(te_solver.emission_lookup_block_count())
 
-    import json
 
-    with manifest_path.open("r", encoding="utf-8") as f:
-        manifest = json.load(f)
-    with plan_path.open("r", encoding="utf-8") as f:
-        plan = json.load(f)
-
-    te_solver.clear_emission_lookup()
+def _load_full_lookup_database(db_path: Path, manifest: dict, plan: dict, regions: tuple[str, ...]) -> int:
+    wanted = set(regions)
     for chunk in plan["chunks"]:
         region = str(chunk["region"])
+        if region not in wanted:
+            continue
         priority = int(manifest["regions"][region]["priority"])
         raw_path = db_path / chunk["output"]
         data_path = raw_path.with_suffix(".optimized.npz")
@@ -101,10 +120,49 @@ def load_emission_lookup_database(db_dir: str, *, enable: bool = True, force: bo
                 np.asarray(data["phiC"], dtype=np.float64),
                 safe,
             )
+    return int(te_solver.emission_lookup_block_count())
+
+
+def load_emission_lookup_database(db_dir: str, *, enable: bool = True, force: bool = False, regions=None) -> int:
+    """Load the emission lookup database into the C++ te_solver singleton."""
+    global _LOOKUP_LOADED_DB, _LOOKUP_LOADED_REGIONS
+    if not HAS_TE_SOLVER:
+        raise RuntimeError("te_solver is unavailable; cannot load emission lookup database.")
+    required = ("clear_emission_lookup", "add_emission_lookup_block", "set_emission_lookup_enabled")
+    missing = [name for name in required if not hasattr(te_solver, name)]
+    if missing:
+        raise RuntimeError(f"te_solver does not expose lookup API: {missing}")
+
+    db_path = Path(db_dir).resolve()
+    region_tuple = _normalize_lookup_regions(regions)
+    if _LOOKUP_LOADED_DB == str(db_path) and _LOOKUP_LOADED_REGIONS == region_tuple and not force:
+        te_solver.set_emission_lookup_enabled(bool(enable))
+        return int(te_solver.emission_lookup_block_count())
+
+    runtime_manifest_path = db_path / "runtime_manifest.json"
+    manifest_path = db_path / "manifest.json"
+    plan_path = db_path / "chunk_plan.json"
+    if not runtime_manifest_path.exists() and (not manifest_path.exists() or not plan_path.exists()):
+        raise FileNotFoundError(f"Missing emission lookup manifest/chunk_plan under {db_path}")
+
+    import json
+
+    te_solver.clear_emission_lookup()
+    if runtime_manifest_path.exists():
+        with runtime_manifest_path.open("r", encoding="utf-8") as f:
+            runtime_manifest = json.load(f)
+        loaded_blocks = _load_runtime_lookup_database(db_path, runtime_manifest, region_tuple)
+    else:
+        with manifest_path.open("r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        with plan_path.open("r", encoding="utf-8") as f:
+            plan = json.load(f)
+        loaded_blocks = _load_full_lookup_database(db_path, manifest, plan, region_tuple)
 
     te_solver.set_emission_lookup_enabled(bool(enable))
     _LOOKUP_LOADED_DB = str(db_path)
-    return int(te_solver.emission_lookup_block_count())
+    _LOOKUP_LOADED_REGIONS = region_tuple
+    return int(loaded_blocks)
 
 
 class ThermoCalcModel:

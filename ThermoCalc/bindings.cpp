@@ -279,14 +279,28 @@ std::vector<double> array_to_vector_1d(const py::array_t<double>& arr, const cha
     return values;
 }
 
-std::vector<double> array_to_vector_flat_double(const py::array_t<double>& arr, const char* name, std::size_t expected) {
+std::vector<float> array_to_vector_flat_float64(const py::array_t<double>& arr, const char* name, std::size_t expected) {
     if (static_cast<std::size_t>(arr.size()) != expected) {
         throw py::value_error(string(name) + " size does not match axis product.");
     }
     py::array_t<double, py::array::c_style | py::array::forcecast> c_arr(arr);
     py::buffer_info info = c_arr.request();
     const double* ptr = static_cast<const double*>(info.ptr);
-    std::vector<double> values(expected);
+    std::vector<float> values(expected);
+    for (std::size_t i = 0; i < expected; ++i) {
+        values[i] = static_cast<float>(ptr[i]);
+    }
+    return values;
+}
+
+std::vector<float> array_to_vector_flat_float32(const py::array_t<float>& arr, const char* name, std::size_t expected) {
+    if (static_cast<std::size_t>(arr.size()) != expected) {
+        throw py::value_error(string(name) + " size does not match axis product.");
+    }
+    py::array_t<float, py::array::c_style | py::array::forcecast> c_arr(arr);
+    py::buffer_info info = c_arr.request();
+    const float* ptr = static_cast<const float*>(info.ptr);
+    std::vector<float> values(expected);
     for (std::size_t i = 0; i < expected; ++i) {
         values[i] = ptr[i];
     }
@@ -329,12 +343,47 @@ void add_emission_lookup_block(
     block.Vo_axis = array_to_vector_1d(Vo_axis, "Vo_axis");
     block.Tcs_axis = array_to_vector_1d(Tcs_axis, "Tcs_axis");
     const std::size_t n = block.TE_axis.size() * block.TC_axis.size() * block.Vo_axis.size() * block.Tcs_axis.size();
-    block.J = array_to_vector_flat_double(J, "J", n);
-    block.Vd = array_to_vector_flat_double(Vd, "Vd", n);
-    block.delta_V = array_to_vector_flat_double(delta_V, "delta_V", n);
-    block.phiE = array_to_vector_flat_double(phiE, "phiE", n);
-    block.phiC = array_to_vector_flat_double(phiC, "phiC", n);
+    block.J = array_to_vector_flat_float64(J, "J", n);
+    block.Vd = array_to_vector_flat_float64(Vd, "Vd", n);
+    block.delta_V = array_to_vector_flat_float64(delta_V, "delta_V", n);
+    block.phiE = array_to_vector_flat_float64(phiE, "phiE", n);
+    block.phiC = array_to_vector_flat_float64(phiC, "phiC", n);
     block.lookup_safe = array_to_vector_flat_u8(lookup_safe, "lookup_safe", n);
+    addEmissionLookupBlock(block);
+}
+
+void add_emission_runtime_block(
+    const std::string& name,
+    int priority,
+    int region_id,
+    const py::array_t<double>& TE_axis,
+    const py::array_t<double>& TC_axis,
+    const py::array_t<double>& Vo_axis,
+    const py::array_t<double>& Tcs_axis,
+    const py::array_t<float>& J,
+    const py::array_t<float>& Vd,
+    const py::array_t<float>& delta_V,
+    const py::array_t<float>& phiE,
+    const py::array_t<float>& phiC,
+    const py::array_t<uint8_t>& lookup_safe,
+    const py::array_t<uint8_t>& zero_mask)
+{
+    EmissionLookupBlock block;
+    block.name = name;
+    block.priority = priority;
+    block.region_id = region_id;
+    block.TE_axis = array_to_vector_1d(TE_axis, "TE_axis");
+    block.TC_axis = array_to_vector_1d(TC_axis, "TC_axis");
+    block.Vo_axis = array_to_vector_1d(Vo_axis, "Vo_axis");
+    block.Tcs_axis = array_to_vector_1d(Tcs_axis, "Tcs_axis");
+    const std::size_t n = block.TE_axis.size() * block.TC_axis.size() * block.Vo_axis.size() * block.Tcs_axis.size();
+    block.J = array_to_vector_flat_float32(J, "J", n);
+    block.Vd = array_to_vector_flat_float32(Vd, "Vd", n);
+    block.delta_V = array_to_vector_flat_float32(delta_V, "delta_V", n);
+    block.phiE = array_to_vector_flat_float32(phiE, "phiE", n);
+    block.phiC = array_to_vector_flat_float32(phiC, "phiC", n);
+    block.lookup_safe = array_to_vector_flat_u8(lookup_safe, "lookup_safe", n);
+    block.zero_mask = array_to_vector_flat_u8(zero_mask, "zero_mask", n);
     addEmissionLookupBlock(block);
 }
 
@@ -498,6 +547,7 @@ PYBIND11_MODULE(te_solver, m) {
     m.def("set_emission_lookup_enabled", &setEmissionLookupEnabled, py::arg("enabled"));
     m.def("is_emission_lookup_enabled", &isEmissionLookupEnabled);
     m.def("emission_lookup_block_count", &emissionLookupBlockCount);
+    m.def("emission_lookup_region_count", &emissionLookupRegionCount);
     m.def(
         "add_emission_lookup_block",
         &add_emission_lookup_block,
@@ -513,6 +563,24 @@ PYBIND11_MODULE(te_solver, m) {
         py::arg("phiE"),
         py::arg("phiC"),
         py::arg("lookup_safe")
+    );
+    m.def(
+        "add_emission_runtime_block",
+        &add_emission_runtime_block,
+        py::arg("name"),
+        py::arg("priority"),
+        py::arg("region_id"),
+        py::arg("TE_axis"),
+        py::arg("TC_axis"),
+        py::arg("Vo_axis"),
+        py::arg("Tcs_axis"),
+        py::arg("J"),
+        py::arg("Vd"),
+        py::arg("delta_V"),
+        py::arg("phiE"),
+        py::arg("phiC"),
+        py::arg("lookup_safe"),
+        py::arg("zero_mask")
     );
     m.def(
         "lookup_emission_point",

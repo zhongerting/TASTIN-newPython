@@ -6,3 +6,4 @@ __pycache__/
 emission_scan_outputs/
 emission_scan_outputs_pressure_0p01_4torr/
 emission_database/
+emission_runtime_db/

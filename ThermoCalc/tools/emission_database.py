@@ -1031,6 +1031,126 @@ def cmd_optimize_table(args: argparse.Namespace) -> int:
     return 0
 
 
+def _runtime_chunk_source_path(db_dir: Path, chunk: dict[str, Any]) -> Path:
+    raw_path = db_dir / chunk["output"]
+    optimized_path = raw_path.with_suffix(".optimized.npz")
+    return optimized_path if optimized_path.exists() else raw_path
+
+
+def cmd_export_runtime(args: argparse.Namespace) -> int:
+    db_dir = args.db_dir
+    out_dir = args.out_dir
+    manifest = load_json(db_dir / "manifest.json")
+    plan = load_json(db_dir / "chunk_plan.json")
+    regions_requested = set(args.region or manifest["regions"].keys())
+    limit_chunks = int(args.limit_chunks)
+    zero_threshold = float(args.zero_j_threshold)
+    dtype = np.float32 if args.dtype == "float32" else np.float64
+    chunks_out: list[dict[str, Any]] = []
+    regions_out: dict[str, Any] = {}
+    total_points = 0
+    total_bytes = 0
+
+    for region, meta in manifest["regions"].items():
+        if region not in regions_requested:
+            continue
+        regions_out[region] = {
+            "priority": int(meta["priority"]),
+            "region_id": int(manifest.get("source_region_ids", SOURCE_REGIONS).get(region, SOURCE_REGIONS.get(region, 99))),
+            "axis_min_max": meta.get("axis_min_max", {}),
+            "axis_lengths": meta.get("axis_lengths", {}),
+        }
+
+    selected_chunks = [chunk for chunk in plan["chunks"] if chunk["region"] in regions_requested]
+    if limit_chunks > 0:
+        selected_chunks = selected_chunks[:limit_chunks]
+
+    for chunk in selected_chunks:
+        region = str(chunk["region"])
+        source_path = _runtime_chunk_source_path(db_dir, chunk)
+        if not source_path.exists():
+            continue
+        with np.load(source_path, allow_pickle=False) as data:
+            if "lookup_safe_flag" in data.files:
+                safe = np.asarray(data["lookup_safe_flag"], dtype=np.uint8)
+            else:
+                safe = np.asarray(data["done"] & data["finite_flag"] & data["converged"], dtype=np.uint8)
+
+            j64 = np.asarray(data["J"], dtype=np.float64)
+            zero_mask = (safe.astype(bool) & np.isfinite(j64) & (np.abs(j64) <= zero_threshold))
+            if "zero_fill_flag" in data.files:
+                zero_mask |= np.asarray(data["zero_fill_flag"], dtype=bool)
+            elif "zero_emission_flag" in data.files:
+                zero_mask |= np.asarray(data["zero_emission_flag"], dtype=bool) & safe.astype(bool)
+
+            payload = {
+                "TE_axis": np.asarray(data["TE_axis"], dtype=dtype),
+                "TC_axis": np.asarray(data["TC_axis"], dtype=dtype),
+                "Vo_axis": np.asarray(data["Vo_axis"], dtype=dtype),
+                "Tcs_axis": np.asarray(data["Tcs_axis"], dtype=dtype),
+                "J": np.asarray(data["J"], dtype=dtype),
+                "Vd": np.asarray(data["Vd"], dtype=dtype),
+                "delta_V": np.asarray(data["delta_V"], dtype=dtype),
+                "phiE": np.asarray(data["phiE"], dtype=dtype),
+                "phiC": np.asarray(data["phiC"], dtype=dtype),
+                "lookup_safe": safe.astype(np.uint8, copy=False),
+                "zero_mask": zero_mask.astype(np.uint8, copy=False),
+            }
+            if args.zero_compress:
+                payload["J"] = np.array(payload["J"], copy=True)
+                payload["J"][zero_mask] = 0.0
+
+        chunk_id = str(chunk["chunk_id"])
+        rel_output = Path(region) / f"{chunk_id}.runtime.npz"
+        out_path = out_dir / rel_output
+        save_npz(out_path, payload)
+        size_bytes = out_path.stat().st_size
+        total_bytes += size_bytes
+        points = int(np.prod(payload["J"].shape))
+        total_points += points
+        chunk_meta = {
+            "chunk_id": chunk_id,
+            "region": region,
+            "priority": int(regions_out[region]["priority"]),
+            "region_id": int(regions_out[region]["region_id"]),
+            "source": str(source_path.relative_to(db_dir)),
+            "output": str(rel_output).replace("\\", "/"),
+            "point_count": points,
+            "size_bytes": size_bytes,
+            "TE_min": float(payload["TE_axis"][0]),
+            "TE_max": float(payload["TE_axis"][-1]),
+            "TC_min": float(payload["TC_axis"][0]),
+            "TC_max": float(payload["TC_axis"][-1]),
+            "Vo_min": float(payload["Vo_axis"][0]),
+            "Vo_max": float(payload["Vo_axis"][-1]),
+            "Tcs_min": float(payload["Tcs_axis"][0]),
+            "Tcs_max": float(payload["Tcs_axis"][-1]),
+            "lookup_safe_points": int(np.count_nonzero(payload["lookup_safe"])),
+            "zero_mask_points": int(np.count_nonzero(payload["zero_mask"])),
+        }
+        chunks_out.append(chunk_meta)
+
+    runtime_manifest = {
+        "runtime_database_version": "emission-runtime-db-v1",
+        "source_database_version": manifest.get("database_version"),
+        "created_at_unix": time.time(),
+        "source_db_dir": str(db_dir),
+        "d_gap": float(manifest.get("d_gap", 0.5)),
+        "dtype": args.dtype,
+        "zero_j_threshold": zero_threshold,
+        "zero_compress": bool(args.zero_compress),
+        "fields": ["J", "Vd", "delta_V", "phiE", "phiC", "lookup_safe", "zero_mask"],
+        "regions": regions_out,
+        "chunks": chunks_out,
+        "chunk_count": len(chunks_out),
+        "total_points": int(total_points),
+        "total_size_bytes": int(total_bytes),
+    }
+    write_json(out_dir / "runtime_manifest.json", runtime_manifest)
+    print(json.dumps(runtime_manifest, indent=2, sort_keys=True))
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate and manage ThermoCalc emission database chunks.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1076,6 +1196,16 @@ def parse_args() -> argparse.Namespace:
     p_opt.add_argument("--zero-j-threshold", type=float, default=1e-3)
     p_opt.add_argument("--region", action="append", default=None)
     p_opt.set_defaults(func=cmd_optimize_table)
+
+    p_runtime = sub.add_parser("export-runtime")
+    p_runtime.add_argument("--db-dir", type=Path, default=DEFAULT_DB_DIR)
+    p_runtime.add_argument("--out-dir", type=Path, default=ROOT / "emission_runtime_db")
+    p_runtime.add_argument("--dtype", choices=("float32", "float64"), default="float32")
+    p_runtime.add_argument("--region", action="append", default=None)
+    p_runtime.add_argument("--limit-chunks", type=int, default=0)
+    p_runtime.add_argument("--zero-j-threshold", type=float, default=1e-3)
+    p_runtime.add_argument("--zero-compress", action="store_true")
+    p_runtime.set_defaults(func=cmd_export_runtime)
     return parser.parse_args()
 
 

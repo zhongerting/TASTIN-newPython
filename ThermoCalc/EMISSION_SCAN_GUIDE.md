@@ -186,6 +186,39 @@ unresolved points: 0
 The optimizer writes `.optimized.npz` files next to raw chunks. The Python
 loader prefers these sidecars when present and otherwise loads the raw chunk.
 
+## Runtime Lookup Export
+
+The full analytic database keeps diagnostic fields needed for audit and
+post-processing. It is not the preferred runtime artifact. Export a compact
+runtime-only table after the raw chunks and optimized sidecars are ready:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py export-runtime --db-dir ThermoCalc\emission_database --out-dir ThermoCalc\emission_runtime_db --dtype float32 --zero-compress
+```
+
+Use `--region core`, `--region startup`, `--region high_power`, or
+`--region accident` to export only selected scenarios. The runtime export keeps
+only:
+
+```text
+TE_axis, TC_axis, Vo_axis, Tcs_axis
+J, Vd, delta_V, phiE, phiC
+lookup_safe, zero_mask
+```
+
+`J/Vd/delta_V/phiE/phiC` are stored as `float32` by default. `phiE/phiC` are
+kept because upper-level boundary handling still uses them. `zero_mask` marks
+safe near-zero current points; with `--zero-compress`, those `J` entries are
+stored as exactly zero while the voltage and work-function fields remain
+available for interpolation.
+
+The runtime directory contains `runtime_manifest.json` and per-region
+`*.runtime.npz` chunks. It is intentionally ignored by git:
+
+```text
+emission_runtime_db/
+```
+
 ## Production Lookup Path
 
 The optional C++ lookup path is implemented in:
@@ -215,6 +248,23 @@ $env:THERMOCALC_PYD_DIR = "E:\项目任务\五院-电源\source_code\TASTIN-pyth
 `thermionicEmission::calc()` checks the lookup table first. A safe table hit
 sets `J/Vd/delta_V/phiE/phiC` and returns immediately. A table miss continues
 through the original analytic calculation.
+
+`ThermoCalcWrapper.load_emission_lookup_database()` supports both the legacy
+full database (`manifest.json` + `chunk_plan.json`) and the compact runtime
+database (`runtime_manifest.json`). For production-style testing, point
+`THERMOCALC_LOOKUP_DB` at `ThermoCalc/emission_runtime_db` rather than the full
+analytic scan directory.
+
+The default loaded scenario is `core` to reduce memory and startup cost. Set
+`THERMOCALC_LOOKUP_REGIONS` for broader coverage, for example:
+
+```powershell
+$env:THERMOCALC_LOOKUP_REGIONS = "core,startup,high_power,accident"
+```
+
+The C++ lookup store uses bounding-box filtering, region indexes, direct TE
+chunk location, and a last-block cache before running the four-dimensional
+interpolator.
 
 ## Validation Snapshot
 

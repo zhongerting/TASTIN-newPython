@@ -1,17 +1,28 @@
 import os
 import sys
 import time
+import tempfile
+import contextlib
+import io
+from argparse import Namespace
 from pathlib import Path
 
 import numpy as np
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 BUILD_PYD_DIR = ROOT_DIR / "ThermoCalc" / "build_cp312" / "Release"
 if str(BUILD_PYD_DIR) not in sys.path:
     sys.path.insert(0, str(BUILD_PYD_DIR))
+TOOLS_DIR = ROOT_DIR / "ThermoCalc" / "tools"
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
 
 import te_solver  # noqa: E402
+from emission_database import cmd_export_runtime  # noqa: E402
+from ThermoCalc.ThermoCalcWrapper import load_emission_lookup_database  # noqa: E402
 
 
 def _load_block(path: Path, *, name: str, priority: int):
@@ -63,11 +74,11 @@ def test_lookup_exact_grid_and_calc_path():
     lookup = te_solver.lookup_emission_point(te, tc, vo, tcs, 0.5)
     assert lookup["found"]
     for field in ("J", "Vd", "delta_V", "phiE", "phiC"):
-        assert abs(float(lookup[field]) - float(data[field][idx])) <= 1.0e-12
+        assert abs(float(lookup[field]) - float(data[field][idx])) <= 5.0e-6
 
     production_lookup = te_solver.calc_emission_point_production(te, tc, vo, tcs, 0.5)
     for field in ("J", "Vd", "delta_V", "phiE", "phiC"):
-        assert abs(float(production_lookup[field]) - float(data[field][idx])) <= 1.0e-12
+        assert abs(float(production_lookup[field]) - float(data[field][idx])) <= 5.0e-6
 
     te_solver.set_emission_lookup_enabled(False)
     production_analytic = te_solver.calc_emission_point_production(te, tc, vo, tcs, 0.5)
@@ -97,7 +108,56 @@ def test_optimized_accident_block_is_queryable():
         0.5,
     )
     assert lookup["found"]
-    assert abs(float(lookup["J"]) - float(data["J"][i, j, k, l])) <= 1.0e-12
+    assert abs(float(lookup["J"]) - float(data["J"][i, j, k, l])) <= 5.0e-6
+
+
+def test_runtime_export_and_wrapper_loader():
+    db_dir = ROOT_DIR / "ThermoCalc" / "emission_database"
+    with tempfile.TemporaryDirectory() as tmp:
+        out_dir = Path(tmp) / "runtime"
+        with contextlib.redirect_stdout(io.StringIO()):
+            cmd_export_runtime(
+                Namespace(
+                    db_dir=db_dir,
+                    out_dir=out_dir,
+                    dtype="float32",
+                    region=["core"],
+                    limit_chunks=1,
+                    zero_j_threshold=1.0e-3,
+                    zero_compress=True,
+                )
+            )
+        manifest_path = out_dir / "runtime_manifest.json"
+        assert manifest_path.exists()
+        runtime_path = out_dir / "core" / "core_0000.runtime.npz"
+        assert runtime_path.exists()
+        with np.load(runtime_path, allow_pickle=False) as data:
+            assert data["J"].dtype == np.float32
+            assert data["phiE"].dtype == np.float32
+            assert data["phiC"].dtype == np.float32
+            assert data["lookup_safe"].dtype == np.uint8
+            assert data["zero_mask"].dtype == np.uint8
+            idx = (1, 20, 30, 10)
+            sample = {
+                "TE": float(data["TE_axis"][idx[0]]),
+                "TC": float(data["TC_axis"][idx[1]]),
+                "Vo": float(data["Vo_axis"][idx[2]]),
+                "Tcs": float(data["Tcs_axis"][idx[3]]),
+                "J": float(data["J"][idx]),
+                "Vd": float(data["Vd"][idx]),
+                "delta_V": float(data["delta_V"][idx]),
+                "phiE": float(data["phiE"][idx]),
+                "phiC": float(data["phiC"][idx]),
+            }
+
+        te_solver.clear_emission_lookup()
+        loaded = load_emission_lookup_database(str(out_dir), enable=True, force=True, regions=("core",))
+        assert loaded == 1
+        assert te_solver.emission_lookup_region_count() == 1
+        lookup = te_solver.lookup_emission_point(sample["TE"], sample["TC"], sample["Vo"], sample["Tcs"], 0.5)
+        assert lookup["found"]
+        for field in ("J", "Vd", "delta_V", "phiE", "phiC"):
+            assert abs(float(lookup[field]) - sample[field]) <= 5.0e-6
 
 
 def benchmark_lookup_vs_analytic(n_points: int = 20000):
@@ -138,8 +198,8 @@ def benchmark_lookup_vs_analytic(n_points: int = 20000):
 if __name__ == "__main__":
     test_lookup_exact_grid_and_calc_path()
     test_optimized_accident_block_is_queryable()
+    test_runtime_export_and_wrapper_loader()
     stats = benchmark_lookup_vs_analytic()
     print("ThermoCalc lookup checks passed.")
     for key, value in stats.items():
         print(f"{key}: {value}")
-
