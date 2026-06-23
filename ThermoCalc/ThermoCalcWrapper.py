@@ -90,6 +90,48 @@ def _load_runtime_lookup_database(db_path: Path, manifest: dict, regions: tuple[
     return int(te_solver.emission_lookup_block_count())
 
 
+def _load_dense_runtime_lookup_database(db_path: Path, manifest: dict, regions: tuple[str, ...]) -> int:
+    if not hasattr(te_solver, "add_emission_dense_region"):
+        raise RuntimeError("te_solver does not expose dense runtime lookup API.")
+    wanted = set(regions)
+    for region_name, meta in manifest["regions"].items():
+        region = str(region_name)
+        if region not in wanted:
+            continue
+        outputs = dict(meta.get("outputs", {}))
+        binary_output = outputs.get("binary")
+        if binary_output and hasattr(te_solver, "load_emission_dense_file"):
+            te_solver.load_emission_dense_file(str(db_path / binary_output))
+            continue
+        npz_output = outputs.get("npz")
+        if not npz_output:
+            raise FileNotFoundError(f"Dense runtime region {region} has no loadable npz/binary output.")
+        data_path = db_path / npz_output
+        with np.load(data_path, allow_pickle=False) as data:
+            point_count = int(np.prod(data["J"].shape))
+            te_solver.add_emission_dense_region(
+                region,
+                int(meta["priority"]),
+                int(meta["region_id"]),
+                float(meta.get("d_gap", manifest.get("d_gap", 0.5))),
+                np.asarray(data["TE_axis"], dtype=np.float64),
+                np.asarray(data["TC_axis"], dtype=np.float64),
+                np.asarray(data["Vo_axis"], dtype=np.float64),
+                np.asarray(data["Tcs_axis"], dtype=np.float64),
+                np.asarray(data["J"], dtype=np.float32),
+                np.asarray(data["Vd"], dtype=np.float32),
+                np.asarray(data["delta_V"], dtype=np.float32),
+                np.asarray(data["phiE"], dtype=np.float32),
+                np.asarray(data["phiC"], dtype=np.float32),
+                np.asarray(data["lookup_safe_bits"], dtype=np.uint8),
+                np.asarray(data["zero_mask_bits"], dtype=np.uint8),
+                point_count,
+            )
+    if hasattr(te_solver, "emission_lookup_dense_region_count"):
+        return int(te_solver.emission_lookup_dense_region_count())
+    return int(te_solver.emission_lookup_region_count())
+
+
 def _load_full_lookup_database(db_path: Path, manifest: dict, plan: dict, regions: tuple[str, ...]) -> int:
     wanted = set(regions)
     for chunk in plan["chunks"]:
@@ -139,16 +181,21 @@ def load_emission_lookup_database(db_dir: str, *, enable: bool = True, force: bo
         te_solver.set_emission_lookup_enabled(bool(enable))
         return int(te_solver.emission_lookup_block_count())
 
+    dense_manifest_path = db_path / "runtime_dense_manifest.json"
     runtime_manifest_path = db_path / "runtime_manifest.json"
     manifest_path = db_path / "manifest.json"
     plan_path = db_path / "chunk_plan.json"
-    if not runtime_manifest_path.exists() and (not manifest_path.exists() or not plan_path.exists()):
+    if not dense_manifest_path.exists() and not runtime_manifest_path.exists() and (not manifest_path.exists() or not plan_path.exists()):
         raise FileNotFoundError(f"Missing emission lookup manifest/chunk_plan under {db_path}")
 
     import json
 
     te_solver.clear_emission_lookup()
-    if runtime_manifest_path.exists():
+    if dense_manifest_path.exists():
+        with dense_manifest_path.open("r", encoding="utf-8") as f:
+            dense_manifest = json.load(f)
+        loaded_blocks = _load_dense_runtime_lookup_database(db_path, dense_manifest, region_tuple)
+    elif runtime_manifest_path.exists():
         with runtime_manifest_path.open("r", encoding="utf-8") as f:
             runtime_manifest = json.load(f)
         loaded_blocks = _load_runtime_lookup_database(db_path, runtime_manifest, region_tuple)

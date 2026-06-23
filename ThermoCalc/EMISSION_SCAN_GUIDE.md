@@ -95,13 +95,13 @@ offline:
     -> emission_database.py plan / worker
     -> ThermoCalc/emission_database/
     -> summarize / verify / optimize-table
-    -> emission_database.py export-runtime
-    -> ThermoCalc/emission_runtime_db/
+    -> emission_database.py export-runtime or export-runtime-dense
+    -> ThermoCalc/emission_runtime_db/ or emission_runtime_db_v2/
 
 runtime:
   ThermoCalcWrapper.py
     -> load_emission_lookup_database()
-    -> te_solver.add_emission_runtime_block()
+    -> te_solver.add_emission_runtime_block() or load_emission_dense_file()
     -> emissionLookup.cpp in-memory store
     -> thermionicEmission::calc()
     -> queryEmissionLookup()
@@ -219,6 +219,41 @@ runtime chunk when needed. This is what makes legacy chunks such as
 `1300-1310 K` and `1320-1330 K` become continuous runtime chunks such as
 `1300-1320 K` and `1320-1340 K`.
 
+Dense runtime v2 is the preferred compact local runtime artifact. It stores one
+dense tensor per region instead of many stitched TE chunks:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py export-runtime-dense --db-dir ThermoCalc\emission_database --out-dir ThermoCalc\emission_runtime_db_v2 --format both --region core --dtype float32 --zero-compress
+```
+
+Dense runtime v2 writes:
+
+```text
+runtime_dense_manifest.json
+<region>.runtime.v2.npz
+<region>.runtime.v2.tedb
+```
+
+The `.npz` file is the portable Python artifact. The `.tedb` file is a simple
+binary artifact that C++ can load directly through `load_emission_dense_file()`.
+When both are present, `ThermoCalcWrapper.load_emission_lookup_database()`
+prefers the `.tedb` path because it avoids constructing large NumPy objects in
+Python.
+
+Dense runtime v2 keeps only:
+
+```text
+TE_axis, TC_axis, Vo_axis, Tcs_axis
+J, Vd, delta_V, phiE, phiC
+lookup_safe_bits, zero_mask_bits
+```
+
+`lookup_safe` and `zero_mask` are bit-packed using little-endian bit order.
+The dense exporter also avoids duplicate stitched TE boundary planes, so the
+core dense v2 artifact is smaller than the previous stitched runtime export
+while preserving the same continuous interpolation range. `phiE/phiC` are kept
+because upper-level boundary handling still uses them.
+
 ### 5. Load The Runtime Database
 
 At runtime, use the test extension and enable lookup explicitly:
@@ -226,7 +261,7 @@ At runtime, use the test extension and enable lookup explicitly:
 ```powershell
 $env:THERMOCALC_PYD_DIR = "E:\项目任务\五院-电源\source_code\TASTIN-python\ThermoCalc\build_cp312\Release"
 $env:THERMOCALC_ENABLE_LOOKUP = "1"
-$env:THERMOCALC_LOOKUP_DB = "E:\项目任务\五院-电源\source_code\TASTIN-python\ThermoCalc\emission_runtime_db"
+$env:THERMOCALC_LOOKUP_DB = "E:\项目任务\五院-电源\source_code\TASTIN-python\ThermoCalc\emission_runtime_db_v2"
 $env:THERMOCALC_LOOKUP_REGIONS = "core"
 ```
 
@@ -444,6 +479,28 @@ as `1300-1320 K` and `1320-1340 K`, so interpolation no longer misses the
 `1310-1320 K` interval. New chunk plans also include the right TE boundary
 plane directly.
 
+Dense runtime v2 is now the recommended local runtime format:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py export-runtime-dense --db-dir ThermoCalc\emission_database --out-dir ThermoCalc\emission_runtime_db_v2 --format both --region core --dtype float32 --zero-compress
+```
+
+It writes `runtime_dense_manifest.json`, one `*.runtime.v2.npz` per region,
+and optionally one `*.runtime.v2.tedb` per region. The `.npz` file is portable;
+the `.tedb` file is loaded directly by C++ and is preferred by the wrapper when
+available. Dense v2 stores `J/Vd/delta_V/phiE/phiC` as `float32` by default and
+stores `lookup_safe` / `zero_mask` as bit-packed masks:
+
+```text
+lookup_safe_bits
+zero_mask_bits
+```
+
+This removes boolean-array overhead and avoids duplicate stitched TE planes.
+`phiE/phiC` remain stored because they are still needed by upper-level boundary
+handling. `ThermoCalc/emission_runtime_db_v2/` is generated runtime data and is
+ignored by git.
+
 ## Production Lookup Path
 
 The optional C++ lookup path is implemented in:
@@ -474,11 +531,12 @@ $env:THERMOCALC_PYD_DIR = "E:\项目任务\五院-电源\source_code\TASTIN-pyth
 sets `J/Vd/delta_V/phiE/phiC` and returns immediately. A table miss continues
 through the original analytic calculation.
 
-`ThermoCalcWrapper.load_emission_lookup_database()` supports both the legacy
-full database (`manifest.json` + `chunk_plan.json`) and the compact runtime
-database (`runtime_manifest.json`). For production-style testing, point
-`THERMOCALC_LOOKUP_DB` at `ThermoCalc/emission_runtime_db` rather than the full
-analytic scan directory.
+`ThermoCalcWrapper.load_emission_lookup_database()` supports the legacy full
+database (`manifest.json` + `chunk_plan.json`), the legacy compact runtime
+database (`runtime_manifest.json`), and dense runtime v2
+(`runtime_dense_manifest.json`). For production-style testing, point
+`THERMOCALC_LOOKUP_DB` at `ThermoCalc/emission_runtime_db_v2` or
+`ThermoCalc/emission_runtime_db` rather than the full analytic scan directory.
 
 The default loaded scenario is `core` to reduce memory and startup cost. Set
 `THERMOCALC_LOOKUP_REGIONS` for broader coverage, for example:
@@ -488,8 +546,8 @@ $env:THERMOCALC_LOOKUP_REGIONS = "core,startup,high_power,accident"
 ```
 
 The C++ lookup store uses bounding-box filtering, region indexes, direct TE
-chunk location, and a last-block cache before running the four-dimensional
-interpolator.
+chunk location for legacy runtime chunks, dense-region bounding boxes, and a
+last-hit cache before running the four-dimensional interpolator.
 
 ## Validation Snapshot
 
@@ -498,11 +556,31 @@ Validated commands and results:
 ```text
 testModule/test_thermocalc_lookup.py
   passed
-  lookup batch: about 3.72e6 points/s
-  analytic local solver: about 9.44e4 points/s
-  local speedup: about 39x
+  dense runtime export/load path covered
+  lookup batch: about 3.55e6 points/s in the focused regression
+  analytic local solver: about 9.87e4 points/s
+  local speedup: about 36x
   runtime core continuous random sample: 200000 / 200000 found
 ```
+
+Dense runtime v2 core export from the current local full database:
+
+```text
+region: core
+shape: 86 x 41 x 71 x 41
+points: 10,264,186
+lookup_safe_points: 10,264,186
+zero_mask_points: 5,718,001
+NPZ size: 86.87 MiB
+TEDB size: 198.22 MiB
+TEDB load time: about 0.167 s
+batch lookup: about 1.49e6 points/s for 200,000 continuous random core points
+```
+
+For comparison, the previous legacy runtime core export was about `129.49 MiB`,
+loaded more slowly, and measured about `1.05e6 points/s` on the same continuous
+random core benchmark. Dense runtime v2 is therefore the preferred local
+runtime format when the table is regenerated.
 
 V13 restart smoke with lookup enabled:
 

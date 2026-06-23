@@ -4,6 +4,7 @@ import argparse
 import csv
 import hashlib
 import json
+import struct
 import subprocess
 import time
 from pathlib import Path
@@ -1222,6 +1223,197 @@ def cmd_export_runtime(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pack_mask(mask: np.ndarray) -> np.ndarray:
+    flat = np.asarray(mask, dtype=np.uint8).reshape(-1)
+    return np.packbits(flat, bitorder="little")
+
+
+def _dense_output_paths(out_dir: Path, region: str, fmt: str) -> list[Path]:
+    paths: list[Path] = []
+    if fmt in {"npz", "both"}:
+        paths.append(out_dir / f"{region}.runtime.v2.npz")
+    if fmt in {"binary", "both"}:
+        paths.append(out_dir / f"{region}.runtime.v2.tedb")
+    return paths
+
+
+def _write_dense_binary(path: Path, region_name: str, meta: dict[str, Any], payload: dict[str, np.ndarray]) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    point_count = int(payload["J"].size)
+    bit_bytes = int(payload["lookup_safe_bits"].size)
+    name_bytes = region_name.encode("utf-8")
+    header = struct.pack(
+        "<8sIIiidQQQQQQ",
+        b"TEDBv2\0\0",
+        1,
+        len(name_bytes),
+        int(meta["priority"]),
+        int(meta["region_id"]),
+        float(meta.get("d_gap", 0.5)),
+        int(payload["TE_axis"].size),
+        int(payload["TC_axis"].size),
+        int(payload["Vo_axis"].size),
+        int(payload["Tcs_axis"].size),
+        point_count,
+        bit_bytes,
+    )
+    with path.open("wb") as f:
+        f.write(header)
+        f.write(name_bytes)
+        for name in ("TE_axis", "TC_axis", "Vo_axis", "Tcs_axis"):
+            f.write(np.asarray(payload[name], dtype=np.float64).tobytes(order="C"))
+        for name in ("J", "Vd", "delta_V", "phiE", "phiC"):
+            f.write(np.asarray(payload[name], dtype=np.float32).reshape(-1).tobytes(order="C"))
+        f.write(np.asarray(payload["lookup_safe_bits"], dtype=np.uint8).tobytes(order="C"))
+        f.write(np.asarray(payload["zero_mask_bits"], dtype=np.uint8).tobytes(order="C"))
+    return path.stat().st_size
+
+
+def _make_dense_region_payload(
+    db_dir: Path,
+    manifest: dict[str, Any],
+    plan: dict[str, Any],
+    region: str,
+    *,
+    dtype: type[np.floating],
+    zero_threshold: float,
+    zero_compress: bool,
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    axes_data = load_axes(db_dir, manifest, region)
+    shape = (
+        int(len(axes_data["TE_axis"])),
+        int(len(axes_data["TC_axis"])),
+        int(len(axes_data["Vo_axis"])),
+        int(len(axes_data["Tcs_axis"])),
+    )
+    fields = {
+        name: np.zeros(shape, dtype=dtype)
+        for name in ("J", "Vd", "delta_V", "phiE", "phiC")
+    }
+    lookup_safe = np.zeros(shape, dtype=bool)
+    zero_mask = np.zeros(shape, dtype=bool)
+    filled = np.zeros(shape, dtype=bool)
+    chunks_used = 0
+
+    for chunk in plan["chunks"]:
+        if str(chunk["region"]) != region:
+            continue
+        source_path = _runtime_chunk_source_path(db_dir, chunk)
+        if not source_path.exists():
+            continue
+        chunk_payload = _runtime_payload_from_source(
+            source_path,
+            dtype=dtype,
+            zero_threshold=zero_threshold,
+            zero_compress=zero_compress,
+        )
+        te_start = int(chunk["te_start"])
+        te_stop = int(chunk["te_stop"])
+        sl = np.s_[te_start:te_stop, :, :, :]
+        for name in fields:
+            fields[name][sl] = np.asarray(chunk_payload[name], dtype=dtype)
+        lookup_safe[sl] = np.asarray(chunk_payload["lookup_safe"], dtype=bool)
+        zero_mask[sl] = np.asarray(chunk_payload["zero_mask"], dtype=bool)
+        filled[sl] = True
+        chunks_used += 1
+
+    payload = {
+        "TE_axis": np.asarray(axes_data["TE_axis"], dtype=np.float64),
+        "TC_axis": np.asarray(axes_data["TC_axis"], dtype=np.float64),
+        "Vo_axis": np.asarray(axes_data["Vo_axis"], dtype=np.float64),
+        "Tcs_axis": np.asarray(axes_data["Tcs_axis"], dtype=np.float64),
+        "J": fields["J"],
+        "Vd": fields["Vd"],
+        "delta_V": fields["delta_V"],
+        "phiE": fields["phiE"],
+        "phiC": fields["phiC"],
+        "lookup_safe_bits": _pack_mask(lookup_safe),
+        "zero_mask_bits": _pack_mask(zero_mask),
+    }
+    point_count = int(np.prod(shape))
+    meta = {
+        "region": region,
+        "priority": int(manifest["regions"][region]["priority"]),
+        "region_id": int(manifest.get("source_region_ids", SOURCE_REGIONS).get(region, SOURCE_REGIONS.get(region, 99))),
+        "d_gap": float(manifest.get("d_gap", 0.5)),
+        "shape": list(shape),
+        "point_count": point_count,
+        "bit_bytes": int(payload["lookup_safe_bits"].size),
+        "chunks_used": chunks_used,
+        "filled_points": int(np.count_nonzero(filled)),
+        "lookup_safe_points": int(np.count_nonzero(lookup_safe)),
+        "zero_mask_points": int(np.count_nonzero(zero_mask)),
+        "axis_min_max": {
+            "TE_axis": [float(payload["TE_axis"][0]), float(payload["TE_axis"][-1])],
+            "TC_axis": [float(payload["TC_axis"][0]), float(payload["TC_axis"][-1])],
+            "Vo_axis": [float(payload["Vo_axis"][0]), float(payload["Vo_axis"][-1])],
+            "Tcs_axis": [float(payload["Tcs_axis"][0]), float(payload["Tcs_axis"][-1])],
+        },
+    }
+    return payload, meta
+
+
+def cmd_export_runtime_dense(args: argparse.Namespace) -> int:
+    db_dir = args.db_dir
+    out_dir = args.out_dir
+    manifest = load_json(db_dir / "manifest.json")
+    plan = load_json(db_dir / "chunk_plan.json")
+    regions_requested = list(args.region or manifest["regions"].keys())
+    dtype = np.float32 if args.dtype == "float32" else np.float64
+    fmt = str(args.format)
+    region_outputs: list[dict[str, Any]] = []
+    total_size = 0
+    total_points = 0
+
+    for region in regions_requested:
+        if region not in manifest["regions"]:
+            raise ValueError(f"Unknown emission database region: {region}")
+        payload, meta = _make_dense_region_payload(
+            db_dir,
+            manifest,
+            plan,
+            region,
+            dtype=dtype,
+            zero_threshold=float(args.zero_j_threshold),
+            zero_compress=bool(args.zero_compress),
+        )
+        outputs: dict[str, str] = {}
+        sizes: dict[str, int] = {}
+        if fmt in {"npz", "both"}:
+            npz_path = out_dir / f"{region}.runtime.v2.npz"
+            save_npz(npz_path, payload)
+            sizes["npz"] = npz_path.stat().st_size
+            outputs["npz"] = npz_path.name
+        if fmt in {"binary", "both"}:
+            tedb_path = out_dir / f"{region}.runtime.v2.tedb"
+            sizes["binary"] = _write_dense_binary(tedb_path, region, meta, payload)
+            outputs["binary"] = tedb_path.name
+        total_size += sum(sizes.values())
+        total_points += int(meta["point_count"])
+        region_outputs.append({**meta, "outputs": outputs, "size_bytes": sizes})
+
+    runtime_manifest = {
+        "runtime_database_version": "emission-runtime-dense-v2",
+        "source_database_version": manifest.get("database_version"),
+        "created_at_unix": time.time(),
+        "source_db_dir": str(db_dir),
+        "d_gap": float(manifest.get("d_gap", 0.5)),
+        "dtype": args.dtype,
+        "format": fmt,
+        "bitorder": "little",
+        "zero_j_threshold": float(args.zero_j_threshold),
+        "zero_compress": bool(args.zero_compress),
+        "fields": ["J", "Vd", "delta_V", "phiE", "phiC", "lookup_safe_bits", "zero_mask_bits"],
+        "regions": {item["region"]: item for item in region_outputs},
+        "region_count": len(region_outputs),
+        "total_points": int(total_points),
+        "total_size_bytes": int(total_size),
+    }
+    write_json(out_dir / "runtime_dense_manifest.json", runtime_manifest)
+    print(json.dumps(runtime_manifest, indent=2, sort_keys=True))
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate and manage ThermoCalc emission database chunks.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1277,6 +1469,16 @@ def parse_args() -> argparse.Namespace:
     p_runtime.add_argument("--zero-j-threshold", type=float, default=1e-3)
     p_runtime.add_argument("--zero-compress", action="store_true")
     p_runtime.set_defaults(func=cmd_export_runtime)
+
+    p_dense = sub.add_parser("export-runtime-dense")
+    p_dense.add_argument("--db-dir", type=Path, default=DEFAULT_DB_DIR)
+    p_dense.add_argument("--out-dir", type=Path, default=ROOT / "emission_runtime_db_v2")
+    p_dense.add_argument("--dtype", choices=("float32", "float64"), default="float32")
+    p_dense.add_argument("--format", choices=("npz", "binary", "both"), default="npz")
+    p_dense.add_argument("--region", action="append", default=None)
+    p_dense.add_argument("--zero-j-threshold", type=float, default=1e-3)
+    p_dense.add_argument("--zero-compress", action="store_true")
+    p_dense.set_defaults(func=cmd_export_runtime_dense)
     return parser.parse_args()
 
 

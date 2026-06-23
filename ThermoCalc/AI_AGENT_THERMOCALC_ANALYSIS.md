@@ -440,3 +440,20 @@ testModule/test_thermocalc_lookup.py
 - `ThermoCalc/emission_runtime_db/` 是运行库，只保留 `J/Vd/delta_V/phiE/phiC/lookup_safe/zero_mask` 和轴，不提交 git。
 - 自动加载需要同时设置 `THERMOCALC_ENABLE_LOOKUP=1` 和 `THERMOCALC_LOOKUP_DB`；默认只加载 `core`，更广覆盖由 `THERMOCALC_LOOKUP_REGIONS` 控制。
 - 当前查表仅在 `ThermoCalc/build_cp312/Release` 测试版 `.pyd` 中验证，根目录生产 `.pyd` 仍未替换。
+
+## 17. 2026-06-23 dense runtime v2 补充
+
+当前推荐的运行时查表格式是 `export-runtime-dense` 生成的 dense runtime v2：
+
+```text
+ThermoCalc/emission_runtime_db_v2/
+  runtime_dense_manifest.json
+  core.runtime.v2.npz
+  core.runtime.v2.tedb
+```
+
+该格式按 region 存储一个连续四维张量，字段为 `J/Vd/delta_V/phiE/phiC`，并把 `lookup_safe` 和 `zero_mask` 压缩为 bit-packed mask。`.npz` 是可移植格式，`.tedb` 是 C++ 直接加载格式；包装层发现 `runtime_dense_manifest.json` 后会优先加载 `.tedb`，否则回退到 `.npz`。
+
+当前 core dense v2 表从本地全量库导出，形状为 `86 x 41 x 71 x 41`，共 `10,264,186` 点；`NPZ` 约 `86.87 MiB`，`TEDB` 约 `198.22 MiB`，`TEDB` 加载约 `0.167 s`。连续 core 随机 `200000` 点批量查表约 `1.49e6 points/s`；聚焦回归 `testModule/test_thermocalc_lookup.py` 中查表约 `3.55e6 points/s`、解析法约 `9.87e4 points/s`、约 `36x`。
+
+`ThermoCalc/emission_runtime_db_v2/` 是生成数据，不提交 git。完整复现命令、字段说明和 v1/v2 对比维护在 [`EMISSION_SCAN_GUIDE.md`](./EMISSION_SCAN_GUIDE.md)。

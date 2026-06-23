@@ -387,6 +387,49 @@ void add_emission_runtime_block(
     addEmissionLookupBlock(block);
 }
 
+void add_emission_dense_region(
+    const std::string& name,
+    int priority,
+    int region_id,
+    double d_gap,
+    const py::array_t<double>& TE_axis,
+    const py::array_t<double>& TC_axis,
+    const py::array_t<double>& Vo_axis,
+    const py::array_t<double>& Tcs_axis,
+    const py::array_t<float>& J,
+    const py::array_t<float>& Vd,
+    const py::array_t<float>& delta_V,
+    const py::array_t<float>& phiE,
+    const py::array_t<float>& phiC,
+    const py::array_t<uint8_t>& lookup_safe_bits,
+    const py::array_t<uint8_t>& zero_mask_bits,
+    std::size_t point_count)
+{
+    DenseEmissionLookupRegion region;
+    region.name = name;
+    region.priority = priority;
+    region.region_id = region_id;
+    region.d_gap = d_gap;
+    region.TE_axis = array_to_vector_1d(TE_axis, "TE_axis");
+    region.TC_axis = array_to_vector_1d(TC_axis, "TC_axis");
+    region.Vo_axis = array_to_vector_1d(Vo_axis, "Vo_axis");
+    region.Tcs_axis = array_to_vector_1d(Tcs_axis, "Tcs_axis");
+    const std::size_t n = region.TE_axis.size() * region.TC_axis.size() * region.Vo_axis.size() * region.Tcs_axis.size();
+    if (point_count != n) {
+        throw py::value_error("point_count does not match dense axis product.");
+    }
+    const std::size_t bit_bytes = (n + 7u) / 8u;
+    region.point_count = n;
+    region.J = array_to_vector_flat_float32(J, "J", n);
+    region.Vd = array_to_vector_flat_float32(Vd, "Vd", n);
+    region.delta_V = array_to_vector_flat_float32(delta_V, "delta_V", n);
+    region.phiE = array_to_vector_flat_float32(phiE, "phiE", n);
+    region.phiC = array_to_vector_flat_float32(phiC, "phiC", n);
+    region.lookup_safe_bits = array_to_vector_flat_u8(lookup_safe_bits, "lookup_safe_bits", bit_bytes);
+    region.zero_mask_bits = array_to_vector_flat_u8(zero_mask_bits, "zero_mask_bits", bit_bytes);
+    addEmissionDenseRegion(region);
+}
+
 py::dict lookup_emission_point(double TE, double TC, double Vo, double Tcs, double d_gap) {
     EmissionLookupQueryResult result = queryEmissionLookup(TE, TC, Vo, Tcs, d_gap);
     py::dict out;
@@ -552,6 +595,7 @@ PYBIND11_MODULE(te_solver, m) {
     m.def("is_emission_lookup_enabled", &isEmissionLookupEnabled);
     m.def("emission_lookup_block_count", &emissionLookupBlockCount);
     m.def("emission_lookup_region_count", &emissionLookupRegionCount);
+    m.def("emission_lookup_dense_region_count", &emissionLookupDenseRegionCount);
     m.def(
         "add_emission_lookup_block",
         &add_emission_lookup_block,
@@ -585,6 +629,31 @@ PYBIND11_MODULE(te_solver, m) {
         py::arg("phiC"),
         py::arg("lookup_safe"),
         py::arg("zero_mask")
+    );
+    m.def(
+        "add_emission_dense_region",
+        &add_emission_dense_region,
+        py::arg("name"),
+        py::arg("priority"),
+        py::arg("region_id"),
+        py::arg("d_gap"),
+        py::arg("TE_axis"),
+        py::arg("TC_axis"),
+        py::arg("Vo_axis"),
+        py::arg("Tcs_axis"),
+        py::arg("J"),
+        py::arg("Vd"),
+        py::arg("delta_V"),
+        py::arg("phiE"),
+        py::arg("phiC"),
+        py::arg("lookup_safe_bits"),
+        py::arg("zero_mask_bits"),
+        py::arg("point_count")
+    );
+    m.def(
+        "load_emission_dense_file",
+        &loadEmissionDenseFile,
+        py::arg("path")
     );
     m.def(
         "lookup_emission_point",

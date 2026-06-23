@@ -1,9 +1,10 @@
 import os
 import sys
 import time
-import tempfile
 import contextlib
 import io
+import json
+import tempfile
 from argparse import Namespace
 from pathlib import Path
 
@@ -21,7 +22,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import te_solver  # noqa: E402
-from emission_database import cmd_export_runtime  # noqa: E402
+from emission_database import cmd_export_runtime, cmd_export_runtime_dense  # noqa: E402
 from ThermoCalc.ThermoCalcWrapper import load_emission_lookup_database  # noqa: E402
 
 
@@ -179,6 +180,62 @@ def test_runtime_export_and_wrapper_loader():
         assert abs(float(batch["J"][1]) - float(gap_single["J"])) <= 5.0e-6
 
 
+def test_dense_runtime_export_and_loader():
+    db_dir = ROOT_DIR / "ThermoCalc" / "emission_database" / "smoke"
+    with tempfile.TemporaryDirectory() as tmp:
+        out_dir = Path(tmp) / "dense"
+        with contextlib.redirect_stdout(io.StringIO()):
+            cmd_export_runtime_dense(
+                Namespace(
+                    db_dir=db_dir,
+                    out_dir=out_dir,
+                    dtype="float32",
+                    format="both",
+                    region=["core"],
+                    zero_j_threshold=1.0e-3,
+                    zero_compress=True,
+                )
+            )
+        manifest_path = out_dir / "runtime_dense_manifest.json"
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        region_meta = manifest["regions"]["core"]
+        npz_path = out_dir / region_meta["outputs"]["npz"]
+        binary_path = out_dir / region_meta["outputs"]["binary"]
+        assert npz_path.exists()
+        assert binary_path.exists()
+        with np.load(npz_path, allow_pickle=False) as data:
+            shape = tuple(region_meta["shape"])
+            assert data["J"].shape == shape
+            assert data["J"].dtype == np.float32
+            assert data["lookup_safe_bits"].dtype == np.uint8
+            assert data["zero_mask_bits"].dtype == np.uint8
+            assert data["lookup_safe_bits"].size == (int(np.prod(shape)) + 7) // 8
+            sample = {
+                "TE": float(0.5 * (data["TE_axis"][0] + data["TE_axis"][-1])),
+                "TC": float(0.5 * (data["TC_axis"][0] + data["TC_axis"][-1])),
+                "Vo": float(0.5 * (data["Vo_axis"][0] + data["Vo_axis"][-1])),
+                "Tcs": float(0.5 * (data["Tcs_axis"][0] + data["Tcs_axis"][-1])),
+            }
+
+        te_solver.clear_emission_lookup()
+        loaded = load_emission_lookup_database(str(out_dir), enable=True, force=True, regions=("core",))
+        assert loaded == 1
+        assert te_solver.emission_lookup_dense_region_count() == 1
+        assert te_solver.emission_lookup_block_count() == 0
+        lookup = te_solver.lookup_emission_point(sample["TE"], sample["TC"], sample["Vo"], sample["Tcs"], 0.5)
+        assert lookup["found"]
+        batch = te_solver.lookup_emission_points(
+            np.asarray([sample["TE"]], dtype=np.float64),
+            np.asarray([sample["TC"]], dtype=np.float64),
+            np.asarray([sample["Vo"]], dtype=np.float64),
+            np.asarray([sample["Tcs"]], dtype=np.float64),
+            0.5,
+        )
+        assert int(batch["found"][0]) == 1
+        assert abs(float(batch["J"][0]) - float(lookup["J"])) <= 5.0e-6
+
+
 def benchmark_lookup_vs_analytic(n_points: int = 20000):
     te_solver.clear_emission_lookup()
     te_solver.set_emission_lookup_enabled(True)
@@ -218,6 +275,7 @@ if __name__ == "__main__":
     test_lookup_exact_grid_and_calc_path()
     test_optimized_accident_block_is_queryable()
     test_runtime_export_and_wrapper_loader()
+    test_dense_runtime_export_and_loader()
     stats = benchmark_lookup_vs_analytic()
     print("ThermoCalc lookup checks passed.")
     for key, value in stats.items():
