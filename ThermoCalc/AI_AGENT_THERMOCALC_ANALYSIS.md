@@ -363,7 +363,7 @@ f(TE, TC, Vo, phiE, phiC, d_gap, Tcs) -> J / Vd / delta_V / phiE / phiC
 - `CMakeLists.txt`：测试版构建纳入 `emissionLookup.cpp`。
 - `testModule/test_thermocalc_lookup.py`：覆盖单块加载、优化块加载、生产 `calc()` 查表分支和查表/解析速度对比。
 
-旧数据库位于 `ThermoCalc/emission_database/`，使用的是旧铯压范围。旧全量计划含 `18,737,388` 点、`78` 个 chunk；已完成 `startup` 和 `accident` 风险点优化表，`.optimized.npz` 会被包装层优先加载。优化后 `startup+accident` 中原始无效点 `55,506` 个，其中 `43,104` 个按零发射处理，`12,402` 个由邻域插补，未解决点为 `0`。新的 `0.02-5.0 torr` 全量计划为 `31,716,828` 点、`108` 个 chunk，需要重新生成数据库和 dense runtime v2 表。
+旧数据库位于 `ThermoCalc/emission_database/`，使用的是旧铯压范围。旧全量计划含 `18,737,388` 点、`78` 个 chunk；已完成 `startup` 和 `accident` 风险点优化表，`.optimized.npz` 会被包装层优先加载。优化后 `startup+accident` 中原始无效点 `55,506` 个，其中 `43,104` 个按零发射处理，`12,402` 个由邻域插补，未解决点为 `0`。新的 `0.02-5.0 torr` 全量计划保留原 Pcs 点数，仍为 `18,737,388` 点；按当前右边界保留 chunk 逻辑为 `76` 个 chunk。需要重新生成数据库和 dense runtime v2 表。
 
 验证结果：
 
@@ -456,6 +456,6 @@ ThermoCalc/emission_runtime_db_v2/
 
 旧 core dense v2 表从旧压力范围本地全量库导出，形状为 `86 x 41 x 71 x 41`，共 `10,264,186` 点；`NPZ` 约 `86.87 MiB`，`TEDB` 约 `198.22 MiB`，`TEDB` 加载约 `0.167 s`。连续 core 随机 `200000` 点批量查表约 `1.49e6 points/s`；聚焦回归 `testModule/test_thermocalc_lookup.py` 中查表约 `3.55e6 points/s`、解析法约 `9.87e4 points/s`、约 `36x`。
 
-2026-06-23 压力范围修正：新的全量 plan 将 `core/startup/high_power/accident` 的铯压轴统一为 `0.02-5.0 torr`、`61` 个 log-spaced 点。这里 `Pcs` 单位明确为 torr，不是 Pa；换算沿用 C++ 生产模型公式 `Pcs_torr = 2.45e8 / sqrt(Tcs) * exp(-8910 / Tcs)`；该范围对应 `Tcs ≈ 441.44-614.62 K`，覆盖当前 `Tcs=600 K` 算例。此前已经生成的 `ThermoCalc/emission_database/` 和 `ThermoCalc/emission_runtime_db_v2/` 属于旧压力范围产物，后续正式查表使用前需要重新执行 `plan -> worker -> summarize/verify -> optimize-table -> export-runtime-dense`。
+2026-06-23 压力范围修正：新的全量 plan 将 `core/startup/high_power/accident` 的铯压范围改为 `0.02-5.0 torr`，但保留原 Pcs 点数和 log spacing 类型：`core/high_power=41`、`startup=21`、`accident=31`。这里 `Pcs` 单位明确为 torr，不是 Pa；换算沿用 C++ 生产模型公式 `Pcs_torr = 2.45e8 / sqrt(Tcs) * exp(-8910 / Tcs)`；该范围对应 `Tcs ≈ 441.44-614.62 K`，覆盖当前 `Tcs=600 K` 算例。此前已经生成的 `ThermoCalc/emission_database/` 和 `ThermoCalc/emission_runtime_db_v2/` 属于旧压力范围产物，后续正式查表使用前需要重新执行 `plan -> worker -> summarize/verify -> optimize-table -> export-runtime-dense`。
 
 `ThermoCalc/emission_runtime_db_v2/` 是生成数据，不提交 git。完整复现命令、字段说明和 v1/v2 对比维护在 [`EMISSION_SCAN_GUIDE.md`](./EMISSION_SCAN_GUIDE.md)。

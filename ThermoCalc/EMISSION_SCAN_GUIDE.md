@@ -351,10 +351,13 @@ ThermoCalc/emission_database/
 ```
 
 The default full plan covers four separately stored regions. All production
-regions use the same cesium pressure axis:
+regions use `Pcs = 0.02-5.0 torr` with log spacing, while preserving the
+original per-region pressure point counts:
 
 ```text
-Pcs: 0.02-5.0 torr, 61 log-spaced points
+core/high_power: 41 Pcs points
+startup:         21 Pcs points
+accident:        31 Pcs points
 ```
 
 `Pcs` is in torr, not Pa. The conversion to `Tcs` uses the same formula as the
@@ -365,10 +368,10 @@ Pcs_torr = 2.45e8 / sqrt(Tcs) * exp(-8910 / Tcs)
 ```
 
 ```text
-core        TE 1300-2150 K, TC 700-900 K,  Vo 0-3.5 V, Pcs 0.02-5.0 torr
-startup     TE 700-1300 K,  TC 500-800 K,  Vo 0-3.5 V, Pcs 0.02-5.0 torr
-high_power  TE 2150-2400 K, TC 750-1000 K, Vo 0-3.5 V, Pcs 0.02-5.0 torr
-accident    TE 700-2400 K,  TC 500-1100 K, Vo 0-3.5 V, Pcs 0.02-5.0 torr
+core        TE 1300-2150 K, TC 700-900 K,  Vo 0-3.5 V, Pcs 0.02-5.0 torr, 41 Pcs points
+startup     TE 700-1300 K,  TC 500-800 K,  Vo 0-3.5 V, Pcs 0.02-5.0 torr, 21 Pcs points
+high_power  TE 2150-2400 K, TC 750-1000 K, Vo 0-3.5 V, Pcs 0.02-5.0 torr, 41 Pcs points
+accident    TE 700-2400 K,  TC 500-1100 K, Vo 0-3.5 V, Pcs 0.02-5.0 torr, 31 Pcs points
 ```
 
 Generate the full manifest and chunk plan:
@@ -377,7 +380,8 @@ Generate the full manifest and chunk plan:
 & "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py plan --db-dir ThermoCalc\emission_database --preset full
 ```
 
-The corrected full plan contains 31,716,828 points in 108 chunks. Use multiple
+The corrected full plan contains 18,737,388 points in 76 chunks with the
+current right-boundary-preserving chunk layout. Use multiple
 workers by assigning stable worker indices:
 
 ```powershell
