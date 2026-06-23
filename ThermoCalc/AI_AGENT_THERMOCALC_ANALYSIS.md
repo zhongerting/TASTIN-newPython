@@ -399,3 +399,11 @@ testModule/test_thermocalc_lookup.py
 ```
 
 `ThermoCalc/emission_runtime_db/` 和 `ThermoCalc/emission_database/` 都是生成数据，不应提交到 git。若后续需要完整工况覆盖，先导出全 region runtime 表，再设置 `THERMOCALC_LOOKUP_DB` 指向 runtime 目录，并显式设置 `THERMOCALC_LOOKUP_REGIONS`。
+
+2026-06-23 后续修复：
+
+- `chunk_te_ranges()` 现在为每个 TE chunk 保留右侧边界平面，避免新生成数据库出现 `1300-1310 K` 后直接跳到 `1320-1330 K` 的插值空隙。
+- `export-runtime` 对旧数据库自动拼接下一 chunk 的第一个 TE 平面；现有 core runtime 表由 `1300-1310 K`、`1320-1330 K` 等旧块导出为 `1300-1320 K`、`1320-1340 K` 等连续块，不需要重算原始 1873 万点。
+- 修复 `lookup_emission_points()` 输出数组 stride 为 `0` 的绑定问题；批量 API 现在与单点 `lookup_emission_point()` 一致，可以重新作为 benchmark 使用。
+- 重新导出的 core runtime 表为 `43` 个 chunk、约 `15,276,928` runtime 点、`129.49 MB`；连续 core 随机采样 `200000/200000` 命中，批量查表约 `1.05e6 points/s`。
+- `testModule/test_thermocalc_lookup.py` 已覆盖 runtime 右边界拼接、TE 空隙点命中、批量数组 stride 和批量/单点一致性；本轮局部 benchmark 为查表约 `3.72e6 points/s`、解析约 `9.44e4 points/s`、约 `39x`。

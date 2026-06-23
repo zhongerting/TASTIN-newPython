@@ -418,8 +418,12 @@ py::dict lookup_emission_points(
     auto tc = TC.unchecked<1>();
     auto vo = Vo.unchecked<1>();
     auto tcs = Tcs.unchecked<1>();
-    py::array_t<double> J(n), Vd(n), delta_V(n), phiE(n), phiC(n);
-    py::array_t<uint8_t> found(n);
+    py::array_t<double> J({ n }, { static_cast<py::ssize_t>(sizeof(double)) });
+    py::array_t<double> Vd({ n }, { static_cast<py::ssize_t>(sizeof(double)) });
+    py::array_t<double> delta_V({ n }, { static_cast<py::ssize_t>(sizeof(double)) });
+    py::array_t<double> phiE({ n }, { static_cast<py::ssize_t>(sizeof(double)) });
+    py::array_t<double> phiC({ n }, { static_cast<py::ssize_t>(sizeof(double)) });
+    py::array_t<uint8_t> found({ n }, { static_cast<py::ssize_t>(sizeof(uint8_t)) });
     auto j_out = J.mutable_unchecked<1>();
     auto vd_out = Vd.mutable_unchecked<1>();
     auto dv_out = delta_V.mutable_unchecked<1>();

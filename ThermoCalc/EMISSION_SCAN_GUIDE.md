@@ -219,6 +219,13 @@ The runtime directory contains `runtime_manifest.json` and per-region
 emission_runtime_db/
 ```
 
+Runtime export stitches the first TE plane from the next source chunk onto the
+current chunk when an old non-overlapping source plan is used. This turns legacy
+source chunks such as `1300-1310 K` and `1320-1330 K` into runtime chunks such
+as `1300-1320 K` and `1320-1340 K`, so interpolation no longer misses the
+`1310-1320 K` interval. New chunk plans also include the right TE boundary
+plane directly.
+
 ## Production Lookup Path
 
 The optional C++ lookup path is implemented in:
@@ -273,9 +280,10 @@ Validated commands and results:
 ```text
 testModule/test_thermocalc_lookup.py
   passed
-  lookup batch: about 1.53e6 points/s
-  analytic local solver: about 5.84e4 points/s
-  local speedup: about 26x
+  lookup batch: about 3.72e6 points/s
+  analytic local solver: about 9.44e4 points/s
+  local speedup: about 39x
+  runtime core continuous random sample: 200000 / 200000 found
 ```
 
 V13 restart smoke with lookup enabled:

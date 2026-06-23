@@ -138,6 +138,7 @@ def test_runtime_export_and_wrapper_loader():
             assert data["lookup_safe"].dtype == np.uint8
             assert data["zero_mask"].dtype == np.uint8
             idx = (1, 20, 30, 10)
+            te_axis = np.asarray(data["TE_axis"], dtype=np.float64).copy()
             sample = {
                 "TE": float(data["TE_axis"][idx[0]]),
                 "TC": float(data["TC_axis"][idx[1]]),
@@ -158,6 +159,24 @@ def test_runtime_export_and_wrapper_loader():
         assert lookup["found"]
         for field in ("J", "Vd", "delta_V", "phiE", "phiC"):
             assert abs(float(lookup[field]) - sample[field]) <= 5.0e-6
+
+        te_gap = 0.5 * (
+            float(te_axis[1])
+            + float(te_axis[2])
+        )
+        gap_single = te_solver.lookup_emission_point(te_gap, sample["TC"], sample["Vo"], sample["Tcs"], 0.5)
+        assert gap_single["found"]
+        batch = te_solver.lookup_emission_points(
+            np.asarray([sample["TE"], te_gap], dtype=np.float64),
+            np.asarray([sample["TC"], sample["TC"]], dtype=np.float64),
+            np.asarray([sample["Vo"], sample["Vo"]], dtype=np.float64),
+            np.asarray([sample["Tcs"], sample["Tcs"]], dtype=np.float64),
+            0.5,
+        )
+        assert tuple(batch["J"].strides) == (8,)
+        assert tuple(batch["found"].strides) == (1,)
+        assert int(np.count_nonzero(batch["found"])) == 2
+        assert abs(float(batch["J"][1]) - float(gap_single["J"])) <= 5.0e-6
 
 
 def benchmark_lookup_vs_analytic(n_points: int = 20000):

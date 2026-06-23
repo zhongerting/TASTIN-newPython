@@ -162,8 +162,20 @@ def pyd_info() -> dict[str, Any]:
 
 
 def chunk_te_ranges(n_te: int, points_per_te: int, target_points: int) -> list[tuple[int, int]]:
-    te_per_chunk = max(1, int(target_points // max(1, points_per_te)))
-    return [(start, min(start + te_per_chunk, n_te)) for start in range(0, n_te, te_per_chunk)]
+    if n_te <= 1:
+        return [(0, n_te)]
+    te_per_chunk = max(2, int(target_points // max(1, points_per_te)))
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    while start < n_te:
+        stop = min(start + te_per_chunk, n_te)
+        if stop < n_te:
+            stop += 1  # include the next TE plane so interpolation spans chunk boundaries
+        ranges.append((start, stop))
+        if stop >= n_te:
+            break
+        start = stop - 1
+    return ranges
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -1037,6 +1049,62 @@ def _runtime_chunk_source_path(db_dir: Path, chunk: dict[str, Any]) -> Path:
     return optimized_path if optimized_path.exists() else raw_path
 
 
+def _runtime_payload_from_source(
+    source_path: Path,
+    *,
+    dtype: type[np.floating],
+    zero_threshold: float,
+    zero_compress: bool,
+) -> dict[str, np.ndarray]:
+    with np.load(source_path, allow_pickle=False) as data:
+        if "lookup_safe_flag" in data.files:
+            safe = np.asarray(data["lookup_safe_flag"], dtype=np.uint8)
+        else:
+            safe = np.asarray(data["done"] & data["finite_flag"] & data["converged"], dtype=np.uint8)
+
+        j64 = np.asarray(data["J"], dtype=np.float64)
+        zero_mask = safe.astype(bool) & np.isfinite(j64) & (np.abs(j64) <= zero_threshold)
+        if "zero_fill_flag" in data.files:
+            zero_mask |= np.asarray(data["zero_fill_flag"], dtype=bool)
+        elif "zero_emission_flag" in data.files:
+            zero_mask |= np.asarray(data["zero_emission_flag"], dtype=bool) & safe.astype(bool)
+
+        payload = {
+            "TE_axis": np.asarray(data["TE_axis"], dtype=dtype),
+            "TC_axis": np.asarray(data["TC_axis"], dtype=dtype),
+            "Vo_axis": np.asarray(data["Vo_axis"], dtype=dtype),
+            "Tcs_axis": np.asarray(data["Tcs_axis"], dtype=dtype),
+            "J": np.asarray(data["J"], dtype=dtype),
+            "Vd": np.asarray(data["Vd"], dtype=dtype),
+            "delta_V": np.asarray(data["delta_V"], dtype=dtype),
+            "phiE": np.asarray(data["phiE"], dtype=dtype),
+            "phiC": np.asarray(data["phiC"], dtype=dtype),
+            "lookup_safe": safe.astype(np.uint8, copy=False),
+            "zero_mask": zero_mask.astype(np.uint8, copy=False),
+        }
+        if zero_compress:
+            payload["J"] = np.array(payload["J"], copy=True)
+            payload["J"][zero_mask] = 0.0
+        return payload
+
+
+def _append_first_te_plane(payload: dict[str, np.ndarray], right_payload: dict[str, np.ndarray]) -> bool:
+    if payload["TE_axis"].size == 0 or right_payload["TE_axis"].size == 0:
+        return False
+    if not float(payload["TE_axis"][-1]) < float(right_payload["TE_axis"][0]):
+        return False
+    for axis_name in ("TC_axis", "Vo_axis", "Tcs_axis"):
+        if payload[axis_name].shape != right_payload[axis_name].shape:
+            return False
+        if not np.allclose(payload[axis_name], right_payload[axis_name], rtol=0.0, atol=1.0e-10):
+            return False
+
+    payload["TE_axis"] = np.concatenate((payload["TE_axis"], right_payload["TE_axis"][:1]))
+    for field in ("J", "Vd", "delta_V", "phiE", "phiC", "lookup_safe", "zero_mask"):
+        payload[field] = np.concatenate((payload[field], right_payload[field][:1, :, :, :]), axis=0)
+    return True
+
+
 def cmd_export_runtime(args: argparse.Namespace) -> int:
     db_dir = args.db_dir
     out_dir = args.out_dir
@@ -1061,7 +1129,20 @@ def cmd_export_runtime(args: argparse.Namespace) -> int:
             "axis_lengths": meta.get("axis_lengths", {}),
         }
 
-    selected_chunks = [chunk for chunk in plan["chunks"] if chunk["region"] in regions_requested]
+    source_chunks = [chunk for chunk in plan["chunks"] if chunk["region"] in regions_requested]
+    source_chunks_by_region: dict[str, list[dict[str, Any]]] = {}
+    for chunk in source_chunks:
+        source_chunks_by_region.setdefault(str(chunk["region"]), []).append(chunk)
+    next_chunk_by_id: dict[str, dict[str, Any]] = {}
+    for region_chunks in source_chunks_by_region.values():
+        ordered = sorted(region_chunks, key=lambda item: (int(item["te_start"]), int(item["te_stop"])))
+        by_start = {int(item["te_start"]): item for item in ordered}
+        for chunk in ordered:
+            next_chunk = by_start.get(int(chunk["te_stop"]))
+            if next_chunk is not None:
+                next_chunk_by_id[str(chunk["chunk_id"])] = next_chunk
+
+    selected_chunks = list(source_chunks)
     if limit_chunks > 0:
         selected_chunks = selected_chunks[:limit_chunks]
 
@@ -1070,35 +1151,24 @@ def cmd_export_runtime(args: argparse.Namespace) -> int:
         source_path = _runtime_chunk_source_path(db_dir, chunk)
         if not source_path.exists():
             continue
-        with np.load(source_path, allow_pickle=False) as data:
-            if "lookup_safe_flag" in data.files:
-                safe = np.asarray(data["lookup_safe_flag"], dtype=np.uint8)
-            else:
-                safe = np.asarray(data["done"] & data["finite_flag"] & data["converged"], dtype=np.uint8)
-
-            j64 = np.asarray(data["J"], dtype=np.float64)
-            zero_mask = (safe.astype(bool) & np.isfinite(j64) & (np.abs(j64) <= zero_threshold))
-            if "zero_fill_flag" in data.files:
-                zero_mask |= np.asarray(data["zero_fill_flag"], dtype=bool)
-            elif "zero_emission_flag" in data.files:
-                zero_mask |= np.asarray(data["zero_emission_flag"], dtype=bool) & safe.astype(bool)
-
-            payload = {
-                "TE_axis": np.asarray(data["TE_axis"], dtype=dtype),
-                "TC_axis": np.asarray(data["TC_axis"], dtype=dtype),
-                "Vo_axis": np.asarray(data["Vo_axis"], dtype=dtype),
-                "Tcs_axis": np.asarray(data["Tcs_axis"], dtype=dtype),
-                "J": np.asarray(data["J"], dtype=dtype),
-                "Vd": np.asarray(data["Vd"], dtype=dtype),
-                "delta_V": np.asarray(data["delta_V"], dtype=dtype),
-                "phiE": np.asarray(data["phiE"], dtype=dtype),
-                "phiC": np.asarray(data["phiC"], dtype=dtype),
-                "lookup_safe": safe.astype(np.uint8, copy=False),
-                "zero_mask": zero_mask.astype(np.uint8, copy=False),
-            }
-            if args.zero_compress:
-                payload["J"] = np.array(payload["J"], copy=True)
-                payload["J"][zero_mask] = 0.0
+        payload = _runtime_payload_from_source(
+            source_path,
+            dtype=dtype,
+            zero_threshold=zero_threshold,
+            zero_compress=bool(args.zero_compress),
+        )
+        stitched_right_boundary = False
+        next_chunk = next_chunk_by_id.get(str(chunk["chunk_id"]))
+        if next_chunk is not None:
+            next_source_path = _runtime_chunk_source_path(db_dir, next_chunk)
+            if next_source_path.exists():
+                next_payload = _runtime_payload_from_source(
+                    next_source_path,
+                    dtype=dtype,
+                    zero_threshold=zero_threshold,
+                    zero_compress=bool(args.zero_compress),
+                )
+                stitched_right_boundary = _append_first_te_plane(payload, next_payload)
 
         chunk_id = str(chunk["chunk_id"])
         rel_output = Path(region) / f"{chunk_id}.runtime.npz"
@@ -1117,6 +1187,7 @@ def cmd_export_runtime(args: argparse.Namespace) -> int:
             "output": str(rel_output).replace("\\", "/"),
             "point_count": points,
             "size_bytes": size_bytes,
+            "stitched_right_boundary": bool(stitched_right_boundary),
             "TE_min": float(payload["TE_axis"][0]),
             "TE_max": float(payload["TE_axis"][-1]),
             "TC_min": float(payload["TC_axis"][0]),
