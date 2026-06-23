@@ -4,6 +4,25 @@
 // #include "NonlinearSystemSolver.h"
 #include "NonLinerSolver.h"
 
+struct ThermionicEmissionDiagnosticResult
+{
+	double J = 0.0;
+	double Vd = 0.0;
+	double delta_V = 0.0;
+	double phiE = 0.0;
+	double phiC = 0.0;
+	int regime = -1;
+	bool converged = false;
+	bool finite = false;
+	int iteration_count = 0;
+	int obstructed_iterations = 0;
+	int transition_iterations = 0;
+	int saturation_iterations = 0;
+	double obstructed_residual = 0.0;
+	double transition_residual = 0.0;
+	double saturation_residual = 0.0;
+};
+
 class thermionicEmission
 {
 private:
@@ -61,6 +80,7 @@ public:
 	double saturationCalc();
 
 	double calc();
+	ThermionicEmissionDiagnosticResult calcDiagnostics(bool quiet = true);
 
 private:
 	double csP(double csT) const;

@@ -28,6 +28,7 @@ FetchContent_MakeAvailable(pybind11)
 pybind11_add_module(te_solver
     bindings.cpp
     circuitTECs.cpp
+    emissionLookup.cpp
     singleThermionicEnergyConversion.cpp
     thermionicEmission.cpp
     NonLinerSolver.cpp
