@@ -979,9 +979,16 @@ joulePowerE / joulePowerC [W]
 ```text
 TFEUnit.pre_step()
   -> 更新内部等效 moderator 的外边界温度
+  -> 同步 TFE 内部固固/间隙耦合器
   -> 刷新内部 moderator 的物性、热阻、边界状态和热流缓存
   -> 读取 moderator 外流
   -> 按 tfe_multipliers 聚合到全局 moderator rings
 ```
 
 不得在 `TFEUnit.pre_step()` 之前读取内部 moderator 的 `BoundaryRegion.current_flux`。旧顺序会在正常推进中引入一步滞后，并在 restart 重建后把旧边界缓存作为首步源项注入全局慢化剂环。
+
+2026-06-24 进一步修复了同一位置的构造期边界占位问题。`GapCouple2D` 继承自 `SolidSolidCouple2D`，构造时会先在两侧边界挂载 `ResistanceBC(T_ext=300 K, R_ext=0)`，随后由 `sync()` 更新为真实间隙等效热阻和对侧表面温度。由于 `ReactorCore.pre_step()` 会在 `SystemManager` 常规耦合器同步之前读取 TFE 内部等效 moderator 外流，若不先同步 TFE 内部耦合器，`Center/Ring1/Ring2/Ring3_TEC/Ring3_Open` 的 `Moderator.left` 会短暂使用该零热阻占位边界，导致 `1/R = inf` 后被 `nan_to_num` 兜底。
+
+当前处理是在读取内部 moderator 热流前，对该 TFE 的内部 `couplers` 逐个调用 `sync()`。这只修正生命周期顺序，不改变 `GapCouple2D` 的物理模型，也不把间隙边界简化为纯定温边界。验证状态：`testModule.test_reactorcore_moderator_sync` 已覆盖 `ReactorCore.pre_step()` 不应消费零热阻边界；V13 no-TEC 5 s 运行时监视中零热阻边界求解事件为 0。
+
+同日补充修复了 `TFEUnit._build_couplers()` 构建阶段的同类问题。氦气隙 `collector_iclad_gap` 建立后，冷却剂流固耦合会为了获取套管边界热容调用 `InnerClad/OuterClad.initialize_state()`；该初始化会计算边界热流，因此必须在调用前同步已建立的内部耦合器。当前 `TFEUnit` 会在该初始化前调用 `_sync_existing_couplers()`，避免 `Center_InnerClad.left` 等边界消费 `R_ext=0, T_ext=300 K` 的构造期占位值。验证状态：`testModule.test_reactorcore_moderator_sync` 已覆盖 V13 构建阶段；V13 no-TEC 60 s 精确监视中 `R_ext=0, T_ext=300 K` 占位边界事件为 0。

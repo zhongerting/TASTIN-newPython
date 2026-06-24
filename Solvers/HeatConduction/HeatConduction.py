@@ -1,9 +1,11 @@
 import numpy as np
+import warnings
 from typing import Dict, Optional, Union, Any, Callable
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from scipy.integrate import solve_ivp
-from scipy.sparse import spdiags
+from scipy.sparse import spdiags, coo_matrix
+from scipy.sparse.linalg import spsolve
 
 from Materials.Base import SolidMaterial
 from Solvers.HeatConduction.Mesh import Mesh2D, Mesh1D
@@ -16,7 +18,8 @@ from profiler import TEASAProfiler
 #  提取 1D 和 2D 共用的状态管理、物性更新和热源接口
 # =================================================================
 class BaseHeatConduction(ABC):
-    VALID_ODE_METHODS = {"RK45", "RK23", "DOP853", "Radau", "BDF", "LSODA"}
+    VALID_ODE_METHODS = {"RK45", "RK23", "DOP853", "Radau", "BDF", "LSODA", "implicit_euler", "theta_implicit"}
+    IMPLICIT_ALGEBRAIC_METHODS = {"implicit_euler", "theta_implicit"}
 
     def __init__(self,
                  mesh: Union[Mesh1D, Mesh2D],
@@ -27,6 +30,13 @@ class BaseHeatConduction(ABC):
         self.material = material
         self.name = name
         self.ode_method = "BDF"
+        self.theta_implicit_value = 1.0
+        self.max_implicit_property_iterations = 2
+        self.implicit_property_tol = 1.0e-3
+        self.implicit_fallback_method = "BDF"
+        self.implicit_fallback_to_solve_ivp = True
+        self.minimum_physical_temperature = 0.0
+        self.maximum_physical_temperature = np.inf
         self.N = mesh.N  # 节点总数 (1D: n_vols, 2D: nx*ny)
 
         # --- 状态变量 (Flattened 1D Arrays) ---
@@ -58,6 +68,9 @@ class BaseHeatConduction(ABC):
         self.last_trial_temperature_min = float(initial_temp)
         self.last_trial_temperature_max = float(initial_temp)
         self.last_trial_temperature_time: Optional[float] = None
+        self.last_step_used_fallback = False
+        self.last_step_fallback_message = ""
+        self.last_implicit_outer_iterations = 0
 
         # 初始化
         self._update_properties()
@@ -79,6 +92,9 @@ class BaseHeatConduction(ABC):
         self.last_trial_temperature_min = current_min
         self.last_trial_temperature_max = current_max
         self.last_trial_temperature_time = self.current_time
+        self.last_step_used_fallback = False
+        self.last_step_fallback_message = ""
+        self.last_implicit_outer_iterations = 0
 
     def _record_trial_state(self, t: float, T_current: np.ndarray):
         trial_min = float(np.min(T_current))
@@ -100,6 +116,19 @@ class BaseHeatConduction(ABC):
         self.last_step_success = False
         self.last_step_failure_message = message
         self.last_step_failure_time = self.current_time if failure_time is None else failure_time
+
+    def save_state(self):
+        """保存当前温度场，用于全局 Picard 回滚和隐式 fallback。"""
+        self.T_backup = self.T.copy()
+        self.current_time_backup = self.current_time
+
+    def load_state(self):
+        """回滚温度场，并刷新与温度相关的缓存。"""
+        self.T[:] = self.T_backup
+        self.current_time = self.current_time_backup
+        self._update_properties()
+        self._compute_internal_resistance()
+        self._update_boundaries_state(current_time=self.current_time)
 
     # 新增的初始化函数
     def initialize_state(self):
@@ -288,27 +317,13 @@ class BaseHeatConduction(ABC):
 
         return self.dTdt
 
-    # 时间步进接口，用于推进物体温度场
-    @TEASAProfiler.profile
-    def step(self, dt: float, method: str = None, **kwargs) -> bool:
-        """
-        执行一个时间步长的积分，推进固体温度场。
-
-        :param dt: 时间步长 [s]
-        :param method: 积分方法，默认为 'RK45' (显式)。
-                       对于刚性问题 (极细网格或大导热系数)，建议使用 'BDF' 或 'Radau'。
-        :param kwargs: 传递给 solve_ivp 的其他参数 (如 rtol, atol)
-        :return: 是否成功 (True/False)
-        """
-        # method=None means use the per-solid default selected by set_ode_method().
-
-        if method is None:
-            method = self.ode_method
-        else:
-            method = str(method)
-            if method not in self.VALID_ODE_METHODS:
-                valid = ", ".join(sorted(self.VALID_ODE_METHODS))
-                raise ValueError(f"Unsupported ODE method '{method}'. Valid methods: {valid}")
+    def _solve_ivp_step(self, dt: float, method: str = None, **kwargs) -> bool:
+        if method is None or method in self.IMPLICIT_ALGEBRAIC_METHODS:
+            method = self.implicit_fallback_method
+        method = str(method)
+        if method not in self.VALID_ODE_METHODS or method in self.IMPLICIT_ALGEBRAIC_METHODS:
+            valid = ", ".join(sorted(self.VALID_ODE_METHODS - self.IMPLICIT_ALGEBRAIC_METHODS))
+            raise ValueError(f"Unsupported solve_ivp method '{method}'. Valid solve_ivp methods: {valid}")
 
         t_span = (self.current_time, self.current_time + dt)
         self._reset_step_diagnostics(t_span[1])
@@ -348,6 +363,215 @@ class BaseHeatConduction(ABC):
             self._mark_step_failure(sol.message, failure_time=t_span[1])
             print(f"HeatConduction step failed at t={self.current_time}: {sol.message}")
             return False
+
+    def _is_temperature_state_physical(self, temperature_field: np.ndarray) -> bool:
+        return (
+            np.all(np.isfinite(temperature_field))
+            and float(np.min(temperature_field)) >= float(self.minimum_physical_temperature)
+            and float(np.max(temperature_field)) <= float(self.maximum_physical_temperature)
+        )
+
+    def _fallback_solve_ivp_after_implicit_failure(self, dt: float, message: str, **kwargs) -> bool:
+        self.load_state()
+        self.last_step_used_fallback = True
+        self.last_step_fallback_message = message
+        warnings.warn(
+            f"Solid '{self.name}' implicit heat solve failed; falling back to {self.implicit_fallback_method}: {message}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        success = self._solve_ivp_step(dt, method=self.implicit_fallback_method, **kwargs)
+        self.last_step_used_fallback = True
+        self.last_step_fallback_message = message
+        return success
+
+    def _implicit_euler_step(self, dt: float, **kwargs) -> bool:
+        return self._theta_implicit_step(dt, theta=1.0, method_name="Implicit Euler", **kwargs)
+
+    def _theta_implicit_step(self, dt: float, theta: float = None, method_name: str = "Theta implicit", **kwargs) -> bool:
+        if theta is None:
+            theta = self.theta_implicit_value
+        theta = float(theta)
+        if theta <= 0.0 or theta > 1.0:
+            raise ValueError("theta must be in (0, 1]")
+
+        attempted_end_time = self.current_time + dt
+        self._reset_step_diagnostics(attempted_end_time)
+        self.save_state()
+
+        time_start = self.current_time
+        T_start = self.T.copy()
+        guess_T = T_start.copy()
+        accepted_T = None
+        max_outer_iters = max(int(self.max_implicit_property_iterations), 1)
+        failure_message = ""
+
+        try:
+            for outer_iter in range(max_outer_iters):
+                self.last_implicit_outer_iterations = outer_iter + 1
+                self.T[:] = guess_T
+                self.current_time = time_start
+                self._update_properties()
+                self._compute_internal_resistance()
+                self._update_boundaries_state(current_time=time_start)
+                self._update_sources(time_start)
+
+                rhs = self._assemble_theta_implicit_rhs(dt, theta, T_start)
+                matrix = self._assemble_theta_implicit_matrix(dt, theta)
+                candidate_T = np.asarray(spsolve(matrix, rhs), dtype=float)
+                self._record_trial_state(attempted_end_time, candidate_T)
+
+                if not self._is_temperature_state_physical(candidate_T):
+                    failure_message = f"{method_name} returned non-finite or unphysical temperature state"
+                    accepted_T = None
+                    break
+
+                accepted_T = candidate_T
+                delta = float(np.max(np.abs(candidate_T - guess_T)))
+                scale = max(1.0, float(np.max(np.abs(candidate_T))))
+                if delta <= self.implicit_property_tol * scale:
+                    break
+                guess_T = candidate_T.copy()
+        except Exception as exc:
+            failure_message = f"{type(exc).__name__}: {exc}"
+            accepted_T = None
+
+        if accepted_T is None:
+            if self.implicit_fallback_to_solve_ivp:
+                return self._fallback_solve_ivp_after_implicit_failure(dt, failure_message or f"{method_name} failed", **kwargs)
+            self.load_state()
+            self._mark_step_failure(failure_message or f"{method_name} failed", failure_time=attempted_end_time)
+            return False
+
+        self.T[:] = accepted_T
+        self.current_time = attempted_end_time
+        self._update_properties()
+        self._compute_internal_resistance()
+        self._update_boundaries_state(current_time=self.current_time)
+        self._compute_fluxes(self.current_time)
+        self._mark_step_success()
+        return True
+
+    def _boundary_theta_terms_from_mapping(self, mapping):
+        conductance = np.zeros(self.N, dtype=float)
+        source = np.zeros(self.N, dtype=float)
+        old_flux = np.zeros(self.N, dtype=float)
+        explicit_flux = np.zeros(self.N, dtype=float)
+
+        for boundary, flat_indices in mapping:
+            indices = np.asarray(flat_indices, dtype=int).reshape(-1)
+            if indices.size == 0:
+                continue
+            boundary_flux = np.asarray(boundary.compute_net_flux_for_solver(), dtype=float).reshape(-1)
+            if boundary_flux.size != indices.size:
+                raise ValueError(
+                    f"Boundary flux size {boundary_flux.size} does not match mapped node count {indices.size}"
+                )
+
+            resistance_mask = getattr(boundary, "_resistance_mask", None)
+            if resistance_mask is None:
+                G_sum = getattr(boundary, "G_sum", None)
+                if G_sum is None:
+                    np.add.at(explicit_flux, indices, boundary_flux)
+                    continue
+                resistance_mask = np.asarray(G_sum, dtype=float).reshape(-1) > 1.0e-20
+            else:
+                resistance_mask = np.asarray(resistance_mask, dtype=bool).reshape(-1)
+
+            if resistance_mask.size != indices.size:
+                raise ValueError("Boundary resistance mask size does not match mapped node count")
+
+            if np.any(resistance_mask):
+                R_eff = np.asarray(boundary.R_eff, dtype=float).reshape(-1)
+                R_internal = np.asarray(boundary.R_internal, dtype=float).reshape(-1)
+                T_eff = np.asarray(boundary.T_eff, dtype=float).reshape(-1)
+                R_total = R_eff + R_internal
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    G_total = np.divide(
+                        1.0,
+                        R_total,
+                        out=np.zeros_like(R_total, dtype=float),
+                        where=resistance_mask,
+                    )
+                G_total = np.nan_to_num(G_total, nan=0.0, posinf=1.0e20, neginf=0.0)
+                active_indices = indices[resistance_mask]
+                active_G = G_total[resistance_mask]
+                np.add.at(conductance, active_indices, active_G)
+                np.add.at(source, active_indices, active_G * T_eff[resistance_mask])
+                np.add.at(old_flux, active_indices, boundary_flux[resistance_mask])
+
+            if np.any(~resistance_mask):
+                np.add.at(explicit_flux, indices[~resistance_mask], boundary_flux[~resistance_mask])
+
+        return conductance, source, old_flux, explicit_flux
+
+    def _build_csc_template_from_entries(self, rows: np.ndarray, cols: np.ndarray):
+        template = coo_matrix(
+            (np.zeros(rows.size, dtype=float), (rows, cols)),
+            shape=(self.N, self.N),
+        ).tocsc()
+        position_by_entry = {}
+        for col in range(self.N):
+            start = template.indptr[col]
+            end = template.indptr[col + 1]
+            for pos in range(start, end):
+                position_by_entry[(int(template.indices[pos]), col)] = pos
+        entry_positions = np.array(
+            [position_by_entry[(int(row), int(col))] for row, col in zip(rows, cols)],
+            dtype=int,
+        )
+        return template, entry_positions
+
+    def _assemble_theta_implicit_rhs(self, dt: float, theta: float, T_start: np.ndarray) -> np.ndarray:
+        inv_dt = 1.0 / max(float(dt), 1.0e-30)
+        boundary_conductance, boundary_source, boundary_old_flux, boundary_explicit_flux = self._compute_boundary_theta_terms()
+        rhs = self.thermal_capacitance * inv_dt * T_start
+        if theta < 1.0:
+            rhs = rhs + (1.0 - theta) * self._compute_internal_flux_for_temperature(T_start)
+            rhs = rhs + (1.0 - theta) * boundary_old_flux
+        rhs = rhs + theta * boundary_source + boundary_explicit_flux + self.Q_source
+        self._last_boundary_conductance_for_matrix = boundary_conductance
+        return rhs
+
+    @abstractmethod
+    def _compute_boundary_theta_terms(self):
+        pass
+
+    @abstractmethod
+    def _compute_internal_flux_for_temperature(self, T_flat: np.ndarray) -> np.ndarray:
+        pass
+
+    @abstractmethod
+    def _assemble_theta_implicit_matrix(self, dt: float, theta: float):
+        pass
+
+    # 时间步进接口，用于推进物体温度场
+    @TEASAProfiler.profile
+    def step(self, dt: float, method: str = None, **kwargs) -> bool:
+        """
+        执行一个时间步长的积分，推进固体温度场。
+        """
+        if method is None:
+            method = self.ode_method
+        else:
+            method = str(method)
+            if method not in self.VALID_ODE_METHODS:
+                valid = ", ".join(sorted(self.VALID_ODE_METHODS))
+                raise ValueError(f"Unsupported ODE method '{method}'. Valid methods: {valid}")
+
+        if method == "implicit_euler":
+            self.save_state()
+            success = self._implicit_euler_step(dt, **kwargs)
+            if not success and self.implicit_fallback_to_solve_ivp and not self.last_step_used_fallback:
+                return self._fallback_solve_ivp_after_implicit_failure(dt, "implicit_euler returned False", **kwargs)
+            return success
+        if method == "theta_implicit":
+            self.save_state()
+            success = self._theta_implicit_step(dt, theta=self.theta_implicit_value, **kwargs)
+            if not success and self.implicit_fallback_to_solve_ivp and not self.last_step_used_fallback:
+                return self._fallback_solve_ivp_after_implicit_failure(dt, "theta_implicit returned False", **kwargs)
+            return success
+        return self._solve_ivp_step(dt, method=method, **kwargs)
 
 
 # =================================================================
@@ -527,6 +751,100 @@ class HeatConduction1D(BaseHeatConduction):
         # 返回净导热项 Q_net [W]
         # Q_i = Flux_in - Flux_out
         return self.interface_flux[:-1] - self.interface_flux[1:]
+
+    def _compute_boundary_theta_terms(self):
+        mapping = []
+        if 'inner' in self.boundaries:
+            mapping.append((self.boundaries['inner'], np.array([0], dtype=int)))
+        if 'outer' in self.boundaries:
+            mapping.append((self.boundaries['outer'], np.array([self.N - 1], dtype=int)))
+        return self._boundary_theta_terms_from_mapping(mapping)
+
+    def _compute_internal_flux_for_temperature(self, T_flat: np.ndarray) -> np.ndarray:
+        T_arr = np.asarray(T_flat, dtype=float).reshape(-1)
+        flux = np.zeros(self.N + 1, dtype=float)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            flux[1:-1] = np.nan_to_num((T_arr[:-1] - T_arr[1:]) / self.R_geom[1:-1])
+        return flux[:-1] - flux[1:]
+
+    def _assemble_theta_implicit_matrix(self, dt: float, theta: float):
+        inv_dt = 1.0 / max(float(dt), 1.0e-30)
+        boundary_conductance = getattr(
+            self,
+            "_last_boundary_conductance_for_matrix",
+            np.zeros(self.N, dtype=float),
+        )
+        if not hasattr(self, "_implicit_matrix_cache") or self._implicit_matrix_cache.get("N") != self.N:
+            if self.N > 1:
+                left = np.arange(self.N - 1, dtype=int)
+                right = left + 1
+                diag_idx = np.arange(self.N, dtype=int)
+                rows = np.concatenate((left, right, diag_idx))
+                cols = np.concatenate((right, left, diag_idx))
+                data = np.empty(rows.size, dtype=float)
+                matrix, entry_positions = self._build_csc_template_from_entries(rows, cols)
+                cache = {
+                    "N": self.N,
+                    "rows": rows,
+                    "cols": cols,
+                    "data": data,
+                    "matrix": matrix,
+                    "entry_positions": entry_positions,
+                    "left": left,
+                    "right": right,
+                    "lr_slice": slice(0, self.N - 1),
+                    "rl_slice": slice(self.N - 1, 2 * (self.N - 1)),
+                    "diag_slice": slice(2 * (self.N - 1), 2 * (self.N - 1) + self.N),
+                    "diag_work": np.empty(self.N, dtype=float),
+                    "conductance_work": np.empty(self.N - 1, dtype=float),
+                }
+            else:
+                rows = np.array([0], dtype=int)
+                cols = np.array([0], dtype=int)
+                matrix, entry_positions = self._build_csc_template_from_entries(rows, cols)
+                cache = {
+                    "N": self.N,
+                    "rows": rows,
+                    "cols": cols,
+                    "data": np.empty(1, dtype=float),
+                    "matrix": matrix,
+                    "entry_positions": entry_positions,
+                    "left": np.array([], dtype=int),
+                    "right": np.array([], dtype=int),
+                    "lr_slice": slice(0, 0),
+                    "rl_slice": slice(0, 0),
+                    "diag_slice": slice(0, 1),
+                    "diag_work": np.empty(1, dtype=float),
+                    "conductance_work": np.empty(0, dtype=float),
+                }
+            self._implicit_matrix_cache = cache
+
+        cache = self._implicit_matrix_cache
+        diag = cache["diag_work"]
+        diag[:] = self.thermal_capacitance * inv_dt
+        diag += float(theta) * np.asarray(boundary_conductance, dtype=float)
+        data = cache["data"]
+
+        if self.N > 1:
+            cache["conductance_work"].fill(0.0)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                conductances = np.divide(
+                    1.0,
+                    self.R_geom[1:-1],
+                    out=cache["conductance_work"],
+                    where=np.abs(self.R_geom[1:-1]) > 1.0e-300,
+                )
+            conductances = cache["conductance_work"]
+            np.nan_to_num(conductances, copy=False, nan=0.0, posinf=1.0e20, neginf=0.0)
+            conductances *= float(theta)
+            np.add.at(diag, cache["left"], conductances)
+            np.add.at(diag, cache["right"], conductances)
+            data[cache["lr_slice"]] = -conductances
+            data[cache["rl_slice"]] = -conductances
+
+        data[cache["diag_slice"]] = diag
+        cache["matrix"].data[cache["entry_positions"]] = data
+        return cache["matrix"]
 
     # 在 HeatConduction1D 类中添加
     def get_boundary_node_capacitance(self, location: str) -> np.ndarray:
@@ -822,6 +1140,138 @@ class HeatConduction2D(BaseHeatConduction):
         # 返回 Flatten 后的净热流数组
         # 注意: flatten() 默认会返回一个深拷贝 (copy)，所以它不会破坏 buffer 的内存
         return Q_net_2d.flatten()
+
+    def _compute_boundary_theta_terms(self):
+        nx, ny = self.shape_nodes
+        mapping = []
+        if 'left' in self.boundaries:
+            mapping.append((self.boundaries['left'], np.arange(ny, dtype=int)))
+        if 'right' in self.boundaries:
+            mapping.append((self.boundaries['right'], (nx - 1) * ny + np.arange(ny, dtype=int)))
+        if 'bottom' in self.boundaries:
+            mapping.append((self.boundaries['bottom'], np.arange(nx, dtype=int) * ny))
+        if 'top' in self.boundaries:
+            mapping.append((self.boundaries['top'], np.arange(nx, dtype=int) * ny + (ny - 1)))
+        return self._boundary_theta_terms_from_mapping(mapping)
+
+    def _compute_internal_flux_for_temperature(self, T_flat: np.ndarray) -> np.ndarray:
+        Q_net_2d = self.Q_net_2d_buffer
+        Q_net_2d.fill(0.0)
+        T_2d = np.asarray(T_flat, dtype=float).reshape(self.shape_nodes)
+
+        if self.G_x_inner.size > 0:
+            np.subtract(T_2d[:-1, :], T_2d[1:, :], out=self._flux_x_buffer)
+            np.multiply(self._flux_x_buffer, self.G_x_inner, out=self._flux_x_buffer)
+            Q_net_2d[:-1, :] -= self._flux_x_buffer
+            Q_net_2d[1:, :] += self._flux_x_buffer
+
+        if self.G_y_inner.size > 0:
+            np.subtract(T_2d[:, :-1], T_2d[:, 1:], out=self._flux_y_buffer)
+            np.multiply(self._flux_y_buffer, self.G_y_inner, out=self._flux_y_buffer)
+            Q_net_2d[:, :-1] -= self._flux_y_buffer
+            Q_net_2d[:, 1:] += self._flux_y_buffer
+
+        return Q_net_2d.reshape(-1).copy()
+
+    def _assemble_theta_implicit_matrix(self, dt: float, theta: float):
+        nx, ny = self.shape_nodes
+        inv_dt = 1.0 / max(float(dt), 1.0e-30)
+        boundary_conductance = getattr(
+            self,
+            "_last_boundary_conductance_for_matrix",
+            np.zeros(self.N, dtype=float),
+        )
+        cache_sig = (self.N, nx, ny)
+        if not hasattr(self, "_implicit_matrix_cache") or self._implicit_matrix_cache.get("sig") != cache_sig:
+            row_parts = []
+            col_parts = []
+            data_sizes = []
+            cache = {
+                "sig": cache_sig,
+                "x_left": np.array([], dtype=int),
+                "x_right": np.array([], dtype=int),
+                "y_bottom": np.array([], dtype=int),
+                "y_top": np.array([], dtype=int),
+            }
+
+            if self.G_x_inner.size > 0:
+                i_idx, j_idx = np.meshgrid(np.arange(nx - 1), np.arange(ny), indexing='ij')
+                x_left = (i_idx * ny + j_idx).reshape(-1)
+                x_right = x_left + ny
+                cache["x_left"] = x_left
+                cache["x_right"] = x_right
+                row_parts.extend((x_left, x_right))
+                col_parts.extend((x_right, x_left))
+                data_sizes.extend((x_left.size, x_right.size))
+
+            if self.G_y_inner.size > 0:
+                i_idx, j_idx = np.meshgrid(np.arange(nx), np.arange(ny - 1), indexing='ij')
+                y_bottom = (i_idx * ny + j_idx).reshape(-1)
+                y_top = y_bottom + 1
+                cache["y_bottom"] = y_bottom
+                cache["y_top"] = y_top
+                row_parts.extend((y_bottom, y_top))
+                col_parts.extend((y_top, y_bottom))
+                data_sizes.extend((y_bottom.size, y_top.size))
+
+            diag_idx = np.arange(self.N, dtype=int)
+            row_parts.append(diag_idx)
+            col_parts.append(diag_idx)
+            data_sizes.append(self.N)
+
+            rows = np.concatenate(row_parts)
+            cols = np.concatenate(col_parts)
+            data = np.empty(rows.size, dtype=float)
+            matrix, entry_positions = self._build_csc_template_from_entries(rows, cols)
+            cursor = 0
+            slice_names = []
+            if self.G_x_inner.size > 0:
+                slice_names.extend(("x_lr_slice", "x_rl_slice"))
+            if self.G_y_inner.size > 0:
+                slice_names.extend(("y_bt_slice", "y_tb_slice"))
+            slice_names.append("diag_slice")
+            for name, size in zip(slice_names, data_sizes):
+                cache[name] = slice(cursor, cursor + size)
+                cursor += size
+            cache.update({
+                "rows": rows,
+                "cols": cols,
+                "data": data,
+                "matrix": matrix,
+                "entry_positions": entry_positions,
+                "diag_work": np.empty(self.N, dtype=float),
+                "x_conductance_work": np.empty(self.G_x_inner.size, dtype=float),
+                "y_conductance_work": np.empty(self.G_y_inner.size, dtype=float),
+            })
+            self._implicit_matrix_cache = cache
+
+        cache = self._implicit_matrix_cache
+        diag = cache["diag_work"]
+        diag[:] = self.thermal_capacitance * inv_dt
+        diag += float(theta) * np.asarray(boundary_conductance, dtype=float)
+        data = cache["data"]
+
+        if self.G_x_inner.size > 0:
+            conductance = cache["x_conductance_work"]
+            conductance[:] = self.G_x_inner.reshape(-1)
+            conductance *= float(theta)
+            np.add.at(diag, cache["x_left"], conductance)
+            np.add.at(diag, cache["x_right"], conductance)
+            data[cache["x_lr_slice"]] = -conductance
+            data[cache["x_rl_slice"]] = -conductance
+
+        if self.G_y_inner.size > 0:
+            conductance = cache["y_conductance_work"]
+            conductance[:] = self.G_y_inner.reshape(-1)
+            conductance *= float(theta)
+            np.add.at(diag, cache["y_bottom"], conductance)
+            np.add.at(diag, cache["y_top"], conductance)
+            data[cache["y_bt_slice"]] = -conductance
+            data[cache["y_tb_slice"]] = -conductance
+
+        data[cache["diag_slice"]] = diag
+        cache["matrix"].data[cache["entry_positions"]] = data
+        return cache["matrix"]
 
     def get_boundary_node_capacitance(self, location: str) -> np.ndarray:
         """

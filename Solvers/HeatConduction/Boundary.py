@@ -301,8 +301,23 @@ class BoundaryRegion:
         # 默认绝热
         self.add_resistance_condition(T_ext=300.0, R_ext=1e15)
 
+    @staticmethod
+    def _external_conductance(R_ext_total, out=None):
+        """Convert external resistance to conductance without creating inf."""
+        R = np.asarray(R_ext_total, dtype=float)
+        if out is None:
+            G = np.zeros_like(R, dtype=float)
+        else:
+            G = out
+            G.fill(0.0)
+        finite = np.isfinite(R)
+        zero = finite & (R == 0.0)
+        nonzero = finite & (R != 0.0)
+        G[zero] = 1.0e20
+        np.divide(1.0, R, out=G, where=nonzero)
+        return G
+
     # 2026.1.27 新增方法，清除原有的热导G和热流J
-    # 已被废弃，不再调用！
     def clear_boundary_conditions(self):
         """
         [关键方法] 在时间步开始时调用。
@@ -311,24 +326,21 @@ class BoundaryRegion:
         """
         self.G_sum.fill(0.0)
         self.J_sum.fill(0.0)
+        self.Q_sum_flux.fill(0.0)
 
         # 重新应用所有静态添加的条件 (如固定的对流换热、固定热流)
         for bc in self.conditions:
             self._accumulate_bc(bc)
 
     # 2026.1.27 新增方法，将已有的边界条件叠加到当前状态
-    # 已被废弃，不再调用！
     def _accumulate_bc(self, bc: BaseBoundaryCondition):
         """内部辅助：将一个 BC 对象叠加到当前状态"""
         if isinstance(bc, ResistanceBC):
             # R_total_ext = R_ext + R_add (不包含 R_internal，因为那是 Solver 侧的事)
             R_ext_total = bc.R_ext + bc.R_add
 
-            with np.errstate(divide='ignore'):
-                G = 1.0 / R_ext_total
-
-            # 处理绝热情况 (G=0)
-            G = np.nan_to_num(G, posinf=0.0, neginf=0.0)
+            # R=inf -> G=0; R=0 -> large Dirichlet-limit conductance.
+            G = self._external_conductance(R_ext_total)
 
             # 累加
             self.G_sum += G
@@ -336,10 +348,9 @@ class BoundaryRegion:
 
         elif isinstance(bc, FluxBC):
             # 固定热流直接作为源项叠加
-            self.J_sum += bc.q_flux
+            self.Q_sum_flux += bc.q_flux
 
     # 2026.1.27 新增方法，叠加动态边界条件
-    # 已被废弃，不再调用！
     def update_params(self, T_ext: Union[float, np.ndarray], R_ext: Union[float, np.ndarray]):
         """
         [新增] 供外部 Coupler 调用，叠加动态边界条件。
@@ -359,14 +370,8 @@ class BoundaryRegion:
         else:
             R = np.asarray(R_ext)
 
-        # 计算电导 G = 1/R
-        with np.errstate(divide='ignore'):
-            G_new = 1.0 / R
-
-        # 处理 R=0 (Dirichlet) 或 R=inf (绝热)
-        # R -> 0, G -> inf: 数值上用极大值代替，或者在 Solver 中特殊处理
-        # 这里做安全截断防止溢出破坏叠加
-        G_new = np.nan_to_num(G_new, posinf=1e20)
+        # R=inf -> G=0; R=0 -> large Dirichlet-limit conductance.
+        G_new = self._external_conductance(R)
 
         # 叠加到总状态
         self.G_sum += G_new
@@ -450,12 +455,8 @@ class BoundaryRegion:
                 np.add(bc.R_ext, bc.R_add, out=self._mix_work)
 
                 # G = 1/R
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    np.divide(1.0, self._mix_work, out=self._g_work)
-                    # 绝热保护 (R=inf -> G=0)
-                    np.nan_to_num(self._g_work, copy=False, posinf=0.0)
-                    # Dirichlet保护 (R=0 -> G=inf, 截断防止溢出)
-                    np.nan_to_num(self._g_work, copy=False, posinf=1e20)
+                # R=inf -> G=0; R=0 -> large Dirichlet-limit conductance.
+                self._external_conductance(self._mix_work, out=self._g_work)
 
                 # 累加
                 self.G_sum += self._g_work

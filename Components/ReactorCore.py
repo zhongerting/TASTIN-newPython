@@ -1352,6 +1352,15 @@ class ReactorCore(BaseComponent):
                     mult = self.tfe_multipliers[tfe_name]
                     virtual_mod = tfe.solids['moderator']
 
+                    # The virtual moderator boundary flux is read here before
+                    # SystemManager runs the normal coupler sync pass. Refresh
+                    # TFE-internal gap/solid couplers first so construction-time
+                    # zero-resistance placeholder BCs are not evaluated.
+                    for coupler in tfe.couplers.values():
+                        sync = getattr(coupler, 'sync', None)
+                        if callable(sync):
+                            sync()
+
                     # TFEUnit.pre_step() may update the moderator outer-boundary
                     # temperature. Refresh this cache before mapping its flux to
                     # the global moderator ring, including immediately after a

@@ -169,3 +169,45 @@ manager.step(dt=0.1, inner_iter=5, convergence_tol=1.0e-3)
 When local implicit mode is enabled, `SystemManager.step(dt, ...)` passes `dt` into `FluidSolidCouple.execute(...)`. The coupler solves the local two-capacitance heat exchange analytically for each interface node, applies `q_to_solid = -q_to_fluid` through a solid-side `FluxBC`, and adds `q_to_fluid` to the fluid channel with zero implicit coefficient. This removes the explicit fluid-solid exchange time constant from `FluidSolidCouple.get_max_stable_dt()`, but does not override fluid hydraulic stability, `max_dt`, or convergence-based time-step reductions.
 
 Do not enable local implicit mode on a `FluidSolidCouple` without `solid_node_capacitance`; the coupler intentionally raises an error instead of silently falling back.
+
+## 10. 2026-06-24 generic HeatConduction `implicit_euler` path
+
+`HeatConduction1D` / `HeatConduction2D` now support a per-solid ODE mode `implicit_euler` via `set_ode_method("implicit_euler")`.
+
+`implicit_euler` performs a backward-Euler sparse algebraic solve once per global `SystemManager.step()` time step. Existing `solve_ivp` methods remain supported (`RK45`, `RK23`, `DOP853`, `Radau`, `BDF`, `LSODA`) and continue to be the default behavior for generic solids when not overridden.
+
+Boundary mapping for the sparse path:
+- resistance/convection/dynamic-radiation boundary terms are assembled into the implicit linear system;
+- pure flux (`FluxBC`) terms stay on the explicit RHS.
+
+On failure of the implicit solve, `HeatConduction.step()` emits a warning and falls back to a `solve_ivp` step.
+
+No `SystemManager` scheduling changes are required: it still calls `solid.step(dt)` exactly as before.
+
+Initial V13 no-TEC smoke validation used `testModule/run_v13_caseA_closed_loop.py --disable-tec-coupled --solid-ode-method implicit_euler`. With `max_dt=0.1 s`, the 1 s result stayed close to the RK45 baseline: core outlet `813.245 K` vs `813.355 K`, core connector delta-T `85.707 K` vs `85.812 K`, and coolant enthalpy rise `97184.680 W` vs `97303.408 W`. With `max_dt=0.5 s`, backward-Euler numerical dissipation was visibly larger, so V13 accuracy comparisons should use the same global `max_dt` and should not assume large-step `implicit_euler` matches RK45 within `0.5 K`.
+
+## 11. 2026-06-24 implicit matrix assembly optimization
+
+This round keeps the same generic `implicit_euler` numerical contract and does not introduce `SolidAssembly`.
+
+Implementation changes:
+- `HeatConduction1D._assemble_theta_implicit_matrix()` and `HeatConduction2D._assemble_theta_implicit_matrix()` now assemble internal conduction edges with NumPy vector operations instead of Python double loops.
+- The sparse CSC matrix pattern is cached per solid shape. Each time step updates only the cached numeric `data` arrays and boundary/source-dependent diagonal values.
+- Sparse storage remains CSC for direct `scipy.sparse.linalg.spsolve`; there is no LU/factorization cache in this round, because material and radiation coefficients can change every step.
+- `testModule/benchmark_heatconduction_implicit.py` is the lightweight reproducible benchmark for this path.
+
+Recorded stepwise micro-benchmark on the compact validation case (`1D n=96, 80 steps`; `2D 12x96, 20 steps`):
+
+| stage | 1D per step | 2D per step | note |
+| --- | ---: | ---: | --- |
+| before vectorization | `0.000459 s` | `0.006884 s` | Python loop assembly |
+| vectorized assembly | `0.000353 s` | `0.003043 s` | main 2D gain |
+| CSC pattern/data cache | `0.000262 s` | `0.002947 s` | main 1D gain, 2D solve now dominates |
+
+Fresh post-optimization checks:
+- `python -m py_compile Solvers\HeatConduction\HeatConduction.py Solvers\SystemManager.py Components\basicComponents\HeatPipe2D.py testModule\test_heatconduction_implicit.py testModule\benchmark_heatconduction_implicit.py` passed.
+- `python -m unittest testModule.test_heatconduction_implicit testModule.test_system_manager_lifecycle` ran 25 tests and passed.
+- `testModule/benchmark_heatconduction_implicit.py --steps-1d 40 --steps-2d 20 --n1d 4000 --n2d-x 90 --n2d-y 90` measured `0.001869 s/step` for 1D 4000 nodes and `0.026584 s/step` for 2D 8100 nodes on this machine.
+- Supplemental same-script solve-method comparison measured BDF at about `1.971 s/step` for 1D 4000 nodes and `0.0574 s/step` for 2D 8100 nodes; RK45 measured about `0.0101 s/step` for 1D and `0.00282 s/step` for 2D, but RK45 is a different explicit method and should not be treated as an accuracy-equivalent replacement for the fixed-step implicit path.
+- A direct `HeatPipe2D` `implicit_euler` smoke step with real `HPwithFin`/`SodiumHP` materials passed. The script-level `SystemManager.step()` path returns `None` on success for that dummy network, so smoke checks should not require a strict `True` return value.
+- V13 no-TEC `implicit_euler`, `max_dt=0.1 s`, `duration=1 s` completed in `4.961685 s` wall time. Compared with the pre-optimization `implicit_euler` result, key deltas were numerical roundoff level: core outlet `-1.79e-08 K`, coolant enthalpy rise `-1.54e-05 W`, radiator total heat `-8.84e-07 W`.

@@ -115,6 +115,10 @@ self.bc1 = self.bound1.add_resistance_condition(T_ext=300.0, R_ext=0.0, R_add=R_
 self.bc2 = self.bound2.add_resistance_condition(T_ext=300.0, R_ext=0.0, R_add=R_contact)
 ```
 
+这里的 `T_ext=300.0, R_ext=0.0` 只是构造期占位值，必须在边界被求解或读取热流前由 `sync()` 更新。若某个组件在 `SystemManager._run_couplers()` 常规同步之前主动读取耦合边界热流，应先显式同步自己的内部耦合器，否则零热阻占位会形成 `1/R = inf` 的非物理通量。
+
+典型例子包括 `ReactorCore.pre_step()` 读取内部等效 moderator 外流，以及 `TFEUnit._build_couplers()` 在构建冷却剂流固耦合前为获取套管热容而调用 `initialize_state()`。这些路径都发生在常规全局耦合器同步之前，应由组件自身先同步已创建的内部耦合器。
+
 ### 4.3 同步逻辑
 
 `sync()` 会交叉更新两侧边界：
@@ -488,6 +492,8 @@ obj2 看到:
 ```
 
 也就是说，间隙热阻与对方固体的内部热阻串联。
+
+与普通固固耦合相同，`GapCouple2D` 构造期继承来的零热阻 `ResistanceBC` 不能作为有效物理边界使用；真实热阻在第一次 `sync()` 后才进入边界条件。组件若在全局耦合器同步之前消费 `GapCouple2D` 两侧边界热流，必须先调用该耦合器的 `sync()`。
 
 ## 8. `ActiveGapCouple2D`
 

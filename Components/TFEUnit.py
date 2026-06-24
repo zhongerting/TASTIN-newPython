@@ -517,6 +517,11 @@ class TFEUnit(BaseComponent):
             def nu_ringpipe_adapter(Re: float, Pr: float, pd_dummy: float = 1.1) -> float:
                 return nu_ringpipe(R_out=r_fluid_out, R_in=r_fluid_in, Re=Re, Pr=Pr)
 
+            # These clads may already have construction-time resistance BCs
+            # from gap/solid couplers. Synchronize before initialize_state()
+            # computes boundary fluxes for capacitance setup.
+            self._sync_existing_couplers()
+
             # 强制初始化套管的固体状态以获取热容
             s_iclad.initialize_state()
             s_oclad.initialize_state()
@@ -581,6 +586,13 @@ class TFEUnit(BaseComponent):
     # ==========================================
     # 专用参数更新接口
     # ==========================================
+    def _sync_existing_couplers(self):
+        """Refresh coupler-owned boundary BCs created so far."""
+        for coupler in self.couplers.values():
+            sync = getattr(coupler, 'sync', None)
+            if callable(sync):
+                sync()
+
     def update_neutronic_power(self, p_total: float, p_fiss: float = 0.0, p_decay: float = 0.0, alpha: float = 1.0):
         """
         接收外部点堆传入的反应堆总功率，计算后映射至芯块网格。

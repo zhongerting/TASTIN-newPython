@@ -429,6 +429,8 @@ fluid_solver.step_Picard(
 success = solid.step(dt)
 ```
 
+`solid.step(dt)` may execute either `solve_ivp` or `implicit_euler` inside the solid (via `set_ode_method`), and `implicit_euler` failures are expected to warn + fall back to `solve_ivp`; `SystemManager.step()` always keeps this same call and rollback contract.
+
 若任一固体返回失败，直接抛出异常并回滚整个时间步。
 
 ### 7.7 温度收敛检查
