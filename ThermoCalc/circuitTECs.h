@@ -16,6 +16,9 @@ namespace std {
 	public:
 		bool isFixedU;
 		bool isFixedR;
+		bool isParallelFixedU;
+		bool isParallelFixedI;
+		bool isParallelLoadCurve;
 
 	private:
 		bool isFirst;
@@ -29,6 +32,13 @@ namespace std {
 		double Iout;
 		double Rload;
 		double Utarget;
+		double Itarget;
+		bool converged;
+		int iterationCount;
+		vector<double> branchCurrents;
+		vector<double> branchVoltages;
+		vector<double> loadCurveCurrent;
+		vector<double> loadCurveVoltage;
 
 	public:
 		// 总计算函数，用于调用计算方法
@@ -41,6 +51,18 @@ namespace std {
 		double resistanceFixedCircuitCalc();
 		// 运行时更新每根 TEC 的铯池温度
 		void setTcs(const vector<vector<double>>& values);
+		// 运行时更新外部负载 U-I 曲线
+		void setLoadCurve(const vector<double>& current, const vector<double>& voltage);
+		// 并联电路计算：给定母线电压
+		double parallelCircuitCalc(double Ubus);
+		// 并联定电压计算
+		double parallelUFixedCircuitCalc();
+		// 并联定总电流计算
+		double parallelIFixedCircuitCalc();
+		// 并联外部负载曲线计算
+		double parallelLoadCurveCircuitCalc();
+		// 外部 U-I 负载曲线插值
+		double loadCurveVoltageAt(double current) const;
 
 	public:
 		vector<singleThermionicEnergyConversion*> TECs;

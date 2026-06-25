@@ -3,7 +3,13 @@
 
 namespace std {
 	singleThermionicEnergyConversion::singleThermionicEnergyConversion() {
-
+		Itarget = 0.0;
+		isHead = false;
+		isTail = false;
+		U = 0.0;
+		I = 0.0;
+		I0 = 0.0;
+		P = 0.0;
 	}
 	singleThermionicEnergyConversion::~singleThermionicEnergyConversion() {
 
@@ -35,8 +41,13 @@ namespace std {
 		V = input[10];
 		// 11--目标电流
 		Itarget = input[11][0];
+		isHead = false;
+		isTail = false;
 		// 12--发射极两端电压、接收极两端电压
 		wireU = input[12];
+		I = 0.0;
+		I0 = 0.0;
+		P = 0.0;
 	}
 
 	void singleThermionicEnergyConversion::initial() {

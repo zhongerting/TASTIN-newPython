@@ -610,7 +610,8 @@ Delta p_hp = K_eq * 0.5 * rho * v_nom^2
 - `get_reactivity_feedback()`：返回总反馈。
 - `calibrate_reactivity_feedback_reference()`：建立反馈参考态。
 - `get_effective_reactivity_feedback()`：返回扣除参考态后的有效反馈。
-- `setup_tec_circuit()`：配置 ThermoCalc 电路模式。
+- `setup_tec_circuit(mode_str, target_value, I_guess=150.0, topology="series", load_curve=None)`：配置主 TEC 电路；默认 `topology="series"`，保持旧算例行为。
+- `setup_reserved_parallel_tec_circuit(...)`：可选启用预留并联 TEC 电路，默认只用于 `Ring3_Open` 代表的 3 根 TEC。
 - `attach_point_reactor()` / `initialize_point_reactor()`：挂接并初始化点堆模型。
 - `update_neutronic_power()`：将堆功率分配给代表性 TFE。
 - `advance_neutronics()` / `commit_neutronics()`：推进并提交点堆状态。
@@ -775,6 +776,40 @@ system.add_component(core)
 ```python
 core.setup_tec_circuit(mode_str="fixed_u", target_value=V_target, I_guess=I_guess)
 ```
+
+V11/V13 默认使用主串联电路：`Center=1`、`Ring1=6`、`Ring2=12`、`Ring3_TEC=15`，合计 34 根 TEC；`Ring3_Open=3` 默认断开并每步清零主动 TEC 源。需要启用预留并联时，单独调用 `setup_reserved_parallel_tec_circuit()`，使 `Ring3_Open` 的 3 根 TEC 作为并联支路接入第二个独立电路。
+
+同一根 TEC 只能属于一个电路；当前不支持支路内串联再并联的复杂混联：
+
+- `topology="series"`：默认旧行为，支持 `fixed_u` 和 `fixed_r`；串联 `fixed_i` 仍由 ThermoCalc wrapper 明确拒绝。
+- 预留并联电路：`fixed_u -> parallel_fixed_u`，`fixed_i -> parallel_fixed_i`，`load_curve -> parallel_load_curve`。
+- 主串联和预留并联是两个独立的 `ThermoCalcModel`，共享堆芯时间步和温度同步，但分别计算电路端电压、电流和热源。
+- `get_tec_circuit_global_results()` 返回按电路组命名的结果字典，当前固定键为 `main` 和可选 `reserved_parallel`。
+
+```python
+# 启用 Ring3_Open 预留三根 TEC 的并联定母线电压
+core.setup_reserved_parallel_tec_circuit(mode_str="fixed_u", target_value=V_bus)
+
+# 并联定总电流
+core.setup_reserved_parallel_tec_circuit(mode_str="fixed_i", target_value=I_target)
+
+# 并联外部负载曲线，曲线格式为 U_load=f(I_total)
+core.setup_reserved_parallel_tec_circuit(
+    mode_str="load_curve",
+    target_value=R_hint,
+    load_curve=(current_a, voltage_v),
+)
+```
+
+V11/V13 运行器输出兼容旧字段，但口径需要注意：
+
+| 字段 | 口径 |
+| --- | --- |
+| `tec_total_voltage_v` | 主串联电路端电压；独立多电路没有单一总端电压 |
+| `tec_total_current_a` | 主串联电路端电流；独立多电路没有单一总端电流 |
+| `tec_total_electric_power_w` | 主串联电功率 + 预留并联电功率 |
+| `tec_main_*` | 主串联电路诊断 |
+| `tec_reserved_parallel_*` | 预留并联电路诊断；未启用时为 `None/null` |
 
 ### 点堆推进和断点续算顺序
 

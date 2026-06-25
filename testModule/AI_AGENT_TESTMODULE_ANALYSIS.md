@@ -817,3 +817,58 @@ wall radiation boundaries, so radiator thermal tuning is exposed through
 `testModule/run_v13_caseA_eps088_wait_then_to10000.py` is a local helper that
 waits for the active `eps=0.88/0.88` long run to finish and then continues the
 same case to about `10000 s` absolute time.
+
+## 24. 2026-06-25 V11/V13 optional reserved parallel TEC circuit
+
+V11 and V13 now support one optional reserved parallel TEC circuit without changing the default case. The default remains:
+
+```text
+thermal ring multipliers:  Center=1, Ring1=6, Ring2=12, Ring3_TEC=15, Ring3_Open=3
+main TEC multipliers:      Center=1, Ring1=6, Ring2=12, Ring3_TEC=15, Ring3_Open=0
+```
+
+So the main circuit is still the existing 34-TEC fixed-voltage series circuit. `Ring3_Open` stays disconnected and the runner keeps the zero-source check unless the reserved circuit is explicitly enabled.
+
+The optional circuit uses only the three `Ring3_Open` TECs and is configured as a second independent `ThermoCalcModel`:
+
+```powershell
+# Fixed bus voltage for the reserved parallel circuit
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v13_caseA_closed_loop.py --duration 0.1 --record-interval 0.1 --restart-interval 0.1 --max-dt 0.1 --enable-reserved-parallel-tec --reserved-parallel-mode fixed_u --reserved-parallel-voltage 0.8
+
+# Fixed total current for the reserved parallel circuit
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v13_caseA_closed_loop.py --duration 0.1 --record-interval 0.1 --restart-interval 0.1 --max-dt 0.1 --enable-reserved-parallel-tec --reserved-parallel-mode fixed_i --reserved-parallel-current 1000.0
+
+# External load curve, CSV or NPZ, interpreted as U_load=f(I_total)
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v13_caseA_closed_loop.py --duration 0.1 --record-interval 0.1 --restart-interval 0.1 --max-dt 0.1 --enable-reserved-parallel-tec --reserved-parallel-mode load_curve --reserved-parallel-load-curve path\to\curve.csv
+```
+
+The same flags are available in `run_v11_caseA_closed_loop.py`. For `load_curve`, CSV may contain either `current_a,voltage_v` or `current,voltage` headers; `.npz` may contain `current_a/voltage_v` or `current/voltage`.
+
+Diagnostics:
+
+- `tec_total_voltage_v` and `tec_total_current_a` remain the main series-circuit terminal voltage/current for backward compatibility.
+- `tec_total_electric_power_w` is the sum of main series power and reserved parallel power.
+- `tec_main_*` records the main series circuit.
+- `tec_reserved_parallel_*` records the optional `Ring3_Open` parallel circuit and is `null` when disabled.
+- `reserved_parallel_tec_enabled` and `reserved_parallel_tec_mode` are written to `latest_state.json` and CSV history records.
+
+Validation completed on 2026-06-25:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m py_compile Components\ReactorCore.py testModule\run_v8_caseA_common.py testModule\test_core_assemble_v7_caseA.py testModule\run_v11_caseA_closed_loop.py testModule\run_v13_caseA_closed_loop.py testModule\test_reactorcore_tec_topology.py ThermoCalc\ThermoCalcWrapper.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_reactorcore_tec_topology.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_parallel.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_interface.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_lookup.py
+```
+
+V13 `0.1 s` smoke results:
+
+| Case | Result |
+| --- | --- |
+| Default, reserved circuit disabled | completed; `tec_reserved_parallel_* = null`, `Pel ~= 5403.650 W` |
+| Reserved `fixed_u`, `0.8 V` | completed; reserved branch `I ~= 1021.511 A`, `P ~= 817.209 W`, total `Pel ~= 6220.859 W` |
+| Reserved `fixed_i`, `1000 A` | completed; reserved branch `U ~= 0.812 V`, `I ~= 1000.148 A`, total `Pel ~= 6215.914 W` |
+| Reserved `load_curve` with `U=0.0008 I` | completed; reserved branch `U ~= 0.807 V`, `I ~= 1009.013 A`, total `Pel ~= 6218.004 W` |
+
+V11 `--create-init-only` completed both with the default disabled reserved circuit and with `--enable-reserved-parallel-tec --reserved-parallel-mode fixed_u --reserved-parallel-voltage 0.8`.

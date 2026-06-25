@@ -1,7 +1,9 @@
 import argparse
+import csv
 import os
 import sys
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -100,13 +102,15 @@ def get_solid_ode_methods(build: Dict[str, Any]) -> Dict[str, str]:
 
 
 def apply_wire_resistance(core: Any, scale: float = 1.0) -> None:
-    if core.thermo_calc is None:
+    thermos = list(_iter_core_thermo_calcs(core))
+    if not thermos:
         return
-    n_elem = core.thermo_calc.N_elem
     wire_res = np.asarray(WIRE_RESISTANCE_OHM, dtype=float) * float(scale)
-    core.thermo_calc._input_data.resistanceWire = np.tile(wire_res, (n_elem, 1))
-    core.thermo_calc.build()
-    core.thermo_calc.calculate(verbose=False)
+    for _, thermo_calc in thermos:
+        n_elem = thermo_calc.N_elem
+        thermo_calc._input_data.resistanceWire = np.tile(wire_res, (n_elem, 1))
+        thermo_calc.build()
+        thermo_calc.calculate(verbose=False)
 
 
 def get_wire_resistance(core: Any) -> List[float]:
@@ -116,6 +120,63 @@ def get_wire_resistance(core: Any) -> List[float]:
     if resistance.size == 0:
         return list(WIRE_RESISTANCE_OHM)
     return [float(value) for value in resistance.reshape((-1, 4))[0]]
+
+
+def _iter_core_thermo_calcs(core: Any):
+    if hasattr(core, "iter_tec_circuit_groups"):
+        for group in core.iter_tec_circuit_groups():
+            if group.thermo_calc is not None:
+                yield group.name, group.thermo_calc
+        return
+    thermo_calc = getattr(core, "thermo_calc", None)
+    if thermo_calc is not None:
+        yield "main", thermo_calc
+
+
+def load_tec_load_curve(path: Optional[str]) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Load a two-column external TEC load curve as U_load=f(I_total)."""
+    if path is None:
+        return None
+
+    curve_path = Path(path)
+    if not curve_path.exists():
+        raise FileNotFoundError(f"TEC load curve file does not exist: {path}")
+
+    if curve_path.suffix.lower() == ".npz":
+        with np.load(curve_path, allow_pickle=False) as data:
+            current_key = "current_a" if "current_a" in data else "current"
+            voltage_key = "voltage_v" if "voltage_v" in data else "voltage"
+            if current_key not in data or voltage_key not in data:
+                raise ValueError("TEC load curve npz must contain current_a/voltage_v or current/voltage.")
+            return np.asarray(data[current_key], dtype=float), np.asarray(data[voltage_key], dtype=float)
+
+    current: List[float] = []
+    voltage: List[float] = []
+    with curve_path.open("r", encoding="utf-8-sig", newline="") as f:
+        sample = f.read(2048)
+        f.seek(0)
+        has_header = csv.Sniffer().has_header(sample) if sample.strip() else False
+        if has_header:
+            reader = csv.DictReader(f)
+            if reader.fieldnames is None:
+                raise ValueError("TEC load curve csv has no header.")
+            lower_names = {name.lower(): name for name in reader.fieldnames}
+            current_name = lower_names.get("current_a") or lower_names.get("current")
+            voltage_name = lower_names.get("voltage_v") or lower_names.get("voltage")
+            if current_name is None or voltage_name is None:
+                raise ValueError("TEC load curve csv header must contain current_a/voltage_v or current/voltage.")
+            for row in reader:
+                current.append(float(row[current_name]))
+                voltage.append(float(row[voltage_name]))
+        else:
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) < 2:
+                    continue
+                current.append(float(row[0]))
+                voltage.append(float(row[1]))
+
+    return np.asarray(current, dtype=float), np.asarray(voltage, dtype=float)
 
 
 def build_loaded_case(args: argparse.Namespace) -> Dict[str, Any]:
@@ -172,6 +233,7 @@ __all__ = [
     "get_solid_ode_methods",
     "get_wire_resistance",
     "json_default",
+    "load_tec_load_curve",
     "parse_v8_multipliers",
     "parse_solid_ode_method",
     "passive_tec_source_totals",

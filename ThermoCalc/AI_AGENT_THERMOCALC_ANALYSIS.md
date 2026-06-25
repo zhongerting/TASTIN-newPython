@@ -1,12 +1,12 @@
 # ThermoCalc Codex 快速接管手册
 
-> 更新时间：2026-06-23  
+> 更新时间：2026-06-25
 > 适用范围：`ThermoCalc/` 模块及其必要的上层集成点。  
 > 使用方式：后续 Codex 首次接管 ThermoCalc 时先读本文件；只有在修改具体功能时，才按“修改场景索引”继续回查源码。
 
 ## 1. 先看结论
 
-`ThermoCalc/` 是 TASTIN 中的热离子能量转换（TEC）求解模块。Python 上层向它提供多根 TFE 的轴向温度、几何、电路参数；C++ 核心求解串联电路以及每根 TFE 内各轴向节点的发射、电流密度和电势分布。
+`ThermoCalc/` 是 TASTIN 中的热离子能量转换（TEC）求解模块。Python 上层向它提供多根 TFE 的轴向温度、几何、电路参数；C++ 核心求解串联或并联电路以及每根 TFE 内各轴向节点的发射、电流密度和电势分布。
 
 当前源码的分层调用链是：
 
@@ -19,9 +19,9 @@ Components/ReactorCore.py 或 Components/TECCircuitManager.py
     -> thermionicEmission
 ```
 
-2026-06-01 已闭合逐节点侧面积、`phiE/phiC/Vd` 结果读取和铯池温度运行时热更新，并使用 Python 3.12 重新构建 `te_solver.cp312-win_amd64.pyd`。`fixed_I` 不在本轮实现范围内，包装层会明确拒绝该模式。
+2026-06-01 已闭合逐节点侧面积、`phiE/phiC/Vd` 结果读取和铯池温度运行时热更新，并使用 Python 3.12 重新构建 `te_solver.cp312-win_amd64.pyd`。串联公共模式仍为 `fixed_u/fixed_r`，包装层继续拒绝串联 `fixed_i`；2026-06-25 起新增每根虚拟 TEC 一支路的并联模式 `parallel_fixed_u`、`parallel_fixed_i` 和 `parallel_load_curve`。`ReactorCore` 负责上层分组：V11/V13 默认主串联 34 根 TEC，可选把 `Ring3_Open` 代表的 3 根 TEC 单独接入预留并联电路。
 
-2026-06-23 新增热离子发射查表加速实验路径。该路径保持原解析 `thermionicEmission::calc()` 可用，查表仅在显式启用时作为 `calc()` 的优先分支；表缺失或关闭时继续走原解析法。当前测试版扩展位于 `ThermoCalc/build_cp312/Release/te_solver.cp312-win_amd64.pyd`，根目录生产 `ThermoCalc/te_solver.cp312-win_amd64.pyd` 未被替换。
+2026-06-23 新增热离子发射查表加速实验路径。该路径保持原解析 `thermionicEmission::calc()` 可用，查表仅在显式启用时作为 `calc()` 的优先分支；表缺失或关闭时继续走原解析法。2026-06-25 并联验证通过后，根目录生产 `ThermoCalc/te_solver.cp312-win_amd64.pyd` 已替换为当前 `build_cp312/Release` 产物，旧版备份为 `ThermoCalc/te_solver.cp312-win_amd64.before_parallel_20260625.pyd`。
 
 ## 2. 首次接管阅读顺序
 
@@ -41,7 +41,7 @@ Components/ReactorCore.py 或 Components/TECCircuitManager.py
 | [`ThermoCalcWrapper.py`](./ThermoCalcWrapper.py) | Python 公共包装层：准备输入、构建电路、调用计算、提取结果、提供更新方法 |
 | [`bindings.cpp`](./bindings.cpp) | pybind11 边界：定义 `CalculationMode`、`InputData`、工厂函数和 Python 可见属性 |
 | [`emissionLookup.h`](./emissionLookup.h)、[`emissionLookup.cpp`](./emissionLookup.cpp) | 可选热离子发射查表后端：管理分块表、四维插值、安全标志和全局启停 |
-| [`circuitTECs.h`](./circuitTECs.h)、[`circuitTECs.cpp`](./circuitTECs.cpp) | 多根 TFE 串联电路：定电压和定电阻模式的全局迭代 |
+| [`circuitTECs.h`](./circuitTECs.h)、[`circuitTECs.cpp`](./circuitTECs.cpp) | 多根 TFE 串联/并联电路：串联定电压/定电阻，并联定电压/定总电流/外部 U-I 负载曲线 |
 | [`singleThermionicEnergyConversion.h`](./singleThermionicEnergyConversion.h)、[`singleThermionicEnergyConversion.cpp`](./singleThermionicEnergyConversion.cpp) | 单根 TFE：轴向节点、导线与电极电势、电流密度和电阻率 |
 | [`thermionicEmission.h`](./thermionicEmission.h)、[`thermionicEmission.cpp`](./thermionicEmission.cpp) | 单个轴向节点的热离子发射 J-V 模型：阻塞、过渡、饱和分支 |
 | [`NonLinerSolver.h`](./NonLinerSolver.h)、[`NonLinerSolver.cpp`](./NonLinerSolver.cpp) | C++ 辅助求解器；被构建并由头文件引用 |
@@ -56,16 +56,45 @@ Components/ReactorCore.py 或 Components/TECCircuitManager.py
 
 ### 4.1 `circuitTECs`
 
-`circuitTECs` 保存 `vector<singleThermionicEnergyConversion*> TECs`，负责多根 TFE 的串联电路求解。
+`circuitTECs` 保存 `vector<singleThermionicEnergyConversion*> TECs`，负责多根 TFE 的串联和并联电路求解。
 
 当前绑定可触发的顶层入口是 `circuitTECsCalc()`，Python 名为 `calc()`：
 
 ```text
 isFixedU == true -> uFixedCircuitCalc()
 isFixedR == true -> resistanceFixedCircuitCalc()
+isParallelFixedU == true -> parallelUFixedCircuitCalc()
+isParallelFixedI == true -> parallelIFixedCircuitCalc()
+isParallelLoadCurve == true -> parallelLoadCurveCircuitCalc()
 ```
 
-两个模式都会通过 `circuitCalc(I)` 在给定总电流下求串联电路，再用弦割式迭代修正电流。C++ 内部确实有“给定电流计算”能力 `circuitCalc(double I)`，但当前 pybind11 枚举和 Python 构建流程没有暴露完整的定电流公共模式。
+串联两个模式都会通过 `circuitCalc(I)` 在给定总电流下求串联电路，再用弦割式迭代修正电流。并联第一版采用“每个虚拟 TEC 独立接到同一母线”的拓扑，`parallelCircuitCalc(Ubus)` 在给定母线电压下逐支路求解并汇总 `Iout=sum(I_branch)`；并联定总电流和外部负载曲线模式再对 `Ubus` 做一维求根。
+
+`parallel_load_curve` 的外部负载格式是 `U_load=f(I_total)`：Python 通过 `ThermoCalcModel.set_load_curve(current_a, voltage_v)` 传入严格递增的总电流轴和对应电压轴，C++ 线性插值求负载电压。若仅调用 `setup_circuit_mode("parallel_load_curve", R)` 而未显式提供曲线，包装层会生成一条线性欧姆曲线 `U=R*I`，便于与定电阻工况对比。
+
+### 4.1.1 2026-06-25 parallel-circuit integration note
+
+The current production `ThermoCalc/te_solver.cp312-win_amd64.pyd` was rebuilt from the C++ sources in this directory after adding the parallel circuit APIs. The previous root pyd was kept locally as `ThermoCalc/te_solver.cp312-win_amd64.before_parallel_20260625.pyd`.
+
+Validated public modes:
+
+| Python mode | C++ path | Intended upper-level use |
+| --- | --- | --- |
+| `fixed_u` | series fixed voltage | Default main V11/V13 circuit |
+| `fixed_r` | series fixed resistance | Legacy series support |
+| `parallel_fixed_u` | each virtual TEC connected to a common bus voltage | Reserved Ring3_Open parallel circuit |
+| `parallel_fixed_i` | solve common bus voltage for target total current | Reserved Ring3_Open fixed-current circuit |
+| `parallel_load_curve` | solve common bus voltage against `U_load=f(I_total)` | Reserved Ring3_Open external load curve |
+
+Series `fixed_i` is still intentionally rejected by `ThermoCalcWrapper.py`; fixed total current is only exposed through the parallel mode. `ReactorCore` should not switch all V11/V13 TECs to global parallel. It creates one main series `ThermoCalcModel` for `Center/Ring1/Ring2/Ring3_TEC` and, only when requested, one separate reserved parallel `ThermoCalcModel` for `Ring3_Open`.
+
+Verification commands used for this change:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_parallel.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_interface.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_lookup.py
+```
 
 ### 4.2 `singleThermionicEnergyConversion`
 
@@ -123,11 +152,12 @@ calc_emission_point_production(...)
 |---|---|---|
 | `ThermoCalcModel(n_elements, n_nodes)` | 创建 `te_solver.InputData()` 并填默认值 | 若 `te_solver` 未成功导入，实例化仍会失败 |
 | `set_temperatures(T_em, T_co)` | 校验 `(N_elem, n_node)`，保存副本；电路已构建时写入每根 `SingleTEC` | 当前绑定暴露了 `Temitter`、`Tcollector` |
-| `setup_circuit_mode(mode_str, target_value, I_guess=150.0)` | 接受 `fixed_R`、`fixed_U`；对 `fixed_I` 明确抛出 `ValueError` | `fixed_I` 未暴露 |
+| `setup_circuit_mode(mode_str, target_value, I_guess=150.0)` | 接受 `fixed_R`、`fixed_U`、`parallel_fixed_u`、`parallel_fixed_i`、`parallel_load_curve`；对串联 `fixed_I` 明确抛出 `ValueError` | `parallel_load_curve` 推荐配合 `set_load_curve()` 使用 |
+| `set_load_curve(current_a, voltage_v)` | 设置并联外部负载 `U_load=f(I_total)` 曲线 | 电流轴必须一维、有限且严格递增 |
 | `build()` | 把温度写入 `InputData`，调用 `te_solver.create_circuit()` | 绑定层在 `unchecked<>` 前执行完整形状校验 |
 | `calculate(verbose=False)` | 必要时自动 `build()`，再调用 `_circuit.calc()`；返回耗时 `[ms]` | 不是物理时间步长度 |
-| `load_emission_lookup_database(db_dir, enable=True, force=False)` | 从 `manifest.json`、`chunk_plan.json` 和 chunk `.npz` 加载查表数据库到 C++ 单例 | 优先加载同名 `.optimized.npz`；仅测试版 pyd 暴露该 API |
-| `get_global_results()` | 返回 `Iout`、`Uout`、`Rload` | 电路未构建时返回 `None` |
+| `load_emission_lookup_database(db_dir, enable=True, force=False)` | 从 `manifest.json`、`chunk_plan.json` 和 chunk `.npz` 加载查表数据库到 C++ 单例 | 优先加载同名 `.optimized.npz`；2026-06-25 起根目录生产 pyd 已暴露该 API |
+| `get_global_results()` | 返回 `Iout`、`Uout`、`Rload`，并附带 `mode/converged/iteration_count/branch_currents/branch_voltages/effective_rload` | 电路未构建时返回 `None` |
 | `get_tec_results(idx)` | 返回指定 TFE 的详细字典 | 包装层读取了绑定未暴露的字段，见风险清单 |
 | `set_tcs(tcs_val)` | 接受标量或 `(N_elem, n_node)`，更新 `_input_data.Tcs` | 构建后调用电路级 `set_tcs()` 逐 TEC 热更新 |
 | `set_rload(rload_val)` | 尝试更新输入结构；构建后尝试更新 C++ 电路负载 | 构建后的 `CircuitTECs.Rload` 属性已绑定；构建前输入结构没有对应可写绑定 |
@@ -167,6 +197,8 @@ $env:THERMOCALC_LOOKUP_DB = "E:\项目任务\五院-电源\source_code\TASTIN-py
 | `mode` | 枚举 | - | `CalculationMode.FixedVoltage` |
 | `target_val` | 标量 | 模式相关 | `0.89 * 34 = 30.26`，默认作为目标电压 |
 | `I_total_init` | 标量 | `A` | `284.0` |
+| `loadCurveCurrent` | `(n_curve,)` | `A` | 默认 `[0, 1000]`，仅 `parallel_load_curve` 使用 |
+| `loadCurveVoltage` | `(n_curve,)` | `V` | 默认 `[0, 100]`，仅 `parallel_load_curve` 使用 |
 | `R_load_init` | 标量 | `Ohm` | 仅在 C++ 结构体中声明；当前未绑定、未由包装层赋值、未参与工厂函数逻辑 |
 
 ## 7. 结果提取
@@ -178,9 +210,12 @@ $env:THERMOCALC_LOOKUP_DB = "E:\项目任务\五院-电源\source_code\TASTIN-py
 | 字段 | 含义 |
 |---|---|
 | `TECs` | 单根 TFE 对象列表 |
-| `Utarget`、`Rload` | 目标电压、负载电阻 |
+| `Utarget`、`Rload`、`Itarget` | 目标电压、负载电阻、目标总电流 |
 | `Iout`、`Uout` | 总电流、总电压 |
-| `isFixedU`、`isFixedR` | 模式标志 |
+| `isFixedU`、`isFixedR`、`isParallelFixedU`、`isParallelFixedI`、`isParallelLoadCurve` | 模式标志 |
+| `converged`、`iterationCount` | 顶层电路迭代状态 |
+| `branchCurrents`、`branchVoltages` | 并联模式的各支路电流和电压 |
+| `set_load_curve(current, voltage)` | 运行时更新并联外部 U-I 负载曲线 |
 | `calc()` | 顶层计算入口 |
 
 `SingleTEC` 暴露：
@@ -233,8 +268,14 @@ TE, TC
 
 ```text
 _build_thermo_calc()
-    -> 按 tec_multipliers 创建虚拟串联元件
+    -> 按 tec_multipliers 创建虚拟 TEC 元件
     -> _configure_thermo_calc_geometry()
+
+setup_tec_circuit()
+    -> 主 TEC 电路默认沿用 fixed_u/fixed_r 串联模式
+
+setup_reserved_parallel_tec_circuit()
+    -> Ring3_Open 预留 TEC 映射到 parallel_fixed_u / parallel_fixed_i / parallel_load_curve
 
 pre_step()
     -> 按 thermo_update_interval 调用 calculate()
@@ -254,19 +295,19 @@ post_step()
 ### A. 已由当前源码确认
 
 - 模块调用链为 `ReactorCore / TECCircuitManager -> ThermoCalcWrapper -> bindings.cpp -> circuitTECs -> singleThermionicEnergyConversion -> thermionicEmission`。
-- 当前绑定枚举只有 `FixedVoltage` 和 `FixedResistance`。
+- 当前绑定枚举包含串联 `FixedVoltage/FixedResistance`，以及并联 `ParallelFixedVoltage/ParallelFixedCurrent/ParallelLoadCurve`。
 - 当前绑定层把 `sideAreaE/sideAreaC` 作为 `(N_elem, n_axi)` 二维数组逐行送入单根 TFE。
 - 当前单根 TFE 的 `sideAreaE/sideAreaC` 是逐节点 `vector<double>`。
 - `dlE/dlC` 在单根 TFE 内是向量，当前 `VcalcFVM()` 会读取节点长度。
 - 当前 `SingleTEC` 绑定暴露 `phiE`、`phiC`、`Vd`。
 - 当前 `CircuitTECs` 绑定提供 `set_tcs()`，并逐根更新 `SingleTEC.Tcs`。
+- 当前 `CircuitTECs` 绑定提供 `set_load_curve()`、`branchCurrents/branchVoltages` 和电路收敛状态；并联第一版拓扑为每根虚拟 TEC 一个独立支路。
 - 上层两条路径都依赖 `ThermoCalcModel`，`ReactorCore` 还会写入二维逐节点侧面积。
 - 测试版 `te_solver` 暴露热离子查表 API；`ThermoCalcWrapper.py` 可通过环境变量加载 `ThermoCalc/emission_database`。
 - 查表数据库的全量计划、优化表和验证摘要见 [`EMISSION_SCAN_GUIDE.md`](./EMISSION_SCAN_GUIDE.md)。
 
-### B. 需要 Python 3.12 编译产物进一步验证
+### B. 需要继续验证
 
-- 根目录生产 `te_solver.cp312-win_amd64.pyd` 是否切换到当前查表源码构建；截至 2026-06-23 仍保持旧生产 pyd 不动。
 - 更长时 TEC 瞬态下，电子边界功率差与端功率、焦耳热之间的稳定离散误差门槛。
 - `set_rload()` 在目标运行环境中的构建前、构建后行为。
 - 定电压、定电阻模式在目标案例中的数值结果和收敛性。
@@ -284,11 +325,12 @@ post_step()
 | 风险 | 当前源码证据 | 处理原则 |
 |---|---|---|
 | 默认解释器与扩展 ABI 不匹配 | 默认 `python --version` 仍为 `3.9.13`，主扩展为 `te_solver.cp312-win_amd64.pyd` | TEC 测试和运行使用 Python 3.12 |
-| `fixed_I` 公共模式未实现 | 包装层明确拒绝 `fixed_I`；绑定枚举只有 `FixedVoltage`、`FixedResistance` | 不要宣称 Python 支持定电流模式 |
+| 串联 `fixed_I` 公共模式未实现 | 包装层继续明确拒绝 `fixed_I`；并联定总电流模式为 `parallel_fixed_i` | 不要把串联定电流和并联定总电流混为一谈 |
+| 并联拓扑第一版较简单 | `parallel_*` 采用每根虚拟 TEC 一支路，暂不支持“支路内部多根串联再并联”的 branch groups | 复杂接线需要新增分组输入和上层映射，不能直接复用当前语义 |
 | 非均匀网格完整数学验证仍有限 | `dlE/dlC` 和侧面积已逐节点化，但 `VcalcFVM()` 的界面距离仍沿用现有离散公式 | 修改电势离散时补专项守恒验证 |
 | `set_rload()` 构建前行为不完整 | 包装层尝试写 `_input_data.Rload/R_load`，当前 `InputData` 未绑定这些字段 | 构建后可写 `CircuitTECs.Rload`；构建前优先使用 `setup_circuit_mode('fixed_R', ...)` |
 | 原始指针生命周期风险 | `create_circuit()` 为每根 TFE `new` 对象；相关析构函数当前为空 | 若处理长时运行内存问题，专项检查所有权与释放逻辑 |
-| 查表仅在测试版 pyd 中验证 | 新扩展位于 `ThermoCalc/build_cp312/Release`，根目录生产 pyd 未替换 | 运行查表路径必须显式设置 `THERMOCALC_PYD_DIR` |
+| 查表需要显式启用和数据库覆盖 | 根目录生产 pyd 已包含当前查表接口，但数据库仍由环境变量加载 | 运行查表路径必须设置 `THERMOCALC_ENABLE_LOOKUP=1` 和 `THERMOCALC_LOOKUP_DB` |
 | 查表表外点会回退解析 | `thermionicEmission::calc()` 查表 miss 后继续原解析法 | 若希望完全避免解析失败输出，应扩大/修正表覆盖或改电路层策略 |
 | setup 阶段首次 TEC 仍可能慢且打印失败 | V13 `apply_wire_resistance()` 会重建电路并立即 `calculate()`；30 s 查表计时中 setup 首算约 `7.81 s` 且打印失败信息 | 正式推进 warm-start 后 TEC 单次约 `1.8 s`；setup 首算需单独优化 |
 
@@ -298,6 +340,7 @@ post_step()
 |---|---|---|
 | 改 Python 公共 API、结果字段、热更新 | [`ThermoCalcWrapper.py`](./ThermoCalcWrapper.py)、[`bindings.cpp`](./bindings.cpp) | Python 名称、绑定字段、形状、构建前后行为必须成对闭合 |
 | 增加或修复 `fixed_I` | [`ThermoCalcWrapper.py`](./ThermoCalcWrapper.py)、[`bindings.cpp`](./bindings.cpp)、[`circuitTECs.h`](./circuitTECs.h)、[`circuitTECs.cpp`](./circuitTECs.cpp) | 枚举、`build()` 分支、顶层分发、目标电流语义 |
+| 改并联电路模式或负载曲线 | [`ThermoCalcWrapper.py`](./ThermoCalcWrapper.py)、[`bindings.cpp`](./bindings.cpp)、[`circuitTECs.h`](./circuitTECs.h)、[`circuitTECs.cpp`](./circuitTECs.cpp) | `parallelCircuitCalc(Ubus)`、支路状态、`branchCurrents/Voltages`、`U_load=f(I_total)` 插值和求根收敛 |
 | 暴露 `phiE/phiC/Vd` | [`singleThermionicEnergyConversion.h`](./singleThermionicEnergyConversion.h)、[`singleThermionicEnergyConversion.cpp`](./singleThermionicEnergyConversion.cpp)、[`bindings.cpp`](./bindings.cpp)、[`ThermoCalcWrapper.py`](./ThermoCalcWrapper.py) | 节点级对象如何汇总成 `SingleTEC` 向量 |
 | 修复逐节点侧面积或非均匀网格 | [`bindings.cpp`](./bindings.cpp)、[`singleThermionicEnergyConversion.h`](./singleThermionicEnergyConversion.h)、[`singleThermionicEnergyConversion.cpp`](./singleThermionicEnergyConversion.cpp)、[`../Components/ReactorCore.py`](../Components/ReactorCore.py) | 所有积分、电势方程、截面电流、界面距离和测试输入 |
 | 改全局串联电路迭代 | [`circuitTECs.h`](./circuitTECs.h)、[`circuitTECs.cpp`](./circuitTECs.cpp) | 定电压/定电阻分支、弦割迭代、`Iout/Uout/Rload/Utarget` |
@@ -318,6 +361,7 @@ post_step()
 5. 若修改面积或网格，增加逐节点面积、非均匀长度、电荷守恒和结果回归检查。
 6. 若修改上层耦合，分别检查 `TECCircuitManager` 和 `ReactorCore` 路径，避免只修复其中一条。
 7. 若修改查表路径，至少运行 `testModule/test_thermocalc_lookup.py`，再用 V13 restart 做 `1 s` smoke，确认 `tec_coupled_enabled=True` 且未出现 `disabling TEC coupling`。
+8. 若修改并联电路，运行 `testModule/test_thermocalc_parallel.py`，确认并联定电压、定总电流、U-I 负载曲线和构建后温度/Tcs 更新均通过。
 
 2026-06-01 已使用：
 
@@ -327,6 +371,8 @@ Python 3.12.13
 ```
 
 重新构建并验证 `te_solver.cp312-win_amd64.pyd`。`testModule/test_thermocalc_interface.py` 覆盖形状拒绝、均匀与非均匀节点面积、`phiE/phiC/Vd`、构建前后温度和 `Tcs` 更新、`fixed_I` 显式拒绝。单 TFE TEC `1 s` 基线也已运行。
+
+2026-06-25 已使用仓库 Conda Python 3.12 环境重建 `ThermoCalc/build_cp312/Release/te_solver.cp312-win_amd64.pyd`，新增并联三模式绑定和 wrapper 接口；验证命令包括 `testModule/test_thermocalc_parallel.py`、`testModule/test_thermocalc_interface.py`、`testModule/test_thermocalc_lookup.py`，均通过。根目录生产 `.pyd` 已替换为该构建产物，旧版备份为 `ThermoCalc/te_solver.cp312-win_amd64.before_parallel_20260625.pyd`。
 
 ## 13. 2026-06-02 FVM 一致焦耳热输出
 
@@ -381,7 +427,7 @@ f(TE, TC, Vo, phiE, phiC, d_gap, Tcs) -> J / Vd / delta_V / phiE / phiC
 
 ## 15. 2026-06-23 runtime 查表压缩与索引
 
-本轮在不删除原解析法、不替换根目录生产 `.pyd` 的前提下，新增了运行时专用查表格式和 C++ 查询索引：
+本轮在不删除原解析法的前提下，新增了运行时专用查表格式和 C++ 查询索引：
 
 - `tools/emission_database.py export-runtime-dense` 从 `ThermoCalc/emission_database/pcs_0p02_5torr/` 导出 `ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr/`，优先读取 `.optimized.npz`，输出 `runtime_dense_manifest.json`、按 region 分开的 `*.runtime.v2.npz` 和 C++ 直接加载的 `*.runtime.v2.tedb`。
 - runtime 表只保留 `TE_axis/TC_axis/Vo_axis/Tcs_axis`、`J/Vd/delta_V/phiE/phiC`、`lookup_safe/zero_mask`；默认字段精度为 `float32`，但 `phiE/phiC` 保留，供边界条件继续调用。
@@ -443,7 +489,7 @@ testModule/test_thermocalc_lookup.py
 - `ThermoCalc/emission_database/pcs_0p02_5torr/` 是当前 `0.02-5.0 torr` 原始/审计库，保留诊断字段和 `.optimized.npz` sidecar，不提交 git。
 - `ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr/` 是当前推荐运行库，只保留 `J/Vd/delta_V/phiE/phiC/lookup_safe/zero_mask` 和轴，并提供 `.tedb` 给 C++ 直接加载，不提交 git。
 - 自动加载需要同时设置 `THERMOCALC_ENABLE_LOOKUP=1` 和 `THERMOCALC_LOOKUP_DB`；默认只加载 `core`，更广覆盖由 `THERMOCALC_LOOKUP_REGIONS` 控制。
-- 当前查表仅在 `ThermoCalc/build_cp312/Release` 测试版 `.pyd` 中验证，根目录生产 `.pyd` 仍未替换。
+- 2026-06-25 起根目录生产 `.pyd` 已包含当前查表和并联接口；查表仍需通过 `THERMOCALC_ENABLE_LOOKUP`、`THERMOCALC_LOOKUP_DB` 和可选 `THERMOCALC_LOOKUP_REGIONS` 显式启用。
 
 ## 17. 2026-06-23 dense runtime v2 补充
 

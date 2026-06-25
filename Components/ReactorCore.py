@@ -17,6 +17,19 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class TecCircuitGroup:
+    """ReactorCore 内部使用的 TEC 电路组描述。"""
+
+    name: str
+    multipliers: Dict[str, int]
+    thermo_calc: Optional[ThermoCalcModel]
+    total_virtual_elements: int
+    topology: str = "series"
+    circuit_mode: str = "fixed_u"
+    last_update_time: float = -999.0
+
+
+@dataclass
 class GlobalAnnulusStructureConfig:
     """
     堆芯外部全局环形固体层配置。
@@ -140,6 +153,10 @@ class ReactorCore(BaseComponent):
         self.tec_multipliers = dict(tec_multipliers) if tec_multipliers is not None else dict(tfe_multipliers)
         self.alpha_tec = alpha_tec
         self.enable_tec_coupled = enable_tec_coupled
+        self.tec_topology = "series"
+        self.tec_circuit_mode = "fixed_u"
+        self.tec_circuit_groups: Dict[str, TecCircuitGroup] = {}
+        self.reserved_parallel_tec_enabled = False
         self.ring_mapping = ring_mapping
         self.tfe_power_factors: Dict[str, float] = {}
         self.tfe_group_power_shares: Dict[str, float] = {}
@@ -583,17 +600,21 @@ class ReactorCore(BaseComponent):
         """构建 TEC 电路的虚拟分身映射。"""
         self.total_virtual_elements = sum(self.tec_multipliers.values())
         self.n_nodes = self._get_reference_tfe().mesh.n_axial
+        self.thermo_calc = None
+        self.tec_circuit_groups = {}
 
         if self.total_virtual_elements <= 0 or not self.enable_tec_coupled:
-            self.thermo_calc = None
             return
 
         try:
-            self.thermo_calc = ThermoCalcModel(
-                n_elements=self.total_virtual_elements,
-                n_nodes=self.n_nodes
+            main_group = self._create_tec_circuit_group(
+                name="main",
+                multipliers=self.tec_multipliers,
+                topology="series",
+                circuit_mode="fixed_u",
             )
-            self._configure_thermo_calc_geometry()
+            self.tec_circuit_groups["main"] = main_group
+            self.thermo_calc = main_group.thermo_calc
             logger.info(
                 f"ReactorCore '{self.name}': Built ThermoCalc circuit with "
                 f"{len(self.tfes)} physical TFE(s) representing "
@@ -607,7 +628,53 @@ class ReactorCore(BaseComponent):
             self.thermo_calc = None
             self.enable_tec_coupled = False
 
-    def _configure_thermo_calc_geometry(self):
+    def _create_tec_circuit_group(
+            self,
+            name: str,
+            multipliers: Dict[str, int],
+            topology: str = "series",
+            circuit_mode: str = "fixed_u") -> TecCircuitGroup:
+        clean_multipliers = {
+            tfe_name: int(multiplier)
+            for tfe_name, multiplier in multipliers.items()
+            if int(multiplier) > 0
+        }
+        total_virtual_elements = int(sum(clean_multipliers.values()))
+        if total_virtual_elements <= 0:
+            return TecCircuitGroup(
+                name=name,
+                multipliers=clean_multipliers,
+                thermo_calc=None,
+                total_virtual_elements=0,
+                topology=topology,
+                circuit_mode=circuit_mode,
+                last_update_time=float(getattr(self, "_last_thermo_update_time", -999.0)),
+            )
+
+        thermo_calc = ThermoCalcModel(
+            n_elements=total_virtual_elements,
+            n_nodes=self.n_nodes,
+        )
+        self._configure_thermo_calc_geometry_for(
+            thermo_calc=thermo_calc,
+            multipliers=clean_multipliers,
+            total_virtual_elements=total_virtual_elements,
+        )
+        return TecCircuitGroup(
+            name=name,
+            multipliers=clean_multipliers,
+            thermo_calc=thermo_calc,
+            total_virtual_elements=total_virtual_elements,
+            topology=topology,
+            circuit_mode=circuit_mode,
+            last_update_time=float(getattr(self, "_last_thermo_update_time", -999.0)),
+        )
+
+    def _configure_thermo_calc_geometry_for(
+            self,
+            thermo_calc: ThermoCalcModel,
+            multipliers: Dict[str, int],
+            total_virtual_elements: int):
         """
         保持 ThermoCalc 轴向长度和侧面积与 TFE 热网格一致。
 
@@ -616,16 +683,16 @@ class ReactorCore(BaseComponent):
         和有源区节点各自使用对应的物理段面积，而不是采用
         单一的有源区标量近似。
         """
-        if self.thermo_calc is None:
+        if thermo_calc is None:
             return
 
-        dl_e = np.zeros((self.total_virtual_elements, self.n_nodes), dtype=float)
-        dl_c = np.zeros((self.total_virtual_elements, self.n_nodes), dtype=float)
-        side_area_e = np.zeros((self.total_virtual_elements, self.n_nodes), dtype=float)
-        side_area_c = np.zeros((self.total_virtual_elements, self.n_nodes), dtype=float)
+        dl_e = np.zeros((total_virtual_elements, self.n_nodes), dtype=float)
+        dl_c = np.zeros((total_virtual_elements, self.n_nodes), dtype=float)
+        side_area_e = np.zeros((total_virtual_elements, self.n_nodes), dtype=float)
+        side_area_c = np.zeros((total_virtual_elements, self.n_nodes), dtype=float)
 
         idx = 0
-        for tfe_name, multiplier in self.tec_multipliers.items():
+        for tfe_name, multiplier in multipliers.items():
             multiplier = int(multiplier)
             if multiplier <= 0:
                 continue
@@ -661,10 +728,21 @@ class ReactorCore(BaseComponent):
             dl_c[idx: idx + multiplier, :] = node_lengths
             idx += multiplier
 
-        self.thermo_calc._input_data.dlE = dl_e
-        self.thermo_calc._input_data.dlC = dl_c
-        self.thermo_calc._input_data.sideAreaE = side_area_e
-        self.thermo_calc._input_data.sideAreaC = side_area_c
+        thermo_calc._input_data.dlE = dl_e
+        thermo_calc._input_data.dlC = dl_c
+        thermo_calc._input_data.sideAreaE = side_area_e
+        thermo_calc._input_data.sideAreaC = side_area_c
+
+    def _configure_thermo_calc_geometry(self):
+        """兼容旧内部调用：刷新主 TEC 电路几何。"""
+        main_group = getattr(self, "tec_circuit_groups", {}).get("main")
+        if main_group is None or main_group.thermo_calc is None:
+            return
+        self._configure_thermo_calc_geometry_for(
+            thermo_calc=main_group.thermo_calc,
+            multipliers=main_group.multipliers,
+            total_virtual_elements=main_group.total_virtual_elements,
+        )
 
     def _get_reference_tfe(self) -> TFEUnit:
         """返回一个代表性 TFE，用于读取统一的轴向网格。"""
@@ -1027,10 +1105,166 @@ class ReactorCore(BaseComponent):
     # 对外公共接口
     # =========================================================================
 
-    def setup_tec_circuit(self, mode_str: str, target_value: float, I_guess: float = 150.0):
-        """封装 TEC 电路设置接口。"""
+    @staticmethod
+    def _normalize_tec_topology(topology: str) -> str:
+        topology_key = str(topology).strip().lower()
+        if topology_key in ("series", "serial"):
+            return "series"
+        if topology_key == "parallel":
+            return "parallel"
+        raise ValueError(
+            "Unsupported TEC topology. Expected 'series' or 'parallel', "
+            f"got {topology!r}."
+        )
+
+    @staticmethod
+    def _normalize_tec_mode(mode_str: str) -> str:
+        mode_key = str(mode_str).strip().lower()
+        aliases = {
+            "fixed_voltage": "fixed_u",
+            "fixed_u": "fixed_u",
+            "fixed_v": "fixed_u",
+            "fixed_current": "fixed_i",
+            "fixed_i": "fixed_i",
+            "fixed_resistance": "fixed_r",
+            "fixed_r": "fixed_r",
+            "load_curve": "load_curve",
+            "parallel_fixed_u": "parallel_fixed_u",
+            "parallel_fixed_i": "parallel_fixed_i",
+            "parallel_load_curve": "parallel_load_curve",
+        }
+        if mode_key not in aliases:
+            raise ValueError(
+                "Unsupported TEC circuit mode. Expected fixed_u, fixed_i, "
+                f"fixed_r or load_curve, got {mode_str!r}."
+            )
+        return aliases[mode_key]
+
+    @classmethod
+    def _resolve_tec_mode(cls, mode_str: str, topology: str) -> Tuple[str, str, str]:
+        topology_key = cls._normalize_tec_topology(topology)
+        mode_key = cls._normalize_tec_mode(mode_str)
+
+        if topology_key == "series":
+            if mode_key.startswith("parallel_"):
+                raise ValueError(
+                    "Parallel TEC mode names require topology='parallel'. "
+                    f"Got mode {mode_str!r} with topology='series'."
+                )
+            if mode_key == "load_curve":
+                raise ValueError("Series TEC load_curve mode is not supported.")
+            return mode_key, topology_key, mode_key
+
+        if mode_key == "fixed_u" or mode_key == "parallel_fixed_u":
+            return "parallel_fixed_u", topology_key, "fixed_u"
+        if mode_key == "fixed_i" or mode_key == "parallel_fixed_i":
+            return "parallel_fixed_i", topology_key, "fixed_i"
+        if mode_key in ("fixed_r", "load_curve", "parallel_load_curve"):
+            return "parallel_load_curve", topology_key, mode_key
+
+        raise ValueError(
+            f"Unsupported TEC mode/topology combination: {mode_str!r}, {topology!r}."
+        )
+
+    def setup_tec_circuit(
+            self,
+            mode_str: str,
+            target_value: float,
+            I_guess: float = 150.0,
+            topology: str = "series",
+            load_curve: Optional[Tuple[np.ndarray, np.ndarray]] = None):
+        """封装 TEC 电路设置接口，并保持旧串联调用兼容。"""
+        resolved_mode, topology_key, logical_mode = self._resolve_tec_mode(mode_str, topology)
+        if resolved_mode == "parallel_load_curve" and load_curve is not None and self.thermo_calc is not None:
+            current_a, voltage_v = load_curve
+            self.thermo_calc.set_load_curve(current_a, voltage_v)
         if self.thermo_calc is not None:
-            self.thermo_calc.setup_circuit_mode(mode_str, target_value, I_guess)
+            self.thermo_calc.setup_circuit_mode(resolved_mode, target_value, I_guess)
+        self.tec_topology = topology_key
+        self.tec_circuit_mode = logical_mode
+        main_group = getattr(self, "tec_circuit_groups", {}).get("main")
+        if main_group is not None:
+            main_group.topology = topology_key
+            main_group.circuit_mode = logical_mode
+
+    def setup_reserved_parallel_tec_circuit(
+            self,
+            mode_str: str = "fixed_u",
+            target_value: float = 0.8,
+            I_guess: float = 6000.0,
+            multipliers: Optional[Dict[str, int]] = None,
+            load_curve: Optional[Tuple[np.ndarray, np.ndarray]] = None):
+        """启用预留 TEC 并联电路；默认使用 Ring3_Open 代表的 3 根 TEC。"""
+        if not self.enable_tec_coupled:
+            return
+
+        if multipliers is None:
+            reserved_count = int(self.tfe_multipliers.get("Ring3_Open", 0))
+            multipliers = {"Ring3_Open": reserved_count}
+
+        self._validate_aux_tec_multipliers(multipliers)
+        resolved_mode, topology_key, logical_mode = self._resolve_tec_mode(mode_str, "parallel")
+        group = self._create_tec_circuit_group(
+            name="reserved_parallel",
+            multipliers={name: int(mult) for name, mult in multipliers.items()},
+            topology=topology_key,
+            circuit_mode=logical_mode,
+        )
+        if group.thermo_calc is None:
+            raise ValueError("Reserved parallel TEC circuit has no active TEC elements.")
+        if resolved_mode == "parallel_load_curve" and load_curve is not None:
+            current_a, voltage_v = load_curve
+            group.thermo_calc.set_load_curve(current_a, voltage_v)
+        group.thermo_calc.setup_circuit_mode(resolved_mode, target_value, I_guess)
+        self.tec_circuit_groups[group.name] = group
+        self.reserved_parallel_tec_enabled = True
+
+    def disable_reserved_parallel_tec_circuit(self):
+        """关闭预留并联 TEC 电路，恢复 Ring3_Open 等未连接 TFE 的清零行为。"""
+        self.tec_circuit_groups.pop("reserved_parallel", None)
+        self.reserved_parallel_tec_enabled = False
+
+    def _validate_aux_tec_multipliers(self, multipliers: Dict[str, int]):
+        used = {
+            name: int(mult)
+            for name, mult in self.tec_multipliers.items()
+        }
+        for name, mult in multipliers.items():
+            if name not in self.tfes:
+                raise ValueError(f"reserved TEC multipliers contain unknown TFE key: {name!r}.")
+            mult = int(mult)
+            if mult < 0:
+                raise ValueError(f"reserved TEC multiplier for {name!r} cannot be negative.")
+            total = int(used.get(name, 0)) + mult
+            thermal_mult = int(self.tfe_multipliers.get(name, 0))
+            if total > thermal_mult:
+                raise ValueError(
+                    f"TEC circuits use {total} TEC(s) for {name!r}, "
+                    f"exceeding thermal multiplier {thermal_mult}."
+                )
+
+    def iter_tec_circuit_groups(self):
+        """按构建顺序遍历启用的 TEC 电路组。"""
+        for name in ("main", "reserved_parallel"):
+            group = self.tec_circuit_groups.get(name)
+            if group is not None and group.thermo_calc is not None and group.total_virtual_elements > 0:
+                yield group
+        for name, group in self.tec_circuit_groups.items():
+            if name in ("main", "reserved_parallel"):
+                continue
+            if group.thermo_calc is not None and group.total_virtual_elements > 0:
+                yield group
+
+    def get_tec_circuit_global_results(self) -> Dict[str, Optional[dict]]:
+        results: Dict[str, Optional[dict]] = {}
+        for group in self.iter_tec_circuit_groups():
+            results[group.name] = group.thermo_calc.get_global_results()
+        return results
+
+    def set_thermo_update_time(self, current_time: float):
+        self._last_thermo_update_time = float(current_time)
+        for group in self.tec_circuit_groups.values():
+            group.last_update_time = float(current_time)
 
     def attach_point_reactor(self, point_reactor: Optional[PointReactor] = None):
         """
@@ -1196,6 +1430,13 @@ class ReactorCore(BaseComponent):
 
         return {
             '_last_thermo_update_time': self._last_thermo_update_time,
+            'tec_topology': self.tec_topology,
+            'tec_circuit_mode': self.tec_circuit_mode,
+            'reserved_parallel_tec_enabled': self.reserved_parallel_tec_enabled,
+            'tec_group_update_times': {
+                name: group.last_update_time
+                for name, group in self.tec_circuit_groups.items()
+            },
             'last_total_core_power': self.last_total_core_power,
             'last_effective_reactivity_feedback': self.last_effective_reactivity_feedback,
             'last_reactivity_control': self.last_reactivity_control,
@@ -1209,6 +1450,14 @@ class ReactorCore(BaseComponent):
             return
 
         self._last_thermo_update_time = state['_last_thermo_update_time']
+        self.tec_topology = state.get('tec_topology', 'series')
+        self.tec_circuit_mode = state.get('tec_circuit_mode', 'fixed_u')
+        self.reserved_parallel_tec_enabled = state.get('reserved_parallel_tec_enabled', False)
+        group_update_times = state.get('tec_group_update_times', {})
+        for name, last_update_time in group_update_times.items():
+            group = self.tec_circuit_groups.get(name)
+            if group is not None:
+                group.last_update_time = float(last_update_time)
         self.last_total_core_power = state['last_total_core_power']
         self.last_effective_reactivity_feedback = state['last_effective_reactivity_feedback']
         self.last_reactivity_control = state['last_reactivity_control']
@@ -1241,6 +1490,111 @@ class ReactorCore(BaseComponent):
             all_couplers.extend(tfe.get_couplers())
         return all_couplers
 
+    def _connected_tec_tfe_names(self) -> set:
+        connected = set()
+        if not self.enable_tec_coupled:
+            return connected
+        for group in self.iter_tec_circuit_groups():
+            connected.update(
+                name
+                for name, mult in group.multipliers.items()
+                if int(mult) > 0
+            )
+        return connected
+
+    def _apply_tec_group_results(self, group: TecCircuitGroup):
+        if group.thermo_calc is None:
+            return
+
+        idx = 0
+        for tfe_name, thermal_mult in self.tfe_multipliers.items():
+            tec_mult = int(group.multipliers.get(tfe_name, 0))
+            if tec_mult <= 0:
+                continue
+            tfe = self.tfes[tfe_name]
+            tec_idx = idx
+            res = group.thermo_calc.get_tec_results(tec_idx)
+            idx += tec_mult
+
+            if res is None:
+                continue
+
+            UE_abs = res.get('UE', np.zeros(self.n_nodes))
+            UC_abs = res.get('UC', np.zeros(self.n_nodes))
+            rho_e = res.get('rhoE', np.ones(self.n_nodes) * 1e-6)
+            rho_c = res.get('rhoC', np.ones(self.n_nodes) * 1e-6)
+            joule_power_e = np.asarray(res['joulePowerE'], dtype=float)
+            joule_power_c = np.asarray(res['joulePowerC'], dtype=float)
+
+            if hasattr(tfe, 'common_y_faces'):
+                E_e = electric_field_from_node_potential(
+                    UE_abs,
+                    y_faces=np.asarray(tfe.common_y_faces, dtype=float),
+                )
+                E_c = electric_field_from_node_potential(
+                    UC_abs,
+                    y_faces=np.asarray(tfe.common_y_faces, dtype=float),
+                )
+            else:
+                input_data = group.thermo_calc._input_data
+                E_e = electric_field_from_node_potential(
+                    UE_abs,
+                    node_lengths=np.asarray(input_data.dlE[tec_idx], dtype=float),
+                )
+                E_c = electric_field_from_node_potential(
+                    UC_abs,
+                    node_lengths=np.asarray(input_data.dlC[tec_idx], dtype=float),
+                )
+
+            J_density = res.get('J', np.zeros(self.n_nodes)) * 1e4
+            phiE = res.get('phiE', np.zeros(self.n_nodes))
+            TE = res.get('TE', np.zeros(self.n_nodes))
+
+            q_e_flux = -1.0 * J_density * (phiE + 2.0 * 8.617e-5 * TE)
+            q_c_flux = 1.0 * J_density * (
+                phiE + 2.0 * 8.617e-5 * TE - (UE_abs - UC_abs)
+            )
+
+            electric_alpha = self.alpha_tec * float(tec_mult) / float(thermal_mult)
+
+            tfe.update_electric_field_diagnostics(
+                E_emit=E_e,
+                rho_emit=rho_e,
+                E_coll=E_c,
+                rho_coll=rho_c
+            )
+            tfe.update_joule_power_sources(
+                Q_emitter_axial=joule_power_e,
+                Q_collector_axial=joule_power_c,
+                alpha=electric_alpha
+            )
+            tfe.update_plasma_flux(
+                q_e_flux=q_e_flux,
+                q_c_flux=q_c_flux,
+                alpha=electric_alpha
+            )
+
+    def _sync_tec_group_temperatures(self, group: TecCircuitGroup):
+        if group.thermo_calc is None:
+            return
+
+        T_em_matrix = np.zeros((group.total_virtual_elements, self.n_nodes))
+        T_co_matrix = np.zeros((group.total_virtual_elements, self.n_nodes))
+
+        idx = 0
+        for tfe_name, mult in group.multipliers.items():
+            mult = int(mult)
+            if mult <= 0:
+                continue
+            tfe = self.tfes[tfe_name]
+            T_e = tfe.solids['emitter'].boundaries['right'].T_surface
+            T_c = tfe.solids['collector'].boundaries['left'].T_surface
+            T_em_matrix[idx: idx + mult, :] = T_e
+            T_co_matrix[idx: idx + mult, :] = T_c
+            idx += mult
+
+        group.thermo_calc.set_temperatures(T_em_matrix, T_co_matrix)
+
     # =========================================================================
     # 生命周期钩子
     # =========================================================================
@@ -1253,83 +1607,25 @@ class ReactorCore(BaseComponent):
         1. TEC 电路计算并将热流/焦耳热下发到各个 TFE
         2. 从虚拟慢化剂抽取热量并注入全局慢化剂环
         """
+        connected_tec_tfes = self._connected_tec_tfe_names()
         for tfe_name, tfe in self.tfes.items():
-            if int(self.tec_multipliers.get(tfe_name, 0)) <= 0:
+            if tfe_name not in connected_tec_tfes:
                 tfe.clear_tec_sources()
 
-        if self.enable_tec_coupled and self.thermo_calc is not None:
-            time_since_last_update = current_time - self._last_thermo_update_time
-            if time_since_last_update >= self.thermo_update_interval:
-                self.thermo_calc.calculate(verbose=False)
-                self._last_thermo_update_time = current_time
-
-            idx = 0
-            for tfe_name, thermal_mult in self.tfe_multipliers.items():
-                tec_mult = int(self.tec_multipliers.get(tfe_name, 0))
-                if tec_mult <= 0:
-                    continue
-                tfe = self.tfes[tfe_name]
-                tec_idx = idx
-                res = self.thermo_calc.get_tec_results(tec_idx)
-                idx += tec_mult
-
-                if res is None:
-                    continue
-
-                UE_abs = res.get('UE', np.zeros(self.n_nodes))
-                UC_abs = res.get('UC', np.zeros(self.n_nodes))
-                rho_e = res.get('rhoE', np.ones(self.n_nodes) * 1e-6)
-                rho_c = res.get('rhoC', np.ones(self.n_nodes) * 1e-6)
-                joule_power_e = np.asarray(res['joulePowerE'], dtype=float)
-                joule_power_c = np.asarray(res['joulePowerC'], dtype=float)
-
-                if hasattr(tfe, 'common_y_faces'):
-                    E_e = electric_field_from_node_potential(
-                        UE_abs,
-                        y_faces=np.asarray(tfe.common_y_faces, dtype=float),
-                    )
-                    E_c = electric_field_from_node_potential(
-                        UC_abs,
-                        y_faces=np.asarray(tfe.common_y_faces, dtype=float),
-                    )
-                else:
-                    input_data = self.thermo_calc._input_data
-                    E_e = electric_field_from_node_potential(
-                        UE_abs,
-                        node_lengths=np.asarray(input_data.dlE[tec_idx], dtype=float),
-                    )
-                    E_c = electric_field_from_node_potential(
-                        UC_abs,
-                        node_lengths=np.asarray(input_data.dlC[tec_idx], dtype=float),
-                    )
-
-                J_density = res.get('J', np.zeros(self.n_nodes)) * 1e4
-                phiE = res.get('phiE', np.zeros(self.n_nodes))
-                TE = res.get('TE', np.zeros(self.n_nodes))
-
-                q_e_flux = -1.0 * J_density * (phiE + 2.0 * 8.617e-5 * TE)
-                q_c_flux = 1.0 * J_density * (
-                    phiE + 2.0 * 8.617e-5 * TE - (UE_abs - UC_abs)
+        if self.enable_tec_coupled:
+            for group in self.iter_tec_circuit_groups():
+                last_update = (
+                    self._last_thermo_update_time
+                    if group.name == "main"
+                    else group.last_update_time
                 )
-
-                electric_alpha = self.alpha_tec * float(tec_mult) / float(thermal_mult)
-
-                tfe.update_electric_field_diagnostics(
-                    E_emit=E_e,
-                    rho_emit=rho_e,
-                    E_coll=E_c,
-                    rho_coll=rho_c
-                )
-                tfe.update_joule_power_sources(
-                    Q_emitter_axial=joule_power_e,
-                    Q_collector_axial=joule_power_c,
-                    alpha=electric_alpha
-                )
-                tfe.update_plasma_flux(
-                    q_e_flux=q_e_flux,
-                    q_c_flux=q_c_flux,
-                    alpha=electric_alpha
-                )
+                time_since_last_update = current_time - last_update
+                if time_since_last_update >= self.thermo_update_interval:
+                    group.thermo_calc.calculate(verbose=False)
+                    group.last_update_time = current_time
+                    if group.name == "main":
+                        self._last_thermo_update_time = current_time
+                self._apply_tec_group_results(group)
 
         for tfe in self.tfes.values():
             if hasattr(tfe, 'pre_step'):
@@ -1394,23 +1690,9 @@ class ReactorCore(BaseComponent):
             if hasattr(tfe, 'post_step'):
                 tfe.post_step(dt, current_time)
 
-        if self.enable_tec_coupled and self.thermo_calc is not None:
-            T_em_matrix = np.zeros((self.total_virtual_elements, self.n_nodes))
-            T_co_matrix = np.zeros((self.total_virtual_elements, self.n_nodes))
-
-            idx = 0
-            for tfe_name, mult in self.tec_multipliers.items():
-                mult = int(mult)
-                if mult <= 0:
-                    continue
-                tfe = self.tfes[tfe_name]
-                T_e = tfe.solids['emitter'].boundaries['right'].T_surface
-                T_c = tfe.solids['collector'].boundaries['left'].T_surface
-                T_em_matrix[idx: idx + mult, :] = T_e
-                T_co_matrix[idx: idx + mult, :] = T_c
-                idx += mult
-
-            self.thermo_calc.set_temperatures(T_em_matrix, T_co_matrix)
+        if self.enable_tec_coupled:
+            for group in self.iter_tec_circuit_groups():
+                self._sync_tec_group_temperatures(group)
 
         if self.has_global_moderator:
             for ring_idx, ring in enumerate(self.mod_rings):
@@ -1437,6 +1719,10 @@ class ReactorCore(BaseComponent):
         state = {
             # TEC耦合使能标志
             f"{prefix}/enable_tec_coupled": np.array([self.enable_tec_coupled], dtype=bool),
+            # TEC全局拓扑与逻辑模式
+            f"{prefix}/tec_topology": np.array([self.tec_topology]),
+            f"{prefix}/tec_circuit_mode": np.array([self.tec_circuit_mode]),
+            f"{prefix}/reserved_parallel_tec_enabled": np.array([self.reserved_parallel_tec_enabled], dtype=bool),
             # 上次热更新时间
             f"{prefix}/_last_thermo_update_time": np.array([self._last_thermo_update_time]),
             # 上次总堆芯功率
@@ -1509,6 +1795,18 @@ class ReactorCore(BaseComponent):
         flag_key = f"{prefix}/enable_tec_coupled"
         if flag_key in data:
             self.enable_tec_coupled = bool(data[flag_key][0])
+
+        key = f"{prefix}/tec_topology"
+        if key in data:
+            self.tec_topology = str(data[key][0])
+
+        key = f"{prefix}/tec_circuit_mode"
+        if key in data:
+            self.tec_circuit_mode = str(data[key][0])
+
+        key = f"{prefix}/reserved_parallel_tec_enabled"
+        if key in data:
+            self.reserved_parallel_tec_enabled = bool(data[key][0])
 
         key = f"{prefix}/_last_thermo_update_time"
         if key in data:
