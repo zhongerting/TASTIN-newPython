@@ -94,6 +94,10 @@ RadiatorPipeWithFin
   -> HeatConduction2D tube wall
   -> FluidSolidCouple
   -> reduced-order copper fin radiation branch
+
+RadiatorThermalShield
+  -> quasi-steady equivalent shield background
+  -> updates RadiatorPipeWithFin radiation background
 ```
 
 两条主路径：
@@ -117,6 +121,7 @@ RadiatorPipeWithFin
 | `Pipe.py` | 单壁管道流固耦合组件 |
 | `AnnularPipe.py` | 环形管道双壁流固耦合组件 |
 | `RadiatorPipeWithFin.py` | NaK 辐射管与铜带降维翅片组件 |
+| `RadiatorThermalShield.py` | V13 管翅式辐射器可选准稳态遮热罩边界组件 |
 | `HPwithFin.py` | 带降维翅片的热管散热器 |
 | `RingHP.py` | 集流环与代表性热管阵列组件 |
 | `TFEUnit.py` | 热离子燃料元件装配体 |
@@ -847,6 +852,9 @@ component.save_step_state()
 | 字段 | 默认值 | 作用 |
 | --- | --- | --- |
 | `use_embedded_table` | `False` | 使用内嵌 Fortran 查表热流 |
+| `use_w0_8p12_matrix` | `False` | Use fixed `w0=8.12deg, i_s=58.5deg` embedded sum matrix heat flux; this path returns immediately and does not add other external heat sources |
+| `matrix_n` | `np.prod(shape)` | Select `is58p5_w0_8p12_N{matrix_n}_sum`; supported values are 6, 78, and 200 |
+| `matrix_key` | auto | Explicit embedded matrix key, for example `is58p5_w0_8p12_N6_sum` |
 | `table_ids` | `1` | 查表编号，可为标量或可广播到边界形状的数组 |
 | `table_scale_factor` | `1.0` | 查表值缩放系数 |
 | `table_offset` | `0.0` | 查表值偏置，单位 W/m2 |
@@ -868,6 +876,8 @@ component.save_step_state()
 | `*_by_node` | 无 | 对单个字段逐节点覆盖；支持下表字段 |
 
 `*_by_node` 支持：`table_ids`、`surface_normal_angles`、`solar_constant`、`orbit_height`、`orbit_period`、`orbit_inclination`、`albedo_factor`、`earth_ir_flux`、`wall_illumination_factor`、`fin_illuminated_area_scale`、`fin_loading_mode`、`table_scale_factor`、`table_offset`、`table_periodic`、`add_solar`、`add_albedo`、`add_earth_ir`、`use_embedded_table`。
+
+When `use_w0_8p12_matrix=True`, `RingHP` builds `OrbitalMatrixHeatSource` first and returns the composite source directly. The embedded matrix is already the summed heat flux, so `use_embedded_table`, `add_solar`, `add_albedo`, and `add_earth_ir` are not added on top.
 
 当 `use_embedded_table=True` 时，当前实现优先使用查表热源并直接返回，不再叠加 `add_solar`、`add_albedo` 和 `add_earth_ir`。
 
@@ -895,6 +905,20 @@ external_heat_config = {
 }
 ring_hp = RingHP(..., external_heat_config=external_heat_config)
 ```
+
+
+Matrix lookup example:
+
+```python
+external_heat_config = {
+    "use_w0_8p12_matrix": True,
+    "matrix_n": 6,
+    "table_periodic": True,
+}
+
+ring_hp = RingHP(..., external_heat_config=external_heat_config)
+```
+
 
 切换为翅片直接吸热，并让不同代表热管使用不同查表编号：
 
@@ -1007,9 +1031,36 @@ joulePowerE / joulePowerC [W]
 
 `TFEUnit.update_joule_power_sources()` 和 `TECPair.set_joule_heating_axial_power()` 按每个轴向列内的二维控制体体积比例分配功率，并保持每列总功率不变。旧电场接口继续保留，用于兼容和诊断，不再作为 TEC 生产热源的权威路径。
 
+## 2026-06-25 V13 遮热罩第一版
+
+`Components/RadiatorThermalShield.py` 是 V13 管翅式辐射器的可选准稳态遮热罩边界组件。它不返回固体 ODE，也不改变水力网络；启用后作为 `SystemManager.components` 中排在辐射器之前的组件，每步先计算等效遮热罩背景温度，再通过 `RadiatorPipeWithFin.set_radiation_background_temperature()` 更新裸管和降维翅片的辐射背景。
+
+第一版模型只使用等效遮挡系数、遮热罩厚度/导热系数、内外表面发射率和可选太阳热流来估算内外表面温度；尚未引入 `8 x 12` 角系数矩阵。默认不启用，因此历史 V13 算例仍直接向 `T_space=3 K` 深空辐射。
+
 ## 2026-06-02 全局慢化剂映射时间层修复
 
 `ReactorCore.pre_step()` 中的全局慢化剂源项转移必须按以下顺序执行：
+
+## 2026-06-26 控制转鼓反应性子模型
+
+`ReactorCore.py` 内新增独立的 `ControlDrumReactivityModel`，用于保存控制鼓角度和由文献拟合式得到的控制鼓反应性。模型默认 `enabled=False`，因此旧算例不显式配置时不会改变点堆推进。
+
+拟合式输出单位为 dollars ($)，角度单位为 `deg`，有效范围按 `0~180` 夹紧。`theta=0 deg` 表示控制鼓完全内旋，`theta=180 deg` 表示完全外旋。当前实现以 `reference_theta_deg=0` 作为默认角度参考，并使用冷态全内旋参考 `keff=0.952` 计算冷态基准反应性。进入 `PointReactor` 前会使用当前点堆的 `beta_total` 转换为无量纲 `rho`。
+
+启用方式：
+
+```python
+core.configure_control_drum_reactivity(
+    enabled=True,
+    theta_deg=theta_deg,
+    reference_theta_deg=0.0,
+    cold_reference_keff=0.952,
+)
+core.set_control_drum_angle(theta_deg)
+diagnostics = core.get_control_drum_diagnostics()
+```
+
+`advance_neutronics(dt, reactivity_control=...)` 中实际传给点堆的控制反应性为外部 `reactivity_control` 与控制鼓模型反应性之和。当前版本只提供静态角度到反应性的映射；安全鼓转动过程和功率提升控制过程不在本模型内模拟。
 
 ```text
 TFEUnit.pre_step()

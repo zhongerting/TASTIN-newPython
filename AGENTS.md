@@ -150,6 +150,8 @@ V11 CaseA 位于 `testModule/test_core_assemble_v11_caseA.py`，运行入口为 
 
 2026-06-25 起，V11/V13 默认仍只启用主串联 TEC 电路，`Ring3_Open` 代表的 3 根 TEC 默认断开；需要把这三根预留 TEC 接入独立并联电路时，在 runner 中使用 `--enable-reserved-parallel-tec` 以及 `--reserved-parallel-mode fixed_u|fixed_i|load_curve`。详细接口、诊断字段和验证命令见 `testModule/AI_AGENT_TESTMODULE_ANALYSIS.md` 与 `ThermoCalc/AI_AGENT_THERMOCALC_ANALYSIS.md`。
 
+2026-06-25 起，V13 可选启用第一版准稳态遮热罩模型，默认关闭。该模型只通过 `RadiatorPipeWithFin` 的等效辐射背景温度改变管翅式辐射器对外散热，不引入全局 ODE，也不影响 V10/V11。入口参数和验证记录见 `testModule/AI_AGENT_TESTMODULE_ANALYSIS.md`。
+
 2026-06-11 V9 已完成无 TEC 预热和带 TEC 续算验证：`testModule/v9_caseA_open_loop_tec_3000s/` 最终绝对时间约 `5010 s`，入口温度约 `743.000 K`，出口温度约 `838.944 K`，进出口温差约 `95.944 K`，冷却剂焓升约 `108745.775 W`，端电功率约 `4870.107 W`。该目录是本地运行产物，不应默认提交；需要复现实验时优先使用 V9 runner 和 V9 restart。
 
 ### 5.2 集流环冷却回路路径

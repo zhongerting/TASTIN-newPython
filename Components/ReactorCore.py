@@ -108,6 +108,116 @@ class ReactivityFeedbackResult:
     total: float = 0.0
 
 
+@dataclass
+class ControlDrumReactivityModel:
+    """
+    控制转鼓反应性模型。
+
+    反应性 worth 多项式单位为 dollars ($)。PointReactor 使用无量纲 rho，
+    因此对点堆生效前必须乘以 beta_total。
+    """
+
+    enabled: bool = False
+    theta_deg: float = 0.0
+    reference_theta_deg: float = 0.0
+    cold_reference_keff: float = 0.952
+    polynomial_coefficients: Tuple[float, ...] = (
+        -4.0,
+        -2.5e-3,
+        3.72e-4,
+        2.21e-6,
+        -3.57e-8,
+        9.41e-11,
+    )
+    default_beta_total: float = 0.0079321
+
+    @staticmethod
+    def _clamp_theta(theta_deg: float) -> float:
+        return min(180.0, max(0.0, float(theta_deg)))
+
+    def set_angle(self, theta_deg: float) -> None:
+        self.theta_deg = self._clamp_theta(theta_deg)
+
+    def polynomial_reactivity_dollars(self, theta_deg: Optional[float] = None) -> float:
+        theta = self._clamp_theta(self.theta_deg if theta_deg is None else theta_deg)
+        value = 0.0
+        theta_power = 1.0
+        for coefficient in self.polynomial_coefficients:
+            value += float(coefficient) * theta_power
+            theta_power *= theta
+        return float(value)
+
+    def delta_reactivity_dollars(self) -> float:
+        return (
+            self.polynomial_reactivity_dollars(self.theta_deg)
+            - self.polynomial_reactivity_dollars(self.reference_theta_deg)
+        )
+
+    def cold_reference_reactivity(self) -> float:
+        keff = float(self.cold_reference_keff)
+        if keff <= 0.0:
+            raise ValueError("cold_reference_keff must be positive.")
+        return (keff - 1.0) / keff
+
+    def cold_reference_reactivity_dollars(self, beta_total: Optional[float] = None) -> float:
+        beta = self.default_beta_total if beta_total is None else float(beta_total)
+        if beta <= 0.0:
+            raise ValueError("beta_total must be positive.")
+        return self.cold_reference_reactivity() / beta
+
+    def total_reactivity_dollars(self, beta_total: Optional[float] = None) -> float:
+        return self.cold_reference_reactivity_dollars(beta_total) + self.delta_reactivity_dollars()
+
+    def reactivity(self, beta_total: Optional[float] = None) -> float:
+        if not self.enabled:
+            return 0.0
+        beta = self.default_beta_total if beta_total is None else float(beta_total)
+        if beta <= 0.0:
+            raise ValueError("beta_total must be positive.")
+        return self.total_reactivity_dollars(beta) * beta
+
+    def to_state(self) -> Dict[str, Any]:
+        return {
+            "enabled": bool(self.enabled),
+            "theta_deg": float(self.theta_deg),
+            "reference_theta_deg": float(self.reference_theta_deg),
+            "cold_reference_keff": float(self.cold_reference_keff),
+        }
+
+    @classmethod
+    def from_state(cls, state: Optional[Dict[str, Any]]) -> "ControlDrumReactivityModel":
+        model = cls()
+        if not state:
+            return model
+        model.enabled = bool(state.get("enabled", model.enabled))
+        model.theta_deg = model._clamp_theta(state.get("theta_deg", model.theta_deg))
+        model.reference_theta_deg = model._clamp_theta(
+            state.get("reference_theta_deg", model.reference_theta_deg)
+        )
+        model.cold_reference_keff = float(
+            state.get("cold_reference_keff", model.cold_reference_keff)
+        )
+        return model
+
+    def diagnostics(self, beta_total: Optional[float] = None) -> Dict[str, Any]:
+        beta = self.default_beta_total if beta_total is None else float(beta_total)
+        return {
+            "control_drum_enabled": bool(self.enabled),
+            "control_drum_theta_deg": float(self.theta_deg),
+            "control_drum_reference_theta_deg": float(self.reference_theta_deg),
+            "control_drum_cold_reference_keff": float(self.cold_reference_keff),
+            "control_drum_poly_reactivity_dollars": self.polynomial_reactivity_dollars(),
+            "control_drum_reference_poly_reactivity_dollars": self.polynomial_reactivity_dollars(
+                self.reference_theta_deg
+            ),
+            "control_drum_delta_reactivity_dollars": self.delta_reactivity_dollars(),
+            "control_drum_cold_reference_reactivity_dollars": self.cold_reference_reactivity_dollars(beta),
+            "control_drum_total_reactivity_dollars": self.total_reactivity_dollars(beta),
+            "control_drum_reactivity": self.reactivity(beta),
+            "control_drum_beta_total": float(beta),
+        }
+
+
 class ReactorCore(BaseComponent):
     """
     TASTIN 堆芯宏观容器。
@@ -173,6 +283,7 @@ class ReactorCore(BaseComponent):
         )
         self.last_effective_reactivity_feedback = 0.0
         self.last_reactivity_control = 0.0
+        self.control_drum_reactivity_model = ControlDrumReactivityModel()
 
         # 多物理场求解器句柄。
         self.point_reactor = None
@@ -1266,6 +1377,51 @@ class ReactorCore(BaseComponent):
         for group in self.tec_circuit_groups.values():
             group.last_update_time = float(current_time)
 
+    def _get_neutronics_beta_total(self) -> float:
+        reactor = getattr(self, "point_reactor", None)
+        beta_total = getattr(
+            reactor,
+            "beta_total",
+            ControlDrumReactivityModel.default_beta_total,
+        )
+        return float(beta_total)
+
+    def configure_control_drum_reactivity(
+            self,
+            enabled: bool = True,
+            theta_deg: float = 0.0,
+            reference_theta_deg: float = 0.0,
+            cold_reference_keff: float = 0.952) -> ControlDrumReactivityModel:
+        """配置控制转鼓反应性模型。默认全内旋为冷态参考角。"""
+        model = ControlDrumReactivityModel(
+            enabled=bool(enabled),
+            theta_deg=ControlDrumReactivityModel._clamp_theta(theta_deg),
+            reference_theta_deg=ControlDrumReactivityModel._clamp_theta(reference_theta_deg),
+            cold_reference_keff=float(cold_reference_keff),
+        )
+        self.control_drum_reactivity_model = model
+        return model
+
+    def set_control_drum_angle(self, theta_deg: float) -> None:
+        self.control_drum_reactivity_model.set_angle(theta_deg)
+
+    def get_control_drum_reactivity_dollars(self) -> float:
+        if not self.control_drum_reactivity_model.enabled:
+            return 0.0
+        return self.control_drum_reactivity_model.total_reactivity_dollars(
+            self._get_neutronics_beta_total()
+        )
+
+    def get_control_drum_reactivity(self) -> float:
+        return self.control_drum_reactivity_model.reactivity(
+            self._get_neutronics_beta_total()
+        )
+
+    def get_control_drum_diagnostics(self) -> Dict[str, Any]:
+        return self.control_drum_reactivity_model.diagnostics(
+            self._get_neutronics_beta_total()
+        )
+
     def attach_point_reactor(self, point_reactor: Optional[PointReactor] = None):
         """
         将点堆动力学模块挂接到 ReactorCore。
@@ -1360,7 +1516,7 @@ class ReactorCore(BaseComponent):
             return None
 
         feedback_result = self.compute_reactivity_feedback()
-        self.last_reactivity_control = float(reactivity_control)
+        self.last_reactivity_control = float(reactivity_control) + self.get_control_drum_reactivity()
         effective_feedback = feedback_result.total - self.feedback_reference_result.total
         self.last_effective_reactivity_feedback = float(effective_feedback)
 
@@ -1440,6 +1596,7 @@ class ReactorCore(BaseComponent):
             'last_total_core_power': self.last_total_core_power,
             'last_effective_reactivity_feedback': self.last_effective_reactivity_feedback,
             'last_reactivity_control': self.last_reactivity_control,
+            'control_drum_reactivity_model': self.control_drum_reactivity_model.to_state(),
             'tfe_states': tfe_states,
             'point_reactor_state': point_reactor_state,
             'solid_source_states': solid_source_states,
@@ -1461,6 +1618,9 @@ class ReactorCore(BaseComponent):
         self.last_total_core_power = state['last_total_core_power']
         self.last_effective_reactivity_feedback = state['last_effective_reactivity_feedback']
         self.last_reactivity_control = state['last_reactivity_control']
+        self.control_drum_reactivity_model = ControlDrumReactivityModel.from_state(
+            state.get('control_drum_reactivity_model')
+        )
 
         for name, tfe_state in state['tfe_states'].items():
             tfe = self.tfes.get(name)
@@ -1733,6 +1893,19 @@ class ReactorCore(BaseComponent):
             ),
             # 上次反应性控制值
             f"{prefix}/last_reactivity_control": np.array([self.last_reactivity_control], dtype=float),
+            # 控制转鼓反应性模型状态
+            f"{prefix}/control_drum/enabled": np.array(
+                [self.control_drum_reactivity_model.enabled], dtype=bool
+            ),
+            f"{prefix}/control_drum/theta_deg": np.array(
+                [self.control_drum_reactivity_model.theta_deg], dtype=float
+            ),
+            f"{prefix}/control_drum/reference_theta_deg": np.array(
+                [self.control_drum_reactivity_model.reference_theta_deg], dtype=float
+            ),
+            f"{prefix}/control_drum/cold_reference_keff": np.array(
+                [self.control_drum_reactivity_model.cold_reference_keff], dtype=float
+            ),
             # 反应性反馈参考值 - 燃料温度系数贡献
             f"{prefix}/feedback_reference/fuel": np.array([self.feedback_reference_result.fuel], dtype=float),
             # 反应性反馈参考值 - 电极温度系数贡献
@@ -1823,6 +1996,28 @@ class ReactorCore(BaseComponent):
         key = f"{prefix}/last_reactivity_control"
         if key in data:
             self.last_reactivity_control = float(data[key][0])
+
+        control_drum_prefix = f"{prefix}/control_drum"
+        enabled_key = f"{control_drum_prefix}/enabled"
+        if enabled_key in data:
+            self.control_drum_reactivity_model = ControlDrumReactivityModel(
+                enabled=bool(data[enabled_key][0]),
+                theta_deg=ControlDrumReactivityModel._clamp_theta(
+                    float(data[f"{control_drum_prefix}/theta_deg"][0])
+                    if f"{control_drum_prefix}/theta_deg" in data
+                    else 0.0
+                ),
+                reference_theta_deg=ControlDrumReactivityModel._clamp_theta(
+                    float(data[f"{control_drum_prefix}/reference_theta_deg"][0])
+                    if f"{control_drum_prefix}/reference_theta_deg" in data
+                    else 0.0
+                ),
+                cold_reference_keff=(
+                    float(data[f"{control_drum_prefix}/cold_reference_keff"][0])
+                    if f"{control_drum_prefix}/cold_reference_keff" in data
+                    else 0.952
+                ),
+            )
 
         reference_prefix = f"{prefix}/feedback_reference"
         reference_temperature_prefix = f"{prefix}/feedback_reference_temperature"

@@ -872,3 +872,53 @@ V13 `0.1 s` smoke results:
 | Reserved `load_curve` with `U=0.0008 I` | completed; reserved branch `U ~= 0.807 V`, `I ~= 1009.013 A`, total `Pel ~= 6218.004 W` |
 
 V11 `--create-init-only` completed both with the default disabled reserved circuit and with `--enable-reserved-parallel-tec --reserved-parallel-mode fixed_u --reserved-parallel-voltage 0.8`.
+
+## 25. 2026-06-25 V13 first-version radiator thermal shield
+
+V13 now has an optional first-version quasi-steady thermal shield for the TOPAZ-II pipe-fin radiator. It is default-off and only affects the V13 `RadiatorPipeWithFin` path. The model does not add a solid ODE and does not use the future `8 x 12` view-factor matrix; it updates each radiator unit's equivalent radiation background temperature before radiator `pre_step()`.
+
+Runner flags:
+
+```powershell
+--enable-radiation-shield
+--shield-active-until-s 10
+--shield-inner-emissivity 0.8
+--shield-outer-emissivity 0.8
+--shield-conductivity-w-m-k 1.0
+--shield-thickness-m 0.002
+--shield-view-factor 0.8
+--shield-solar-heat-flux-w-m2 0.0
+--shield-background-temperature-k 3.0
+--shield-relaxation 1.0
+```
+
+`--shield-active-until-s` is interpreted as relative time from the current run start; the runner stores the absolute cutoff in `radiation_shield_active_until_abs_s`.
+
+New diagnostics are included in V13 JSON/CSV:
+
+- `radiation_shield_enabled`
+- `radiation_shield_active`
+- `radiation_shield_effective_background_mean_k`
+- `radiation_shield_inner_temperature_mean_k`
+- `radiation_shield_outer_temperature_mean_k`
+- `radiation_shield_q_from_radiator_w`
+- `radiation_shield_q_to_space_w`
+- `radiation_shield_view_factor`
+- `radiation_shield_conductivity_w_m_k`
+- `radiation_shield_thickness_m`
+
+Validation completed:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_radiator_thermal_shield.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m py_compile Components\RadiatorThermalShield.py Components\RadiatorPipeWithFin.py testModule\test_core_assemble_v13_caseA.py testModule\run_v13_caseA_closed_loop.py testModule\test_radiator_thermal_shield.py
+```
+
+V13 `0.1 s` smoke from the current V12 warm restart:
+
+| Case | Result |
+| --- | --- |
+| Shield off | completed; `q_radiator_total_w ~= 105380.709 W` |
+| Shield on, `view_factor=0.8`, `thickness=0.002 m`, `k=1.0 W/m/K` | completed; `q_radiator_total_w ~= 93284.738 W`, effective background `~= 441.039 K`, outer shield mean `~= 424.709 K`, `q_to_space ~= 10641.871 W` |
+
+This first version is intended to prove the boundary-coupling workflow. A later version should replace the equivalent background model with axial aggregation to 12 radiator segments and an 8-shield-segment view-factor matrix.

@@ -36,6 +36,7 @@ from test_core_assemble_v13_caseA import (
     V13_DEFAULT_INLET_TEMPERATURE_K,
     V13_DEFAULT_PUMP_TOTAL_HEAD_PA,
     V13_DEFAULT_REFERENCE_PRESSURE_PA,
+    attach_radiator_thermal_shield,
     build_v13_case_a_system,
     reset_v13_design_flows,
     set_v13_pump_total_head,
@@ -109,6 +110,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fin-conductivity-w-m-k", type=float, default=348.9)
     parser.add_argument("--fin-view-factor", type=float, default=1.0)
     parser.add_argument("--fin-contact-resistance-m2k-w", type=float, default=0.0)
+    parser.add_argument("--enable-radiation-shield", "--enable-radiator-shield", dest="enable_radiation_shield", action="store_true")
+    parser.add_argument("--shield-active-until-s", type=float, default=None)
+    parser.add_argument("--shield-inner-emissivity", type=float, default=0.8)
+    parser.add_argument("--shield-outer-emissivity", type=float, default=0.8)
+    parser.add_argument("--shield-conductivity-w-m-k", type=float, default=1.0)
+    parser.add_argument("--shield-thickness-m", type=float, default=0.002)
+    parser.add_argument("--shield-view-factor", type=float, default=0.8)
+    parser.add_argument("--shield-solar-heat-flux-w-m2", type=float, default=0.0)
+    parser.add_argument("--shield-background-temperature-k", type=float, default=3.0)
+    parser.add_argument("--shield-relaxation", type=float, default=1.0)
+    parser.add_argument(
+        "--shield-model",
+        choices=("segment_balance", "fortran_shield2"),
+        default="segment_balance",
+    )
     parser.add_argument("--radiator-header-k-loss", type=float, default=1.0)
     parser.add_argument("--radiator-tube-inlet-k-loss", type=float, default=100.0)
     parser.add_argument("--radiator-tube-outlet-k-loss", type=float, default=100.0)
@@ -489,6 +505,25 @@ def build_case(args: argparse.Namespace) -> Dict[str, Any]:
     else:
         migration = inject_v12_restart(build, args)
 
+    if bool(args.enable_radiation_shield):
+        active_until = None
+        if args.shield_active_until_s is not None:
+            active_until = float(system.global_time) + float(args.shield_active_until_s)
+        shield = attach_radiator_thermal_shield(
+            build,
+            active_until_s=active_until,
+            background_temperature_k=float(args.shield_background_temperature_k),
+            shield_view_factor=float(args.shield_view_factor),
+            inner_emissivity=float(args.shield_inner_emissivity),
+            outer_emissivity=float(args.shield_outer_emissivity),
+            conductivity_w_m_k=float(args.shield_conductivity_w_m_k),
+            thickness_m=float(args.shield_thickness_m),
+            solar_heat_flux_w_m2=float(args.shield_solar_heat_flux_w_m2),
+            relaxation=float(args.shield_relaxation),
+            model=args.shield_model,
+        )
+        shield.pre_step(0.0, float(system.global_time))
+
     core.point_reactor = None
     core.enable_tec_coupled = not bool(args.disable_tec_coupled)
     core.thermo_update_interval = float(args.thermo_update_interval)
@@ -523,6 +558,13 @@ def build_case(args: argparse.Namespace) -> Dict[str, Any]:
     build["tec_circuit_mode"] = str(getattr(core, "tec_circuit_mode", "fixed_u"))
     build["reserved_parallel_tec_enabled"] = bool(getattr(core, "reserved_parallel_tec_enabled", False))
     build["reserved_parallel_tec_mode"] = str(args.reserved_parallel_mode)
+    build["radiation_shield_enabled"] = bool(args.enable_radiation_shield)
+    build["radiation_shield_model"] = args.shield_model
+    build["radiation_shield_active_until_abs_s"] = (
+        None
+        if not bool(args.enable_radiation_shield) or args.shield_active_until_s is None
+        else float(system.global_time) + float(args.shield_active_until_s)
+    )
     build["migration_summary"] = migration
     return build
 
@@ -562,6 +604,9 @@ def write_latest_state(
         "tec_circuit_mode": build.get("tec_circuit_mode"),
         "reserved_parallel_tec_enabled": build.get("reserved_parallel_tec_enabled"),
         "reserved_parallel_tec_mode": build.get("reserved_parallel_tec_mode"),
+        "radiation_shield_enabled": build.get("radiation_shield_enabled", False),
+        "radiation_shield_model": build.get("radiation_shield_model"),
+        "radiation_shield_active_until_abs_s": build.get("radiation_shield_active_until_abs_s"),
         "solid_ode_method": str(build["solid_ode_method"]),
         "fluid_solid_coupling_scheme": build["fluid_solid_coupling_scheme"],
         "latest_record": latest_record,
@@ -639,6 +684,9 @@ def main() -> None:
         "tec_circuit_mode": build.get("tec_circuit_mode"),
         "reserved_parallel_tec_enabled": build.get("reserved_parallel_tec_enabled"),
         "reserved_parallel_tec_mode": build.get("reserved_parallel_tec_mode"),
+        "radiation_shield_enabled": build.get("radiation_shield_enabled", False),
+        "radiation_shield_model": build.get("radiation_shield_model"),
+        "radiation_shield_active_until_abs_s": build.get("radiation_shield_active_until_abs_s"),
     }
     system.save_global_state(str(latest_restart_path))
     write_latest_state(
@@ -713,6 +761,9 @@ def main() -> None:
                 "tec_circuit_mode": build.get("tec_circuit_mode"),
                 "reserved_parallel_tec_enabled": build.get("reserved_parallel_tec_enabled"),
                 "reserved_parallel_tec_mode": build.get("reserved_parallel_tec_mode"),
+                "radiation_shield_enabled": build.get("radiation_shield_enabled", False),
+                "radiation_shield_model": build.get("radiation_shield_model"),
+                "radiation_shield_active_until_abs_s": build.get("radiation_shield_active_until_abs_s"),
                 "target_flow_kg_s": float(args.target_flow_kg_s),
                 "flow_error_kg_s": float(build["pump_a"].W + build["pump_b"].W) * 0.5 - float(args.target_flow_kg_s),
             }

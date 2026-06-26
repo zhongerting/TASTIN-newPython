@@ -19,6 +19,7 @@ if root_dir not in sys.path:
 from Materials.Fluids.SodiumPotassium78 import SodiumPotassium78
 from Materials.Solids.WallMaterial import SS316
 from Components.RadiatorPipeWithFin import RadiatorPipeWithFin
+from Components.RadiatorThermalShield import RadiatorThermalShield
 from Solvers.Hydrodynamics.BoundaryVolume import IncompressibleBoundaryVolume, InletJunction
 from Solvers.Hydrodynamics.Components import FlowJunction, IncompressibleFluidChannel, IncompressibleFluidVolume
 from Solvers.Hydrodynamics.HydraulicNetwork import HydraulicNetwork
@@ -328,6 +329,51 @@ def build_model(args: argparse.Namespace) -> Dict[str, Any]:
     }
 
 
+def attach_radiator_thermal_shield(build: Dict[str, Any], args: argparse.Namespace) -> RadiatorThermalShield:
+    active_until = None
+    if getattr(args, "shield_active_until_s", None) is not None:
+        active_until = float(build["system"].global_time) + float(args.shield_active_until_s)
+    shield = RadiatorThermalShield(
+        name="TOPAZ2_RadiatorThermalShield",
+        radiator_units=build["radiator_units"],
+        active_until_s=active_until,
+        background_temperature_k=float(args.shield_background_temperature_k),
+        shield_view_factor=float(args.shield_view_factor),
+        inner_emissivity=float(args.shield_inner_emissivity),
+        outer_emissivity=float(args.shield_outer_emissivity),
+        conductivity_w_m_k=float(args.shield_conductivity_w_m_k),
+        thickness_m=float(args.shield_thickness_m),
+        solar_heat_flux_w_m2=float(args.shield_solar_heat_flux_w_m2),
+        relaxation=float(args.shield_relaxation),
+        model=str(args.shield_model),
+    )
+    system = build["system"]
+    if shield not in system.components:
+        system.components.insert(0, shield)
+    build["radiator_thermal_shield"] = shield
+    return shield
+
+
+def radiation_shield_diagnostics(build: Dict[str, Any]) -> Dict[str, Any]:
+    shield = build.get("radiator_thermal_shield")
+    if shield is None:
+        return {
+            "radiation_shield_enabled": False,
+            "radiation_shield_active": False,
+            "radiation_shield_model": None,
+            "radiation_shield_effective_background_mean_k": None,
+            "radiation_shield_inner_temperature_mean_k": None,
+            "radiation_shield_outer_temperature_mean_k": None,
+            "radiation_shield_q_from_radiator_w": 0.0,
+            "radiation_shield_q_solar_w": 0.0,
+            "radiation_shield_q_to_space_w": 0.0,
+            "radiation_shield_solver_failures": 0,
+        }
+    diagnostics = shield.get_diagnostics()
+    diagnostics["radiation_shield_enabled"] = True
+    return diagnostics
+
+
 def initialize_flow_guess(build: Dict[str, Any]) -> None:
     args = build["args"]
     total_flow = float(args.total_mass_flow_kg_s)
@@ -531,7 +577,7 @@ def collect_diagnostics(build: Dict[str, Any]) -> Dict[str, Any]:
         fin_tip_all = np.array([], dtype=float)
     inlet_h = float(build["nak"].enthalpy(float(args.inlet_temperature_k), float(args.outlet_pressure_pa)))
     q_fluid_drop = mix["mass_flow_kg_s"] * (inlet_h - mix["enthalpy_j_kg"])
-    return {
+    diagnostics = {
         "time_s": float(build["system"].global_time),
         "tube_emissivity": float(args.tube_emissivity),
         "fin_emissivity": float(args.fin_emissivity),
@@ -567,6 +613,8 @@ def collect_diagnostics(build: Dict[str, Any]) -> Dict[str, Any]:
         "upper_header_arc_length_sum_m": float(int(args.n_tubes) * build["upper_seg_len"]),
         "lower_header_arc_length_sum_m": float(int(args.n_tubes) * build["lower_seg_len"]),
     }
+    diagnostics.update(radiation_shield_diagnostics(build))
+    return diagnostics
 
 
 def write_history_row(path: Path, row: Dict[str, Any], write_header: bool) -> None:
@@ -583,7 +631,12 @@ def run_case(args: argparse.Namespace) -> Dict[str, Any]:
     initialize_flow_guess(build)
 
     system = build["system"]
+    if bool(getattr(args, "enable_radiation_shield", False)):
+        shield = attach_radiator_thermal_shield(build, args)
+        shield.pre_step(0.0, float(system.global_time))
     system.initialize_system(dt_init=float(args.init_dt), tol=float(args.hydraulic_tol), max_iter=int(args.hydraulic_max_iter))
+    if bool(getattr(args, "enable_radiation_shield", False)):
+        build["radiator_thermal_shield"].pre_step(0.0, float(system.global_time))
 
     output_dir = Path(args.output_dir)
     history_path = output_dir / f"{args.case_prefix}_history.csv"
@@ -628,6 +681,9 @@ def run_case(args: argparse.Namespace) -> Dict[str, Any]:
             "tube_inlet_k_loss": float(args.tube_inlet_k_loss),
             "tube_outlet_k_loss": float(args.tube_outlet_k_loss),
         },
+        "radiation_shield_enabled": bool(getattr(args, "enable_radiation_shield", False)),
+        "radiation_shield_model": getattr(args, "shield_model", None),
+        "radiation_shield_active_until_s": getattr(args, "shield_active_until_s", None),
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     with latest_state_path.open("w", encoding="utf-8") as f:
@@ -686,6 +742,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tube-emissivity-values", default="0.75,0.80,0.85,0.88,0.90,0.92")
     parser.add_argument("--fin-emissivity-values", default="0.75,0.80,0.85,0.88,0.90,0.92")
     parser.add_argument("--t-space-k", type=float, default=3.0)
+    parser.add_argument("--enable-radiation-shield", "--enable-radiator-shield", dest="enable_radiation_shield", action="store_true")
+    parser.add_argument("--shield-active-until-s", type=float, default=None)
+    parser.add_argument("--shield-inner-emissivity", type=float, default=0.8)
+    parser.add_argument("--shield-outer-emissivity", type=float, default=0.1)
+    parser.add_argument("--shield-conductivity-w-m-k", type=float, default=0.0008)
+    parser.add_argument("--shield-thickness-m", type=float, default=0.01)
+    parser.add_argument("--shield-view-factor", type=float, default=0.8)
+    parser.add_argument("--shield-solar-heat-flux-w-m2", type=float, default=0.0)
+    parser.add_argument("--shield-background-temperature-k", type=float, default=3.0)
+    parser.add_argument("--shield-relaxation", type=float, default=1.0)
+    parser.add_argument("--shield-model", choices=("segment_balance", "fortran_shield2"), default="fortran_shield2")
     parser.add_argument("--header-k-loss", type=float, default=1.0)
     parser.add_argument("--tube-inlet-k-loss", type=float, default=2.0)
     parser.add_argument("--tube-outlet-k-loss", type=float, default=2.0)
