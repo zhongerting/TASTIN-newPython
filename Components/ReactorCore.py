@@ -1781,6 +1781,7 @@ class ReactorCore(BaseComponent):
                 )
                 time_since_last_update = current_time - last_update
                 if time_since_last_update >= self.thermo_update_interval:
+                    self._sync_tec_group_temperatures(group)
                     group.thermo_calc.calculate(verbose=False)
                     group.last_update_time = current_time
                     if group.name == "main":

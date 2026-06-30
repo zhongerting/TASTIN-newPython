@@ -48,6 +48,16 @@ def _env_flag(name: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return float(default)
+    try:
+        return float(value)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %.6g", name, value, default)
+        return float(default)
+
 def _normalize_lookup_regions(regions=None):
     if regions is None:
         text = os.environ.get("THERMOCALC_LOOKUP_REGIONS", "").strip()
@@ -280,7 +290,8 @@ class ThermoCalcModel:
         # 初始默认处于 600K 均匀状态
         self._T_emitter = np.full((self.N_elem, self.n_node), 600.0)
         self._T_collector = np.full((self.N_elem, self.n_node), 600.0)
-
+        self._zero_emission_skipped = False
+        self._zero_emission_reason = None
     def set_temperatures(self, T_em: np.ndarray, T_co: np.ndarray):
         """
         更新发射极与接收极温度场
@@ -425,6 +436,59 @@ class ThermoCalcModel:
             if self._load_curve_current is not None and hasattr(self._circuit, "set_load_curve"):
                 self._circuit.set_load_curve(self._load_curve_current, self._load_curve_voltage)
 
+    def _should_skip_zero_emission(self) -> bool:
+        if _env_flag("THERMOCALC_DISABLE_ZERO_EMISSION_GUARD"):
+            return False
+        if self._T_emitter.size == 0 or self._T_collector.size == 0:
+            return False
+        if not np.all(np.isfinite(self._T_emitter)) or not np.all(np.isfinite(self._T_collector)):
+            return False
+        te_max = float(np.max(self._T_emitter))
+        cutoff = _env_float("THERMOCALC_ZERO_EMISSION_TE_MAX_K", 1000.0)
+        if te_max >= cutoff:
+            return False
+        self._zero_emission_reason = (
+            f"max emitter temperature {te_max:.3f} K below "
+            f"zero-emission cutoff {cutoff:.3f} K"
+        )
+        return True
+
+    def _apply_zero_emission_result(self):
+        if self._circuit is None:
+            return
+        zeros = np.zeros(self.n_node, dtype=float)
+        for tec in self._circuit.TECs:
+            tec.I = 0.0
+            tec.U = 0.0
+            tec.J = zeros.copy()
+            tec.V = zeros.copy()
+            tec.UE = zeros.copy()
+            tec.UC = zeros.copy()
+            tec.IEsecSingle = zeros.copy()
+            tec.ICsecSingle = zeros.copy()
+            tec.phiE = zeros.copy()
+            tec.phiC = zeros.copy()
+            tec.Vd = zeros.copy()
+            tec.joulePowerE = zeros.copy()
+            tec.joulePowerC = zeros.copy()
+            tec.terminalPointUE1 = 0.0
+            tec.terminalPointUE2 = 0.0
+            tec.terminalPointUC1 = 0.0
+            tec.terminalPointUC2 = 0.0
+        self._circuit.Iout = 0.0
+        if getattr(self._circuit, "isFixedU", False) or getattr(self._circuit, "isParallelFixedU", False):
+            self._circuit.Uout = float(self._input_data.target_val)
+        else:
+            self._circuit.Uout = 0.0
+        self._circuit.converged = True
+        self._circuit.iterationCount = 0
+        if getattr(self._circuit, "isParallelFixedU", False):
+            self._circuit.branchCurrents = np.zeros(self.N_elem, dtype=float)
+            self._circuit.branchVoltages = np.full(self.N_elem, float(self._input_data.target_val), dtype=float)
+        elif getattr(self._circuit, "isParallelFixedI", False) or getattr(self._circuit, "isParallelLoadCurve", False):
+            self._circuit.branchCurrents = np.zeros(self.N_elem, dtype=float)
+            self._circuit.branchVoltages = np.zeros(self.N_elem, dtype=float)
+        self._zero_emission_skipped = True
     @TEASAProfiler.profile
     def calculate(self, verbose: bool = False) -> float:
         """
@@ -435,7 +499,12 @@ class ThermoCalcModel:
             self.build()
 
         t0 = time.time()
-        self._circuit.calc()
+        if self._should_skip_zero_emission():
+            self._apply_zero_emission_result()
+        else:
+            self._zero_emission_skipped = False
+            self._zero_emission_reason = None
+            self._circuit.calc()
         t1 = time.time()
 
         dt_ms = (t1 - t0) * 1000.0
@@ -457,6 +526,8 @@ class ThermoCalcModel:
             "branch_currents": np.array(getattr(self._circuit, "branchCurrents", []), dtype=float),
             "branch_voltages": np.array(getattr(self._circuit, "branchVoltages", []), dtype=float),
             "effective_rload": self._circuit.Rload,
+            "zero_emission_skipped": bool(self._zero_emission_skipped),
+            "zero_emission_reason": self._zero_emission_reason,
         }
 
     def get_tec_results(self, idx: int):

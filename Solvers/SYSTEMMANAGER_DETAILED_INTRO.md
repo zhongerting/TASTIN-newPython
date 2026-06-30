@@ -313,6 +313,7 @@ step(
     fail_on_fluid_nonconvergence=False,
     interface_relaxation=1.0,
     interface_convergence_tol=None,
+    fluid_max_iter=None,
 )
 ```
 
@@ -324,6 +325,7 @@ step(
 | `inner_iter` | Picard 最大内迭代次数 |
 | `convergence_tol` | 流体/固体温度收敛阈值 |
 | `reactivity_control` | 外部控制反应性 |
+| `fluid_max_iter` | 可选的单步水力 `step_Picard()` 最大迭代次数；`None` 保持历史默认，即 `inner_iter=1` 时 100 次、`inner_iter>1` 时 20 次。 |
 | `fail_on_fluid_nonconvergence` | 流体不收敛时是否直接失败 |
 | `interface_relaxation` | 界面松弛因子，范围 `(0, 1]` |
 | `interface_convergence_tol` | 可选界面残差收敛阈值 |
@@ -839,3 +841,4 @@ manager.load_global_state("restart_state.npz")
 - `HeatConduction/Boundary.py`
 - `Couplers.py`
 - `Neutronics/PointReactor.py`
+

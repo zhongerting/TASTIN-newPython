@@ -262,3 +262,9 @@ V9 复用该导线电阻和 NaK78 冷却剂约定。冷态直接启动 TEC 可�
 ## 13. 2026-06-02 全局慢化剂映射顺序补充
 
 `ReactorCore.pre_step()` 必须先执行 `TFEUnit.pre_step()` 更新内部等效 moderator 外边界温度，再刷新该 moderator 的边界热流缓存，最后将外流按 `tfe_multipliers` 聚合到全局慢化剂环。不得直接复用旧时间层 `BoundaryRegion.current_flux`；该错误在 restart 后会放大为首步非物理源项脉冲。
+
+## 14. 2026-06-28 ThermoCalc 低温零发射保护
+
+`ThermoCalcModel.calculate()` 在进入 C++ 电路迭代前会进行低温零发射快速判定：当所有发射极温度低于默认 `THERMOCALC_ZERO_EMISSION_TE_MAX_K=1000 K` 时，直接返回开路零电流、零 TEC 热源结果，并在 `get_global_results()` 中标记 `zero_emission_skipped=True`。这不是禁用 TEC，而是避免启动低温下无发电能力的 fixed-voltage 电路迭代卡死；详细说明见 [`ThermoCalc/AI_AGENT_THERMOCALC_ANALYSIS.md`](./ThermoCalc/AI_AGENT_THERMOCALC_ANALYSIS.md)。
+
+补充：2026-06-28 起，除了 Python 层低温零发射预判，`ThermoCalc` C++ 电路层也加入了退化迭代快速跳出；因此启动/过渡工况可以默认保持 TEC 开启，无法形成有效电解的状态会返回有限的零电流或未收敛诊断，而不是长期卡在 `ThermoCalcModel.calculate()`。详细见 ThermoCalc 手册。

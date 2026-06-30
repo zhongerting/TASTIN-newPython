@@ -170,6 +170,76 @@ def test_old_restart_without_control_drum_keys_keeps_default_model():
     assert_close(core.control_drum_reactivity_model.theta_deg, 0.0)
 
 
+class FakeThermoCalcForSync:
+    def __init__(self):
+        self.events = []
+
+    def set_temperatures(self, emitter, collector):
+        self.events.append("sync")
+
+    def calculate(self, verbose=False):
+        self.events.append("calculate")
+
+    def get_tec_results(self, idx):
+        return None
+
+
+class FakeTecGroup:
+    name = "main"
+    total_virtual_elements = 1
+    multipliers = {"FakeTFE": 1}
+
+    def __init__(self):
+        self.thermo_calc = FakeThermoCalcForSync()
+        self.last_update_time = -1.0e9
+
+
+class FakeBoundarySurface:
+    def __init__(self):
+        self.T_surface = [1200.0]
+
+
+class FakeSolidWithBoundary:
+    def __init__(self, side):
+        self.boundaries = {side: FakeBoundarySurface()}
+
+
+class FakeTFEForSync:
+    def __init__(self):
+        self.solids = {
+            "emitter": FakeSolidWithBoundary("right"),
+            "collector": FakeSolidWithBoundary("left"),
+        }
+        self.cleared = False
+        self.pre_step_called = False
+
+    def clear_tec_sources(self):
+        self.cleared = True
+
+    def pre_step(self, dt, current_time):
+        self.pre_step_called = True
+
+
+def test_reactorcore_syncs_tec_temperatures_before_calculate():
+    core = ReactorCore.__new__(ReactorCore)
+    group = FakeTecGroup()
+    core.enable_tec_coupled = True
+    core.thermo_update_interval = 0.5
+    core._last_thermo_update_time = -1.0e9
+    core.tec_circuit_groups = {"main": group}
+    core.iter_tec_circuit_groups = lambda: [group]
+    core.tfes = {"FakeTFE": FakeTFEForSync()}
+    core.tfe_multipliers = {"FakeTFE": 1}
+    core.n_nodes = 1
+    core.has_global_moderator = False
+    core._connected_tec_tfe_names = lambda: {"FakeTFE"}
+    core._apply_tec_group_results = lambda group: None
+
+    ReactorCore.pre_step(core, dt=0.5, current_time=1.0)
+
+    assert group.thermo_calc.events[:2] == ["sync", "calculate"]
+
+
 if __name__ == "__main__":
     test_control_drum_polynomial_endpoints_and_cold_reference()
     test_control_drum_model_is_disabled_by_default()
@@ -178,4 +248,5 @@ if __name__ == "__main__":
     test_control_drum_model_state_roundtrip()
     test_control_drum_angle_clamping()
     test_old_restart_without_control_drum_keys_keeps_default_model()
+    test_reactorcore_syncs_tec_temperatures_before_calculate()
     print("ReactorCore control drum checks passed.")

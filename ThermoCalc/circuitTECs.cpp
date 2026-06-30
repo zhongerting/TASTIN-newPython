@@ -362,7 +362,7 @@ namespace std {
 				deltaU1[n] = TECs[n]->wireU[0] - TECs[n]->wireU[2];
 				deltaU2[n] = TECs[n]->wireU[1] - TECs[n]->wireU[3];
 			}
-			if (abs(1 - Uout0 / Uout) <= 1.e-3) {
+			if (isfinite(Uout0) && isfinite(Uout) && abs(Uout) > 1.e-12 && abs(1 - Uout0 / Uout) <= 1.e-3) {
 				converged = true;
 				break;
 			}
@@ -418,20 +418,38 @@ namespace std {
 		// 计算结果
 		S1->wireU[1] = S1->wireU[0];
 		dI1 = S1->Icalc();
+		if (!isfinite(dI0) || !isfinite(dI1) || abs(dI1) < 0.1) {
+			return;
+		}
 
-		for (int i = 0; i < 1000; ++i) {
+		for (int i = 0; i < 100; ++i) {
 			if (i > 20) {
 				factor *= 0.9;
 			}
 			coefficient = dI1 - dI0;
-			if (abs(dI1 - dI0) < 0.1) {
-				coefficient = 0.1 * (dI1 - dI0) / abs(dI1 - dI0);
+			if (!isfinite(coefficient) || abs(coefficient) < 1.e-12 || !isfinite(U0) || !isfinite(U1)) {
+				return;
+			}
+			if (abs(coefficient) < 0.1) {
+				coefficient = coefficient > 0.0 ? 0.1 : -0.1;
 			}
 			Utemp = U1 - dI1 * (U1 - U0) / coefficient * factor;
+			if (!isfinite(Utemp)) {
+				return;
+			}
 			if (Utemp < 0.) {
+				if (abs(U1) < 1.e-12) {
+					return;
+				}
 				double c1 = dI1 * (U1 - U0) / U1 * factor;
+				if (!isfinite(c1) || abs(c1) < 1.e-12) {
+					return;
+				}
 				coefficient = 2. * c1;
-				Utemp = U1 - dI1 * (U1 - U0) / coefficient * factor;;
+				Utemp = U1 - dI1 * (U1 - U0) / coefficient * factor;
+				if (!isfinite(Utemp)) {
+					return;
+				}
 			}
 			U0 = U1;
 			U1 = Utemp;
@@ -471,20 +489,38 @@ namespace std {
 		// 计算获得另一边电压
 		TECs[n]->wireU[1] = TECs[n]->wireU[0] + deltaV;
 		dI1 = TECs[n]->Icalc();
+		if (!isfinite(dI0) || !isfinite(dI1) || abs(dI1) < 0.1) {
+			return;
+		}
 
-		for (int i = 0; i < 1000; ++i) {
+		for (int i = 0; i < 100; ++i) {
 			if (i > 20 && i % 10 == 0) {
 				factor *= 0.9;
 			}
 			coefficient = dI1 - dI0;
-			if (abs(dI1 - dI0) < 0.1) {
-				coefficient = 0.1 * (dI1 - dI0) / abs(dI1 - dI0);
+			if (!isfinite(coefficient) || abs(coefficient) < 1.e-12 || !isfinite(U0) || !isfinite(U1)) {
+				return;
+			}
+			if (abs(coefficient) < 0.1) {
+				coefficient = coefficient > 0.0 ? 0.1 : -0.1;
 			}
 			Utemp = U1 - dI1 * (U1 - U0) / coefficient * factor;
+			if (!isfinite(Utemp)) {
+				return;
+			}
 			if (Utemp < 0.) {
+				if (abs(U1) < 1.e-12) {
+					return;
+				}
 				double c1 = dI1 * (U1 - U0) / U1 * factor;
+				if (!isfinite(c1) || abs(c1) < 1.e-12) {
+					return;
+				}
 				coefficient = 2. * c1;
 				Utemp = U1 - dI1 * (U1 - U0) / coefficient * factor;
+				if (!isfinite(Utemp)) {
+					return;
+				}
 			}
 			U0 = U1;
 			U1 = Utemp;
@@ -513,46 +549,163 @@ namespace std {
 	}
 
 	double circuitTECs::uFixedCircuitCalc() {
-		// 迭代中用到的值
-		double coefficient = 0.;
-		// 电流迭代初值
 		converged = false;
 		iterationCount = 0;
-		double I0 = Iout, I1 = Iout + 10., I2 = 0.;
-		// 分别计算迭代结果，并作为迭代初值
-		double dU0 = Utarget - circuitCalc(I0);
-		double dU1 = Utarget - circuitCalc(I1);
-		// 弦割法迭代循环
-		for (int nIter = 0; nIter < 100; ++nIter) {
-			iterationCount = nIter + 1;
-			coefficient = dU1 - dU0;
-			if (abs(coefficient) < 1.e-3) {
-				coefficient = 1.e-3 * abs(dU1 - dU0) / (dU1 - dU0);
+		const double voltageTol = max(5.0e-2, 1.0e-4 * max(1.0, abs(Utarget)));
+		const double currentTol = 1.0e-4;
+
+		auto evaluate = [&](double current, double& voltage, double& residual) -> bool {
+			if (!isfinite(current) || current < 0.0) {
+				return false;
 			}
+			voltage = circuitCalc(current);
+			residual = Utarget - voltage;
+			return isfinite(voltage) && isfinite(residual);
+		};
 
-			I2 = I1 - dU1 * (I1 - I0) / coefficient;
-
-			if (I2 <= 0.) {
-				I2 = I1 + 5.;
+		vector<double> samples;
+		double guess = isfinite(Iout) && Iout > 0.0 ? Iout : 1.0;
+		auto addSample = [&](double value) {
+			if (!isfinite(value) || value < 0.0) {
+				return;
 			}
+			value = max(0.0, value);
+			for (double existing : samples) {
+				if (abs(existing - value) <= 1.0e-9) {
+					return;
+				}
+			}
+			samples.push_back(value);
+		};
 
-			if (fabs(I2 - I1) < 1.e-1) {
-				Iout = I2;
+		addSample(guess);
+		addSample(guess + 1.0);
+		addSample(guess + 0.5);
+		addSample(guess + 0.25);
+		addSample(guess + 0.1);
+		addSample(guess + 0.05);
+		addSample(guess - 0.05);
+		addSample(guess - 0.1);
+		addSample(guess - 0.25);
+		addSample(guess - 0.5);
+		addSample(guess + 2.0);
+		addSample(0.5 * guess);
+		addSample(1.5 * guess);
+		addSample(0.0);
+		addSample(max(1.0e-6, 0.01 * guess));
+		addSample(max(1.0e-6, 0.1 * guess));
+		addSample(max(1.0e-6, 2.0 * guess));
+		addSample(max(1.0e-6, guess + 10.0));
+		addSample(1.0);
+		addSample(10.0);
+		addSample(50.0);
+		addSample(100.0);
+		addSample(200.0);
+		addSample(400.0);
+
+		bool haveBest = false;
+		double bestI = 0.0;
+		double bestU = 0.0;
+		double bestF = numeric_limits<double>::infinity();
+		bool haveBracket = false;
+		double loI = 0.0, hiI = 0.0, loF = 0.0, hiF = 0.0;
+		double prevI = 0.0, prevF = 0.0;
+		bool havePrev = false;
+
+		for (double current : samples) {
+			double voltage = 0.0;
+			double residual = 0.0;
+			if (!evaluate(current, voltage, residual)) {
+				continue;
+			}
+			iterationCount += 1;
+			if (!haveBest || abs(residual) < abs(bestF)) {
+				haveBest = true;
+				bestI = current;
+				bestU = voltage;
+				bestF = residual;
+			}
+			if (abs(residual) <= voltageTol) {
+				Iout = current;
 				Uout = Utarget;
 				converged = true;
-				return I2;
+				return Iout;
 			}
-
-			I0 = I1;
-			I1 = I2;
-
-			dU0 = dU1;
-			dU1 = Utarget - circuitCalc(I1);
+			if (havePrev && residual * prevF <= 0.0) {
+				if (prevI <= current) {
+					loI = prevI;
+					hiI = current;
+					loF = prevF;
+					hiF = residual;
+				}
+				else {
+					loI = current;
+					hiI = prevI;
+					loF = residual;
+					hiF = prevF;
+				}
+				haveBracket = true;
+				break;
+			}
+			prevI = current;
+			prevF = residual;
+			havePrev = true;
 		}
 
-		return 0.;
-	}
+		if (haveBracket) {
+			for (int nIter = 0; nIter < 24; ++nIter) {
+				double trial = 0.5 * (loI + hiI);
+				double denom = hiF - loF;
+				if (isfinite(denom) && abs(denom) > 1.0e-12) {
+					double secant = hiI - hiF * (hiI - loI) / denom;
+					if (isfinite(secant) && secant > loI && secant < hiI) {
+						trial = secant;
+					}
+				}
+				double voltage = 0.0;
+				double residual = 0.0;
+				if (!evaluate(trial, voltage, residual)) {
+					trial = 0.5 * (loI + hiI);
+					if (!evaluate(trial, voltage, residual)) {
+						break;
+					}
+				}
+				iterationCount += 1;
+				if (!haveBest || abs(residual) < abs(bestF)) {
+					haveBest = true;
+					bestI = trial;
+					bestU = voltage;
+					bestF = residual;
+				}
+				if (abs(residual) <= voltageTol || (abs(hiI - loI) <= currentTol && abs(bestF) <= 5.0 * voltageTol)) {
+					Iout = bestI;
+					Uout = Utarget;
+					converged = true;
+					return Iout;
+				}
+				if (residual * loF <= 0.0) {
+					hiI = trial;
+					hiF = residual;
+				}
+				else {
+					loI = trial;
+					loF = residual;
+				}
+			}
+		}
 
+		if (haveBest) {
+			circuitCalc(bestI);
+			Iout = bestI;
+			Uout = bestU;
+		}
+		else {
+			Iout = 0.0;
+			Uout = isFixedU ? Utarget : 0.0;
+		}
+		converged = false;
+		return Iout;
+	}
 	double circuitTECs::resistanceFixedCircuitCalc() {
 		// 迭代中用到的值
 		double coefficient = 0.;

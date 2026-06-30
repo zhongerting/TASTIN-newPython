@@ -1,5 +1,6 @@
 import os
 import sys
+import multiprocessing as mp
 
 import numpy as np
 
@@ -13,6 +14,32 @@ from ThermoCalc.ThermoCalcWrapper import ThermoCalcModel
 
 N_NODES = 5
 
+
+def _run_low_temperature_fixed_voltage_case(queue, disable_guard=False):
+    os.environ.pop("THERMOCALC_ENABLE_LOOKUP", None)
+    if disable_guard:
+        os.environ["THERMOCALC_DISABLE_ZERO_EMISSION_GUARD"] = "1"
+    else:
+        os.environ.pop("THERMOCALC_DISABLE_ZERO_EMISSION_GUARD", None)
+    model = ThermoCalcModel(n_elements=1, n_nodes=37)
+    model.setup_circuit_mode("fixed_u", 0.8, I_guess=1.0)
+    model.set_temperatures(
+        np.full((1, 37), 800.0),
+        np.full((1, 37), 600.0),
+    )
+    model.set_tcs(np.full((1, 37), 520.0))
+    elapsed_ms = model.calculate(verbose=False)
+    global_results = model.get_global_results()
+    tec_results = model.get_tec_results(0)
+    queue.put(
+        {
+            "elapsed_ms": float(elapsed_ms),
+            "global": global_results,
+            "J": np.asarray(tec_results["J"], dtype=float),
+            "joulePowerE": np.asarray(tec_results["joulePowerE"], dtype=float),
+            "joulePowerC": np.asarray(tec_results["joulePowerC"], dtype=float),
+        }
+    )
 
 def _expect_value_error(callback, message):
     try:
@@ -37,8 +64,11 @@ def _make_model(*, nonuniform: bool):
         model._input_data.sideAreaC = np.array([[0.0004, 0.0006, 0.0009, 0.0011, 0.0013]])
         model._input_data.resistanceWire = np.array([[1.0e-6, 2.0e-6, 3.0e-6, 4.0e-6]])
     model.calculate(verbose=False)
+    global_results = model.get_global_results()
+    assert global_results["converged"] is True
+    assert abs(float(global_results["Uout"]) - 0.8) <= 1.0e-9
+    assert int(global_results["iteration_count"]) < 50
     return model
-
 
 def _reconstruct_fvm_joule(potential, resistivity, lengths, cross_area, left_terminal, right_terminal):
     conductance = cross_area / (0.5 * (resistivity[:-1] + resistivity[1:]) * lengths[:-1])
@@ -89,6 +119,46 @@ def test_fixed_current_is_explicitly_rejected():
     )
 
 
+def test_low_temperature_fixed_voltage_auto_skips_zero_emission_case():
+    queue = mp.Queue()
+    proc = mp.Process(target=_run_low_temperature_fixed_voltage_case, args=(queue,))
+    proc.start()
+    proc.join(2.0)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(5.0)
+        raise AssertionError("Low-temperature fixed-voltage ThermoCalc calculation did not return.")
+    assert proc.exitcode == 0
+    result = queue.get_nowait()
+    global_results = result["global"]
+    assert global_results["zero_emission_skipped"] is True
+    assert global_results["converged"] is True
+    assert global_results["Iout"] == 0.0
+    assert global_results["Uout"] == 0.8
+    assert np.all(result["J"] == 0.0)
+    assert np.all(result["joulePowerE"] == 0.0)
+    assert np.all(result["joulePowerC"] == 0.0)
+
+
+def test_low_temperature_fixed_voltage_cpp_iteration_returns_when_guard_disabled():
+    queue = mp.Queue()
+    proc = mp.Process(target=_run_low_temperature_fixed_voltage_case, args=(queue, True))
+    proc.start()
+    proc.join(3.0)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(5.0)
+        raise AssertionError("C++ low-temperature fixed-voltage ThermoCalc calculation did not return.")
+    assert proc.exitcode == 0
+    result = queue.get_nowait()
+    global_results = result["global"]
+    assert global_results["zero_emission_skipped"] is False
+    assert np.isfinite(global_results["Iout"])
+    assert np.isfinite(global_results["Uout"])
+    assert np.all(np.isfinite(result["J"]))
+    assert np.all(np.isfinite(result["joulePowerE"]))
+    assert np.all(np.isfinite(result["joulePowerC"]))
+
 def test_uniform_and_nonuniform_runtime_interfaces():
     uniform = _make_model(nonuniform=False)
     uniform_results = uniform.get_tec_results(0)
@@ -121,5 +191,7 @@ def test_uniform_and_nonuniform_runtime_interfaces():
 if __name__ == "__main__":
     test_input_shape_validation()
     test_fixed_current_is_explicitly_rejected()
+    test_low_temperature_fixed_voltage_auto_skips_zero_emission_case()
+    test_low_temperature_fixed_voltage_cpp_iteration_returns_when_guard_disabled()
     test_uniform_and_nonuniform_runtime_interfaces()
     print("ThermoCalc interface checks passed.")

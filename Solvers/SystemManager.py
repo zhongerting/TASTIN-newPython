@@ -242,6 +242,7 @@ class SystemManager:
         fail_on_fluid_nonconvergence: bool = False,
         interface_relaxation: float = 1.0,
         interface_convergence_tol: float = None,
+        fluid_max_iter: int = None,
     ):
         if inner_iter < 1:
             raise ValueError("inner_iter 必须 >= 1")
@@ -251,6 +252,8 @@ class SystemManager:
             raise ValueError("interface_convergence_tol must be non-negative or None.")
         if interface_convergence_tol is not None and inner_iter < 2:
             raise ValueError("interface_convergence_tol requires inner_iter >= 2.")
+        if fluid_max_iter is not None and int(fluid_max_iter) < 1:
+            raise ValueError("fluid_max_iter must be positive or None.")
 
         t_start = self.global_time
         entry_fluid_sources = self._capture_fluid_sources()
@@ -311,9 +314,13 @@ class SystemManager:
                 if hasattr(self.fluid_solver, 'set_time'):
                     self.fluid_solver.set_time(coupling_time)
 
+                if fluid_max_iter is None:
+                    step_fluid_max_iter = 20 if inner_iter > 1 else 100
+                else:
+                    step_fluid_max_iter = int(fluid_max_iter)
                 fluid_converged = self.fluid_solver.step_Picard(
                     dt,
-                    max_iter=20 if inner_iter > 1 else 100,
+                    max_iter=step_fluid_max_iter,
                 )
                 diagnostics["fluid_converged_by_iteration"].append(bool(fluid_converged))
 
@@ -703,3 +710,4 @@ class SystemManager:
         self._run_couplers()
 
         logger.info(f"Global state successfully loaded. Resuming from t={self.global_time}s.")
+
