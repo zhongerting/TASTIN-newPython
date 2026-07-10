@@ -56,6 +56,16 @@ class OrbitalMatrixHeatSourceTests(unittest.TestCase):
 
         np.testing.assert_allclose(source.get_heat_flux(361.0), source.get_heat_flux(1.0), rtol=0.0, atol=1e-8)
 
+
+    def test_n18_sum_matrix_is_available_from_csv(self):
+        source = OrbitalMatrixHeatSource(
+            shape=(18,),
+            matrix_key="is58p5_w0_8p12_N18_sum",
+        )
+
+        self.assertEqual(source.get_heat_flux(1.0).shape, (18,))
+        self.assertAlmostEqual(float(source.get_heat_flux(1.0)[0]), 383.00606911, places=8)
+        self.assertAlmostEqual(float(source.get_heat_flux(1.0)[17]), 365.98554992, places=8)
     def test_shape_mismatch_raises(self):
         with self.assertRaisesRegex(ValueError, "column count"):
             OrbitalMatrixHeatSource(

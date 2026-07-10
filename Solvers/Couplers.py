@@ -501,14 +501,31 @@ class FluidSolidCouple:
                 1.0 / np.maximum(C_solid, self._local_implicit_min_capacitance)
                 + 1.0 / np.maximum(C_fluid, self._local_implicit_min_capacitance)
             )
+            local_implicit_fluid_source_sum_w = float(np.sum(explicit_arr - implicit_arr * relaxed_T_f)) if explicit_arr.size else 0.0
+            local_implicit_solid_boundary_sum_w = (
+                float(np.sum(self._local_implicit_flux_bc.q_flux)) if self._local_implicit_flux_bc is not None else 0.0
+            )
+            tau = np.divide(
+                1.0,
+                tau_inv,
+                out=np.full_like(tau_inv, np.inf, dtype=float),
+                where=tau_inv > 0.0,
+            )
+            coupling_tau_min_s = float(np.min(tau)) if tau.size else float("inf")
+            dt_over_tau_max = float(np.max(float(dt) * tau_inv)) if tau_inv.size else 0.0
             local_implicit_info = {
                 "local_implicit_dt": float(dt),
-                "local_implicit_dt_over_tau_max": float(np.max(float(dt) * tau_inv)) if tau_inv.size else 0.0,
+                "local_implicit_dt_over_tau_max": dt_over_tau_max,
                 "local_implicit_q_to_fluid_sum_w": float(np.sum(q_to_fluid)) if q_to_fluid.size else 0.0,
-                "local_implicit_energy_mismatch_w": float(np.sum(q_to_fluid - q_to_fluid)) if q_to_fluid.size else 0.0,
+                "local_implicit_fluid_source_sum_w": local_implicit_fluid_source_sum_w,
+                "local_implicit_solid_boundary_sum_w": local_implicit_solid_boundary_sum_w,
+                "local_implicit_energy_mismatch_w": local_implicit_fluid_source_sum_w + local_implicit_solid_boundary_sum_w,
                 "local_implicit_max_abs_delta_old_k": float(np.max(np.abs(delta_old))) if delta_old.size else 0.0,
                 "local_implicit_max_abs_delta_new_k": float(np.max(np.abs(delta_new))) if delta_new.size else 0.0,
                 "local_implicit_min_c_eff_j_per_k": float(np.min(C_eff)) if C_eff.size else 0.0,
+                "coupling_tau_min_s": coupling_tau_min_s,
+                "coupling_dt_limit_s": coupling_tau_min_s,
+                "dt_over_coupling_tau_max": dt_over_tau_max,
             }
         else:
             if self._local_implicit_flux_bc is not None:
@@ -588,8 +605,6 @@ class FluidSolidCouple:
         :return: 建议的时间步长
         """
         # 如果未提供固体热容信息，无法计算限制，返回上限
-        if getattr(self, "coupling_time_scheme", "current") == "local_implicit":
-            return max_limit
 
         if self.solid_node_capacitance is None:
             return max_limit

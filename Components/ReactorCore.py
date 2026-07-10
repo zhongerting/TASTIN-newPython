@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -246,7 +246,10 @@ class ReactorCore(BaseComponent):
                  barrel_reflector_gap_config: Optional[GlobalGapStructureConfig] = None,
                  T_space: float = 250.0,
                  alpha_tec: float = 0.5,
-                 enable_tec_coupled: bool = True):
+                 enable_tec_coupled: bool = True,
+                 tec_lookup_enabled: Optional[bool] = None,
+                 tec_lookup_db: Optional[str] = None,
+                 tec_lookup_regions: Optional[Tuple[str, ...]] = None):
         """
         初始化堆芯组件。
 
@@ -263,6 +266,9 @@ class ReactorCore(BaseComponent):
         self.tec_multipliers = dict(tec_multipliers) if tec_multipliers is not None else dict(tfe_multipliers)
         self.alpha_tec = alpha_tec
         self.enable_tec_coupled = enable_tec_coupled
+        self.tec_lookup_enabled = tec_lookup_enabled
+        self.tec_lookup_db = tec_lookup_db
+        self.tec_lookup_regions = tec_lookup_regions
         self.tec_topology = "series"
         self.tec_circuit_mode = "fixed_u"
         self.tec_circuit_groups: Dict[str, TecCircuitGroup] = {}
@@ -765,6 +771,9 @@ class ReactorCore(BaseComponent):
         thermo_calc = ThermoCalcModel(
             n_elements=total_virtual_elements,
             n_nodes=self.n_nodes,
+            lookup_db=self.tec_lookup_db,
+            enable_lookup=self.tec_lookup_enabled,
+            lookup_regions=self.tec_lookup_regions,
         )
         self._configure_thermo_calc_geometry_for(
             thermo_calc=thermo_calc,
@@ -1707,6 +1716,7 @@ class ReactorCore(BaseComponent):
                 )
 
             J_density = res.get('J', np.zeros(self.n_nodes)) * 1e4
+            tfe.electric_data.current_density = np.asarray(J_density, dtype=float).copy()
             phiE = res.get('phiE', np.zeros(self.n_nodes))
             TE = res.get('TE', np.zeros(self.n_nodes))
 
@@ -1722,6 +1732,14 @@ class ReactorCore(BaseComponent):
                 rho_emit=rho_e,
                 E_coll=E_c,
                 rho_coll=rho_c
+            )
+            tfe.update_electric_potential_diagnostics(
+                UE=UE_abs,
+                UC=UC_abs,
+                terminal_point_ue1=res.get('terminalPointUE1', 0.0),
+                terminal_point_ue2=res.get('terminalPointUE2', 0.0),
+                terminal_point_uc1=res.get('terminalPointUC1', 0.0),
+                terminal_point_uc2=res.get('terminalPointUC2', 0.0),
             )
             tfe.update_joule_power_sources(
                 Q_emitter_axial=joule_power_e,

@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import csv
 import json
 import os
@@ -55,6 +55,7 @@ from v13_startup_control import (  # noqa: E402
 
 
 V13_START_CASE_VERSION = "v13_start_cold_startup_v1"
+MAIN_TEC_SERIES_ELEMENT_COUNT = 34
 
 
 def parse_args() -> argparse.Namespace:
@@ -208,6 +209,59 @@ def _main_tec_series_element_count(core: Any) -> int:
     if main_group is not None and hasattr(main_group, "total_virtual_elements"):
         return max(1, int(getattr(main_group, "total_virtual_elements")))
     return 1
+
+
+def infer_startup_tec_mode(core: Any) -> Optional[str]:
+    """Extract TEC control mode from loaded restart state without mutating core."""
+    if core is None:
+        return None
+
+    if hasattr(core, "get_tec_circuit_global_results"):
+        try:
+            group_results = core.get_tec_circuit_global_results()
+        except Exception:  # pragma: no cover - defensive for partial restart objects
+            group_results = None
+        if isinstance(group_results, dict):
+            main_results = group_results.get("main")
+            mode = None
+            if isinstance(main_results, dict):
+                mode = main_results.get("mode")
+            if mode is not None:
+                return str(mode).strip().lower()
+
+    thermo_calc = getattr(core, "thermo_calc", None)
+    if thermo_calc is None:
+        return None
+    if not hasattr(thermo_calc, "get_global_results"):
+        return None
+    try:
+        results = thermo_calc.get_global_results()
+    except Exception:  # pragma: no cover - defensive for incompatible objects
+        return None
+    if not isinstance(results, dict):
+        return None
+    mode = results.get("mode")
+    if mode is None:
+        return None
+    return str(mode).strip().lower()
+
+
+def recover_startup_tec_state_from_restart(build: Dict[str, Any], core: Any) -> None:
+    """Recover startup TEC flags after loading a restart and avoid first-time configure."""
+    mode = infer_startup_tec_mode(core)
+    tec_enabled_on_restart = bool(getattr(core, "enable_tec_coupled", False))
+    is_fixed_u_loaded = mode == "fixed_u"
+
+    if not tec_enabled_on_restart and not is_fixed_u_loaded:
+        return
+
+    build["tec_has_been_enabled"] = True
+    try:
+        build["wire_resistance_ohm"] = get_wire_resistance(core)
+    except Exception:  # pragma: no cover - defensive for incomplete restart objects
+        build["wire_resistance_ohm"] = []
+    build["startup_main_tec_switched_to_fixed_voltage"] = bool(is_fixed_u_loaded)
+    build.setdefault("startup_main_tec_switch_time_s", None)
 
 
 def effective_startup_main_tec_load_resistance(core: Any, args: argparse.Namespace) -> float:
@@ -387,6 +441,16 @@ def build_case(args: argparse.Namespace) -> Dict[str, Any]:
         print(f"loading V13-start restart: {args.restart_in}", flush=True)
         system.load_global_state(args.restart_in)
         print(f"V13-start restart loaded at t={system.global_time:.6f} s.", flush=True)
+        recover_startup_tec_state_from_restart(build, core)
+        if bool(build.get("tec_has_been_enabled", False)):
+            apply_startup_wire_resistance_without_calculate(core, scale=float(args.wire_resistance_scale))
+            try:
+                build["wire_resistance_ohm"] = get_wire_resistance(core)
+            except Exception:  # pragma: no cover - defensive for incomplete restart objects
+                build["wire_resistance_ohm"] = []
+            recovered_mode = infer_startup_tec_mode(core)
+            if recovered_mode == "fixed_u" or str(getattr(args, "startup_main_tec_initial_mode", "fixed_r")).lower() == "fixed_u":
+                build["startup_main_tec_switched_to_fixed_voltage"] = True
         reset_v13_design_flows(build)
         set_v13_pump_total_head(build, float(args.pump_total_head_pa))
     else:
@@ -410,11 +474,13 @@ def build_case(args: argparse.Namespace) -> Dict[str, Any]:
     build["solid_ode_method"] = args.solid_ode_method
     build["solid_ode_methods"] = get_solid_ode_methods(build)
     build["wire_resistance_scale"] = float(args.wire_resistance_scale)
-    build["wire_resistance_ohm"] = []
+    build.setdefault("wire_resistance_ohm", [])
     build["startup_controller"] = V13StartupController(startup_config_from_args(args))
     if float(args.initial_cs_fraction) > 0.0:
         build["startup_controller"].seed_cesium_conditioning(float(system.global_time), float(args.initial_cs_fraction))
-    build["tec_has_been_enabled"] = False
+    build.setdefault("tec_has_been_enabled", False)
+    build.setdefault("startup_main_tec_switched_to_fixed_voltage", False)
+    build.setdefault("startup_main_tec_switch_time_s", None)
     return build
 
 
@@ -500,6 +566,31 @@ def startup_tec_global_diagnostics(core: Any) -> Dict[str, Any]:
 
 
 
+def estimate_tec_wire_joule_loss_w(record: Dict[str, Any], core: Optional[Any] = None, *, main_tec_series_element_count: int = MAIN_TEC_SERIES_ELEMENT_COUNT) -> float:
+    """Estimate TEC lead Joule loss from circuit current and lead-wire resistance."""
+    current_a = _finite_record_value(record, "tec_total_current_a", "tec_main_current_a")
+    if current_a is None:
+        return 0.0
+
+    wire_resistance = record.get("wire_resistance_ohm")
+    if wire_resistance is None and core is not None:
+        wire_resistance = get_wire_resistance(core)
+    try:
+        wire_resistance = np.asarray(wire_resistance, dtype=float)
+    except (TypeError, ValueError):
+        wire_resistance = None
+    if wire_resistance is not None and wire_resistance.size > 0:
+        wire_resistance_ohm = float(np.sum(wire_resistance))
+    else:
+        wire_resistance_ohm = None
+    if wire_resistance_ohm is None or not np.isfinite(wire_resistance_ohm):
+        return 0.0
+    if main_tec_series_element_count <= 0:
+        return 0.0
+
+    return float(main_tec_series_element_count) * (float(current_a) / 2.0) ** 2 * float(wire_resistance_ohm)
+
+
 def startup_energy_residual_diagnostics(record: Dict[str, Any]) -> Dict[str, float]:
     """Derived V13-start energy diagnostics for transient storage tracking."""
     core_heat = _finite_record_value(record, "core_heat_power_w", "startup_thermal_power_w")
@@ -511,9 +602,12 @@ def startup_energy_residual_diagnostics(record: Dict[str, Any]) -> Dict[str, flo
 
     core_minus_coolant_minus_electric = float("nan")
     core_minus_radiator_minus_electric = float("nan")
+    corrected_core_energy_residual = float("nan")
+    corrected_loop_energy_residual = float("nan")
     radiator_minus_coolant = float("nan")
     core_residual_rel = float("nan")
     radiator_balance_rel = float("nan")
+    wire_loss = estimate_tec_wire_joule_loss_w(record)
 
     if core_heat is not None and coolant_dh is not None:
         core_minus_coolant_minus_electric = core_heat - coolant_dh - electric
@@ -526,9 +620,22 @@ def startup_energy_residual_diagnostics(record: Dict[str, Any]) -> Dict[str, flo
     if core_heat is not None and q_radiator is not None:
         core_minus_radiator_minus_electric = core_heat - q_radiator - electric
 
+    radiator_external_heat = _finite_record_value(record, "radiator_tube_external_heat_w")
+    if radiator_external_heat is None:
+        radiator_external_heat = 0.0
+
+    if core_heat is not None and coolant_dh is not None:
+        corrected_core_energy_residual = core_heat - coolant_dh - electric - wire_loss
+
+    if core_heat is not None and q_radiator is not None:
+        corrected_loop_energy_residual = core_heat + radiator_external_heat - q_radiator - electric - wire_loss
+
     return {
         "core_heat_minus_coolant_enthalpy_minus_electric_w": float(core_minus_coolant_minus_electric),
         "core_heat_minus_radiator_minus_electric_w": float(core_minus_radiator_minus_electric),
+        "corrected_core_energy_residual_w": float(corrected_core_energy_residual),
+        "corrected_loop_energy_residual_w": float(corrected_loop_energy_residual),
+        "tec_wire_joule_loss_w": float(wire_loss),
         "radiator_minus_coolant_enthalpy_w": float(radiator_minus_coolant),
         "core_energy_storage_residual_rel": float(core_residual_rel),
         "radiator_coolant_balance_rel": float(radiator_balance_rel),
@@ -680,10 +787,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-

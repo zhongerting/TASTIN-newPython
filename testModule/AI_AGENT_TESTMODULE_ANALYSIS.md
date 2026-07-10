@@ -2309,17 +2309,20 @@ Restart timestamp note: in the stopped `plus36000s` run, the CSV history reached
 
 ### 2026-06-29 residual diagnostic fields added to V13 startup runner
 
-`testModule/run_v13_start_case.py` now writes derived energy residual diagnostics into every startup history row and `latest_state.latest_record`:
+`testModule/run_v13_start_case.py` now writes derived energy residual diagnostics into every startup history row and `latest_state.json` `latest_record`:
 
 ```text
 core_heat_minus_coolant_enthalpy_minus_electric_w
 core_heat_minus_radiator_minus_electric_w
+corrected_core_energy_residual_w = core_heat_power - coolant_enthalpy_rise - terminal_electric - tec_wire_joule_loss
+corrected_loop_energy_residual_w = core_heat_power + radiator_tube_external_heat_w - q_radiator_total_w - terminal_electric - tec_wire_joule_loss
 radiator_minus_coolant_enthalpy_w
+tec_wire_joule_loss_w
 core_energy_storage_residual_rel
 radiator_coolant_balance_rel
 ```
 
-These fields formalize the manual residual check used for the stopped `h_eq=29` fixed-U continuation. For transient runs, interpret `core_heat_minus_coolant_enthalpy_minus_electric_w` as the unresolved system storage term unless the radiator/coolant balance or TEC convergence diagnostics indicate a separate failure. The radiator/coolant closure field should stay small compared with radiator heat rejection when the loop energy accounting is healthy.
+`q_radiator_total_w - coolant_enthalpy_rise_w` remains the main loop closure check for radiator/coolant exchange. `radiator_tube_external_heat_w` is an explicit heat input term and is **not** treated as an error term. For transient runs, interpret `corrected_core_energy_residual_w` as the storage imbalance of core plus connected structure after excluding wire Joule loss; `corrected_loop_energy_residual_w` includes the explicit external heat input as a source. Fins in this runner are quasi-steady and do not add a separate storage term in the startup residual bookkeeping.
 
 Verification:
 
@@ -2327,3 +2330,76 @@ Verification:
 E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe testModule\test_v13_startup_control.py
 E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe -m py_compile testModule\run_v13_start_case.py testModule\test_v13_startup_control.py
 ```
+
+### 2026-06-30 local implicit fluid-solid dt limit
+
+`SystemManager.compute_adaptive_dt()` now receives a strict fluid-solid coupling time-scale limit even when V11/V13 use `solid_ode_method=implicit_euler` and `fluid_solid_coupling_scheme=local_implicit`. The limiting coupler value is `safety_factor * min(C_eff / lambda)` after the first coupler execution. This prevents thin radiator/header walls from being advanced only by `max_dt` when local implicit exchange is enabled.
+
+Verification added:
+
+```text
+E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe -m unittest testModule.test_local_implicit_heat_exchange testModule.test_system_manager_lifecycle
+```
+
+For V11/V13 timing comparisons, record `coupling_tau_min_s`, `coupling_dt_limit_s`, and `dt_over_coupling_tau_max` from coupler diagnostics when diagnosing unexpectedly small adaptive time steps or wall/fluid temperature reversals.
+
+### 2026-07-10 V14_10kW powered debug baseline
+
+`testModule/Full_Loop_Cases_10kW/` is the active 10 kW V14 heat-pipe-radiator package. It should be treated as a local branch of the full-loop work: keep new 10 kW modeling changes inside this directory unless the user explicitly asks to promote them back into `Full_Loop_Cases` or shared component code.
+
+Primary docs:
+
+```text
+testModule/Full_Loop_Cases_10kW/README.md
+testModule/Full_Loop_Cases_10kW/V14_210kW_debug/README.md
+testModule/Full_Loop_Cases_10kW/V14_210kW_debug/TUNING_LOG.md
+```
+
+Primary powered runner:
+
+```text
+testModule/Full_Loop_Cases_10kW/V14_210kW_debug/run_v14_210kw_debug.py
+```
+
+Run assumptions used by the current debug baseline:
+
+```text
+core power = 210000 W
+loop flow target = 2.46 kg/s
+solid solver = implicit_euler
+space temperature = 4 K
+external orbital heat flux = disabled
+TEC lookup = enabled for powered tuning runs
+main TEC target = about 206 A and 10.44 kW net electric power
+```
+
+Use direct runner invocations for `V14_210kW_debug`. Avoid `python -m unittest` for this staged debug workflow; it previously stalled and is not the intended entry. For syntax-level checks, use `py_compile` on the edited runner/builder files.
+
+Current best restart:
+
+```text
+testModule/Full_Loop_Cases_10kW/V14_210kW_debug/runs/final_eps07475_u50p65_wire0335_1200s_from7964/stage_01_restart.npz
+```
+
+Current best parameters:
+
+```text
+radiator_emissivity = 0.7475
+tec_voltage = 50.65 V
+wire_resistance_scale = 0.335
+hp_up_view_factor = 0.0
+upper_hp_down_view_factor = 0.3
+lower_hp_down_view_factor = 0.4
+```
+
+Endpoint summary at `t=9163.85 s`:
+
+```text
+core inlet/outlet = 754.738 / 845.773 K
+TEC current = 206.569 A
+TEC net electric power = 10.463 kW
+total radiator rejection = 195.212 kW
+required pump head = 27.880 kPa
+```
+
+Interpretation: the result is close to the requested `754.45 K` inlet, `845.65 K` outlet, `206 A`, and `10.44 kW`, but remains slightly hot and slightly high in current/power. Treat it as a working continuation baseline. If tighter calibration is required, make small changes to radiator emissivity or wire-resistance scale and validate with at least a 1200 s window; 1 s electrical checks are not reliable final evidence for this case.

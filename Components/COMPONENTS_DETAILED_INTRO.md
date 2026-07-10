@@ -607,6 +607,9 @@ Delta p_hp = K_eq * 0.5 * rho * v_nom^2
 | `T_space` | 外部空间温度 |
 | `alpha_tec` | TEC 热源亚松弛系数 |
 | `enable_tec_coupled` | 是否启用 TEC 耦合 |
+| `tec_lookup_enabled` | Optional explicit ThermoCalc lookup switch; `None` keeps environment-variable behavior |
+| `tec_lookup_db` | Optional explicit ThermoCalc lookup database path passed to `ThermoCalcModel` |
+| `tec_lookup_regions` | Optional lookup region tuple/list passed to `ThermoCalcModel` |
 
 主要接口：
 
@@ -1078,3 +1081,21 @@ TFEUnit.pre_step()
 当前处理是在读取内部 moderator 热流前，对该 TFE 的内部 `couplers` 逐个调用 `sync()`。这只修正生命周期顺序，不改变 `GapCouple2D` 的物理模型，也不把间隙边界简化为纯定温边界。验证状态：`testModule.test_reactorcore_moderator_sync` 已覆盖 `ReactorCore.pre_step()` 不应消费零热阻边界；V13 no-TEC 5 s 运行时监视中零热阻边界求解事件为 0。
 
 同日补充修复了 `TFEUnit._build_couplers()` 构建阶段的同类问题。氦气隙 `collector_iclad_gap` 建立后，冷却剂流固耦合会为了获取套管边界热容调用 `InnerClad/OuterClad.initialize_state()`；该初始化会计算边界热流，因此必须在调用前同步已建立的内部耦合器。当前 `TFEUnit` 会在该初始化前调用 `_sync_existing_couplers()`，避免 `Center_InnerClad.left` 等边界消费 `R_ext=0, T_ext=300 K` 的构造期占位值。验证状态：`testModule.test_reactorcore_moderator_sync` 已覆盖 V13 构建阶段；V13 no-TEC 60 s 精确监视中 `R_ext=0, T_ext=300 K` 占位边界事件为 0。
+
+## 2026-07-07 TFE ThermoCalc electrode potential diagnostics
+
+`TFEUnit.ElectricFieldData` now keeps raw ThermoCalc electrode potentials in addition to the historical electric-field diagnostics. The older `emitter_voltage` and `collector_voltage` names are retained for compatibility, but they store axial electric field gradients from `electric_field_from_node_potential()`, not raw electrode potentials.
+
+New restart keys under each `.../TFEs/<name>/electric/` prefix are:
+
+```text
+emitter_potential
+collector_potential
+emitter_collector_voltage_drop
+terminal_point_ue1
+terminal_point_ue2
+terminal_point_uc1
+terminal_point_uc2
+```
+
+`ReactorCore._apply_tec_group_results()` fills these fields directly from `ThermoCalcModel.get_tec_results()` whenever TEC results are applied. Old restart files remain loadable because missing keys keep the zero-initialized defaults.

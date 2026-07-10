@@ -1,6 +1,7 @@
 import numpy as np
 import os
 import sys
+from types import SimpleNamespace
 
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if root_dir not in sys.path:
@@ -10,6 +11,13 @@ from Components.tec_electric import (
     distribute_axial_power_by_volume,
     electric_field_from_node_potential,
     joule_power_from_electric_field,
+)
+from Components.TFEUnit import (
+    BoundaryConditionData,
+    ElectricFieldData,
+    NeutronicData,
+    PlasmaCouplingData,
+    TFEUnit,
 )
 
 
@@ -122,6 +130,50 @@ def test_distribute_axial_power_by_volume_rejects_invalid_inputs():
     )
 
 
+def test_tfe_persists_thermocalc_electrode_potentials():
+    tfe = object.__new__(TFEUnit)
+    tfe.name = "FakeTFE"
+    tfe.mesh = SimpleNamespace(n_axial=3)
+    tfe.neutronic_data = NeutronicData()
+    tfe.electric_data = ElectricFieldData(
+        emitter_voltage=np.zeros(3),
+        emitter_resistivity=np.zeros(3),
+        collector_voltage=np.zeros(3),
+        collector_resistivity=np.zeros(3),
+        current_density=np.zeros(3),
+        emitter_joule_heat=np.zeros(3),
+        collector_joule_heat=np.zeros(3),
+    )
+    tfe.plasma_data = PlasmaCouplingData(
+        emitter_work_function=np.zeros(3),
+        collector_work_function=np.zeros(3),
+        barrier_voltage_drop=np.zeros(3),
+        emitter_temperature=np.zeros(3),
+        electron_cooling_flux=np.zeros(3),
+        electron_heating_flux=np.zeros(3),
+    )
+    tfe.boundary_data = BoundaryConditionData(moderator_temperature=np.zeros(3))
+
+    tfe.update_electric_potential_diagnostics(
+        UE=np.array([4.0, 3.0, 2.0]),
+        UC=np.array([1.0, 1.5, 1.75]),
+        terminal_point_ue1=4.2,
+        terminal_point_ue2=1.8,
+        terminal_point_uc1=0.9,
+        terminal_point_uc2=1.6,
+    )
+
+    state = tfe.get_state_dict("Core/TFEs/FakeTFE")
+
+    assert np.allclose(state["Core/TFEs/FakeTFE/electric/emitter_potential"], [4.0, 3.0, 2.0])
+    assert np.allclose(state["Core/TFEs/FakeTFE/electric/collector_potential"], [1.0, 1.5, 1.75])
+    assert np.allclose(state["Core/TFEs/FakeTFE/electric/emitter_collector_voltage_drop"], [3.0, 1.5, 0.25])
+    assert np.allclose(state["Core/TFEs/FakeTFE/electric/terminal_point_ue1"], [4.2])
+    assert np.allclose(state["Core/TFEs/FakeTFE/electric/terminal_point_ue2"], [1.8])
+    assert np.allclose(state["Core/TFEs/FakeTFE/electric/terminal_point_uc1"], [0.9])
+    assert np.allclose(state["Core/TFEs/FakeTFE/electric/terminal_point_uc2"], [1.6])
+
+
 if __name__ == "__main__":
     test_uniform_linear_matches_legacy_total_joule()
     test_nonuniform_linear_gives_constant_field()
@@ -129,3 +181,4 @@ if __name__ == "__main__":
     test_plasma_flux_power_uses_emitter_area_basis()
     test_distribute_axial_power_by_volume_conserves_each_column()
     test_distribute_axial_power_by_volume_rejects_invalid_inputs()
+    test_tfe_persists_thermocalc_electrode_potentials()

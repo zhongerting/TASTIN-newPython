@@ -228,15 +228,31 @@ class ThermoCalcModel:
     负责处理几何参数分配、状态初始化、底层 C++ 对象通信以及结果提取。
     """
 
-    def __init__(self, n_elements: int, n_nodes: int):
+    def __init__(self,
+                 n_elements: int,
+                 n_nodes: int,
+                 lookup_db: str = None,
+                 enable_lookup: bool = None,
+                 lookup_regions=None):
         self.N_elem = n_elements
         self.n_node = n_nodes
 
-        lookup_db = os.environ.get("THERMOCALC_LOOKUP_DB")
-        if lookup_db and _env_flag("THERMOCALC_ENABLE_LOOKUP"):
-            loaded_blocks = load_emission_lookup_database(lookup_db, enable=True)
-            logger.info("Loaded ThermoCalc emission lookup database: %s blocks", loaded_blocks)
-
+        if enable_lookup is None:
+            enable_lookup = _env_flag("THERMOCALC_ENABLE_LOOKUP")
+        selected_lookup_db = lookup_db if lookup_db is not None else os.environ.get("THERMOCALC_LOOKUP_DB")
+        self.lookup_db = selected_lookup_db
+        self.lookup_enabled = bool(enable_lookup)
+        self.lookup_regions = lookup_regions
+        self.lookup_loaded_blocks = 0
+        if selected_lookup_db and self.lookup_enabled:
+            self.lookup_loaded_blocks = load_emission_lookup_database(
+                selected_lookup_db,
+                enable=True,
+                regions=lookup_regions,
+            )
+            logger.info("Loaded ThermoCalc emission lookup database: %s blocks", self.lookup_loaded_blocks)
+        elif HAS_TE_SOLVER and hasattr(te_solver, "set_emission_lookup_enabled"):
+            te_solver.set_emission_lookup_enabled(False)
         # 保存底层的 C++ 计算核心对象
         self._circuit = None
         self._input_data = te_solver.InputData()

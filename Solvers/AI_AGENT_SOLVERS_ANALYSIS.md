@@ -1,6 +1,6 @@
 # Solvers - Codex 必读入口
 
-> 适用范围：`Solvers/` 目录。  
+> 适用范围：`Solvers/` 目录。
 > 最后按源码校验日期：2026-05-31。
 
 ## 1. Codex 使用说明
@@ -166,7 +166,7 @@ manager.step(dt=0.1, inner_iter=5, convergence_tol=1.0e-3)
 
 `FluidSolidCouple` has an opt-in `coupling_time_scheme="local_implicit"` mode. The default remains `"current"`, so existing builders, tests, and restart workflows keep their previous Robin-boundary plus fluid semi-implicit-source behavior.
 
-When local implicit mode is enabled, `SystemManager.step(dt, ...)` passes `dt` into `FluidSolidCouple.execute(...)`. The coupler solves the local two-capacitance heat exchange analytically for each interface node, applies `q_to_solid = -q_to_fluid` through a solid-side `FluxBC`, and adds `q_to_fluid` to the fluid channel with zero implicit coefficient. This removes the explicit fluid-solid exchange time constant from `FluidSolidCouple.get_max_stable_dt()`, but does not override fluid hydraulic stability, `max_dt`, or convergence-based time-step reductions.
+When local implicit mode is enabled, `SystemManager.step(dt, ...)` passes `dt` into `FluidSolidCouple.execute(...)`. The coupler solves the local two-capacitance heat exchange analytically for each interface node, applies `q_to_solid = -q_to_fluid` through a solid-side `FluxBC`, and adds `q_to_fluid` to the fluid channel with zero implicit coefficient. As of 2026-06-30, this no longer removes the fluid-solid physical time-scale limit from adaptive stepping: `FluidSolidCouple.get_max_stable_dt()` still returns `safety_factor * min(C_eff / lambda)` after the first `execute()`, even for `local_implicit`, to keep thin-wall fluid-solid exchange resolved.
 
 Do not enable local implicit mode on a `FluidSolidCouple` without `solid_node_capacitance`; the coupler intentionally raises an error instead of silently falling back.
 
@@ -211,3 +211,14 @@ Fresh post-optimization checks:
 - Supplemental same-script solve-method comparison measured BDF at about `1.971 s/step` for 1D 4000 nodes and `0.0574 s/step` for 2D 8100 nodes; RK45 measured about `0.0101 s/step` for 1D and `0.00282 s/step` for 2D, but RK45 is a different explicit method and should not be treated as an accuracy-equivalent replacement for the fixed-step implicit path.
 - A direct `HeatPipe2D` `implicit_euler` smoke step with real `HPwithFin`/`SodiumHP` materials passed. The script-level `SystemManager.step()` path returns `None` on success for that dummy network, so smoke checks should not require a strict `True` return value.
 - V13 no-TEC `implicit_euler`, `max_dt=0.1 s`, `duration=1 s` completed in `4.961685 s` wall time. Compared with the pre-optimization `implicit_euler` result, key deltas were numerical roundoff level: core outlet `-1.79e-08 K`, coolant enthalpy rise `-1.54e-05 W`, radiator total heat `-8.84e-07 W`.
+
+## 12. 2026-06-30 local implicit coupling dt limit
+
+`FluidSolidCouple.get_max_stable_dt()` now treats `local_implicit` as a physical time-resolution limit instead of returning `max_limit`. After `_last_lambda` is available, both `current` and `local_implicit` modes use:
+
+```text
+C_eff = C_solid * C_fluid / (C_solid + C_fluid)
+dt_coupler = safety_factor * min(C_eff / lambda)
+```
+
+This keeps `implicit_euler` solid solves in the `SystemManager.compute_adaptive_dt()` loop without relying only on user `max_dt`. It is intentionally conservative for thin radiator walls, where a large global step can cross the wall/fluid exchange time scale even if the local implicit update remains numerically stable. Coupler diagnostics now include `coupling_tau_min_s`, `coupling_dt_limit_s`, and `dt_over_coupling_tau_max` for local implicit exchange.

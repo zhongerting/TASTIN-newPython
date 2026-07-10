@@ -55,10 +55,20 @@ class NeutronicData:
 class ElectricFieldData:
     """电场与焦耳热计算数据域 (长度均为 n_axial)"""
     # 电场分布
-    emitter_voltage: np.ndarray = field(default_factory=lambda: np.array([]))  # [V]
+    # Historical names: emitter_voltage/collector_voltage store electric field [V/m].
+    emitter_voltage: np.ndarray = field(default_factory=lambda: np.array([]))  # [V/m]
     emitter_resistivity: np.ndarray = field(default_factory=lambda: np.array([]))  # [Ohm*m]
-    collector_voltage: np.ndarray = field(default_factory=lambda: np.array([]))  # [V]
+    collector_voltage: np.ndarray = field(default_factory=lambda: np.array([]))  # [V/m]
     collector_resistivity: np.ndarray = field(default_factory=lambda: np.array([]))  # [Ohm*m]
+
+    # ThermoCalc electrode potentials and terminal-point voltages [V].
+    emitter_potential: np.ndarray = field(default_factory=lambda: np.array([]))
+    collector_potential: np.ndarray = field(default_factory=lambda: np.array([]))
+    emitter_collector_voltage_drop: np.ndarray = field(default_factory=lambda: np.array([]))
+    terminal_point_ue1: np.ndarray = field(default_factory=lambda: np.array([]))
+    terminal_point_ue2: np.ndarray = field(default_factory=lambda: np.array([]))
+    terminal_point_uc1: np.ndarray = field(default_factory=lambda: np.array([]))
+    terminal_point_uc2: np.ndarray = field(default_factory=lambda: np.array([]))
 
     # 局部电流密度 [A/m^2]
     current_density: np.ndarray = field(default_factory=lambda: np.array([]))
@@ -232,6 +242,13 @@ class TFEUnit(BaseComponent):
             emitter_resistivity=np.zeros(nz),
             collector_voltage=np.zeros(nz),
             collector_resistivity=np.zeros(nz),
+            emitter_potential=np.zeros(nz),
+            collector_potential=np.zeros(nz),
+            emitter_collector_voltage_drop=np.zeros(nz),
+            terminal_point_ue1=np.zeros(1),
+            terminal_point_ue2=np.zeros(1),
+            terminal_point_uc1=np.zeros(1),
+            terminal_point_uc2=np.zeros(1),
             current_density=np.zeros(nz),
             emitter_joule_heat=np.zeros(nz),
             collector_joule_heat=np.zeros(nz)
@@ -692,6 +709,24 @@ class TFEUnit(BaseComponent):
         self.electric_data.collector_voltage[:] = E_coll
         self.electric_data.collector_resistivity[:] = rho_coll
 
+    def update_electric_potential_diagnostics(self,
+                                              UE: np.ndarray,
+                                              UC: np.ndarray,
+                                              terminal_point_ue1: float = 0.0,
+                                              terminal_point_ue2: float = 0.0,
+                                              terminal_point_uc1: float = 0.0,
+                                              terminal_point_uc2: float = 0.0):
+        """Store raw ThermoCalc electrode potentials for restart/postprocessing."""
+        UE = np.asarray(UE, dtype=float)
+        UC = np.asarray(UC, dtype=float)
+        self.electric_data.emitter_potential = UE.copy()
+        self.electric_data.collector_potential = UC.copy()
+        self.electric_data.emitter_collector_voltage_drop = (UE - UC).copy()
+        self.electric_data.terminal_point_ue1 = np.array([terminal_point_ue1], dtype=float)
+        self.electric_data.terminal_point_ue2 = np.array([terminal_point_ue2], dtype=float)
+        self.electric_data.terminal_point_uc1 = np.array([terminal_point_uc1], dtype=float)
+        self.electric_data.terminal_point_uc2 = np.array([terminal_point_uc2], dtype=float)
+
     def update_joule_power_sources(self,
                                    Q_emitter_axial: np.ndarray,
                                    Q_collector_axial: np.ndarray,
@@ -778,6 +813,13 @@ class TFEUnit(BaseComponent):
             'emitter_resistivity',
             'collector_voltage',
             'collector_resistivity',
+            'emitter_potential',
+            'collector_potential',
+            'emitter_collector_voltage_drop',
+            'terminal_point_ue1',
+            'terminal_point_ue2',
+            'terminal_point_uc1',
+            'terminal_point_uc2',
             'current_density',
             'emitter_joule_heat',
             'collector_joule_heat',
@@ -861,6 +903,8 @@ class TFEUnit(BaseComponent):
     def save_step_state(self):
         electric_attrs = [
             'emitter_voltage', 'emitter_resistivity', 'collector_voltage', 'collector_resistivity',
+            'emitter_potential', 'collector_potential', 'emitter_collector_voltage_drop',
+            'terminal_point_ue1', 'terminal_point_ue2', 'terminal_point_uc1', 'terminal_point_uc2',
             'current_density', 'emitter_joule_heat', 'collector_joule_heat'
         ]
         plasma_attrs = [
@@ -955,6 +999,8 @@ class TFEUnit(BaseComponent):
         # 3. 电学数据 (1D 数组批量提取)
         electric_attrs = [
             'emitter_voltage', 'emitter_resistivity', 'collector_voltage', 'collector_resistivity',
+            'emitter_potential', 'collector_potential', 'emitter_collector_voltage_drop',
+            'terminal_point_ue1', 'terminal_point_ue2', 'terminal_point_uc1', 'terminal_point_uc2',
             'current_density', 'emitter_joule_heat', 'collector_joule_heat'
         ]
         for attr in electric_attrs:
@@ -996,6 +1042,8 @@ class TFEUnit(BaseComponent):
         # --- 3. 恢复电学数据 (使用 [:] 原地更新以保护内存地址) ---
         electric_attrs = [
             'emitter_voltage', 'emitter_resistivity', 'collector_voltage', 'collector_resistivity',
+            'emitter_potential', 'collector_potential', 'emitter_collector_voltage_drop',
+            'terminal_point_ue1', 'terminal_point_ue2', 'terminal_point_uc1', 'terminal_point_uc2',
             'current_density', 'emitter_joule_heat', 'collector_joule_heat'
         ]
         for attr in electric_attrs:

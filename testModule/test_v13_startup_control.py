@@ -1,6 +1,7 @@
-﻿import math
+import math
 import os
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -13,6 +14,9 @@ if ROOT_DIR not in sys.path:
 from testModule.run_v13_start_case import (
     configure_startup_main_tec_circuit,
     effective_startup_main_tec_load_resistance,
+    estimate_tec_wire_joule_loss_w,
+    prepare_startup_step,
+    recover_startup_tec_state_from_restart,
     maybe_switch_startup_tec_to_fixed_voltage,
     parse_args,
     startup_energy_residual_diagnostics,
@@ -28,6 +32,8 @@ from testModule.v13_startup_control import (
     reset_solid_temperatures,
     shield_qsss_from_matrix,
 )
+
+import testModule.run_v13_start_case as run_case_module
 
 
 class FakeGapCoupler:
@@ -482,6 +488,106 @@ def test_startup_controller_can_seed_existing_cesium_conditioning_state():
     assert_close(seeded.tec_gap_h_eq_w_m2_k, 250.0)
 
 
+
+def test_estimate_tec_wire_joule_loss_w_uses_current_and_wire_series():
+    record = {"tec_total_current_a": 2000.0, "wire_resistance_ohm": np.array([0.001, 0.0012, 0.0006, 0.0002])}
+
+    loss = estimate_tec_wire_joule_loss_w(record)
+
+    expected_wire_resistance = float(np.sum(record["wire_resistance_ohm"]))
+    expected = 34 * (2000.0 / 2.0) ** 2 * expected_wire_resistance
+    assert_close(loss, expected)
+
+
+def test_startup_energy_residual_diagnostics_includes_external_heat_and_wire_loss():
+    record = {
+        "core_heat_power_w": 110000.0,
+        "coolant_enthalpy_rise_w": 102978.091,
+        "tec_total_electric_power_w": 5692.628,
+        "q_radiator_total_w": 102977.955,
+        "radiator_tube_external_heat_w": 1200.0,
+        "wire_resistance_ohm": np.array([0.001, 0.001]),
+        "tec_total_current_a": 200.0,
+    }
+    diag = startup_energy_residual_diagnostics(record)
+    wire_loss = estimate_tec_wire_joule_loss_w(record)
+    assert_close(diag["tec_wire_joule_loss_w"], wire_loss)
+    assert_close(diag["corrected_core_energy_residual_w"], 110000.0 - 102978.091 - 5692.628 - wire_loss)
+    assert_close(diag["corrected_loop_energy_residual_w"], 110000.0 + 1200.0 - 102977.955 - 5692.628 - wire_loss)
+
+
+def test_restart_loaded_fixed_u_tec_state_flags_skip_startup_setup():
+    class RestartCore:
+        enable_tec_coupled = True
+
+        def __init__(self) -> None:
+            self.calls = []
+            self.tfes = {}
+
+        def get_tec_circuit_global_results(self):
+            return {"main": {"mode": "fixed_u"}}
+
+        def setup_tec_circuit(self, *args, **kwargs) -> None:
+            self.calls.append((args, kwargs))
+
+        def set_thermo_update_time(self, _value) -> None:
+            pass
+
+        def update_neutronic_power(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeController:
+        def evaluate(self, *_args, **_kwargs):
+            cmd = SimpleNamespace(
+                tec_enabled=True,
+                thermal_power_w=1.0,
+                fission_power_w=0.0,
+                decay_power_w=0.0,
+                tec_gap_h_eq_w_m2_k=29.0,
+            )
+            return cmd
+
+    class FakeConnector:
+        def __init__(self, t):
+            self.T = t
+
+    class FakeSystem:
+        def __init__(self, time):
+            self.global_time = time
+
+    args = SimpleNamespace(
+        startup_main_tec_initial_mode="fixed_r",
+        startup_main_tec_load_resistance_ohm=0.1,
+        startup_main_tec_load_resistance_scope="total",
+        startup_main_tec_switch_voltage_v=27.2,
+        startup_main_tec_i_guess_a=150.0,
+        target_voltage=27.2,
+        thermo_update_interval=0.5,
+    )
+
+    core = RestartCore()
+    build = {
+        "core": core,
+        "system": FakeSystem(12.0),
+        "startup_controller": FakeController(),
+        "core_inlet_connector": FakeConnector(710.0),
+        "tec_has_been_enabled": False,
+    }
+
+    old_get_wire_resistance = run_case_module.get_wire_resistance
+    run_case_module.get_wire_resistance = lambda _core: [0.001, 0.002, 0.0004, 0.0002]
+    try:
+        recover_startup_tec_state_from_restart(build, core)
+        prepare_startup_step(build, args)
+    finally:
+        run_case_module.get_wire_resistance = old_get_wire_resistance
+
+    assert build["tec_has_been_enabled"] is True
+    assert build["startup_main_tec_switched_to_fixed_voltage"] is True
+    assert build["wire_resistance_ohm"] == [0.001, 0.002, 0.0004, 0.0002]
+    assert core.calls == []
+
+
 if __name__ == "__main__":
     test_titam_startup_schedule_matches_document_milestones()
     test_shield_jettison_is_temperature_triggered_and_latched()
@@ -497,15 +603,11 @@ if __name__ == "__main__":
     test_shield_qsss_from_matrix_maps_six_side_partitions_to_eight_nodes()
     test_startup_main_tec_uses_fixed_resistance_then_switches_to_fixed_voltage()
     test_startup_tec_global_diagnostics_reports_convergence_and_finiteness()
+    test_estimate_tec_wire_joule_loss_w_uses_current_and_wire_series()
+    test_startup_energy_residual_diagnostics_includes_external_heat_and_wire_loss()
+    test_restart_loaded_fixed_u_tec_state_flags_skip_startup_setup()
     test_startup_energy_residual_diagnostics_tracks_storage_and_radiator_balance()
     test_startup_energy_residual_diagnostics_treats_missing_electric_as_zero()
     test_startup_main_tec_load_resistance_scope_can_use_per_tec_value()
     test_startup_controller_can_seed_existing_cesium_conditioning_state()
     print("V13 startup control checks passed.")
-
-
-
-
-
-
-

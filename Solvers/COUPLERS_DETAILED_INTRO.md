@@ -772,5 +772,17 @@ Implementation notes:
 - Local implicit mode requires `solid_node_capacitance`; missing capacitance is a hard error only when this mode is selected.
 - The original Robin `ResistanceBC` object is retained for compatibility but is set to near-adiabatic in local implicit mode.
 - A dedicated `FluxBC` applies `q_to_solid` on the solid side, while `FluidChannel.add_coupling_source_distribution()` receives `q_to_fluid` as an explicit bounded source with zero implicit coefficient.
-- `get_max_stable_dt()` no longer constrains the global step by the explicit fluid-solid exchange time constant in local implicit mode. Fluid CFL, `max_dt`, growth limits, and convergence controls still apply.
+- `get_max_stable_dt()` still constrains the global step by the fluid-solid physical exchange time scale in local implicit mode: after the first `execute()`, it returns `safety_factor * min(C_eff / lambda)`. This is a resolution/accuracy limit for thin-wall coupling, not a claim that the local implicit update is explicitly unstable.
 - Existing cases and restart files remain compatible because the default scheme is still `current`.
+
+## 17. 2026-06-30 local implicit adaptive dt contract
+
+`FluidSolidCouple` no longer bypasses adaptive time-step control when `coupling_time_scheme="local_implicit"`. Once `_last_lambda` has been populated by `execute()`, `get_max_stable_dt()` computes the same heat-capacity time scale used by the current scheme:
+
+```text
+C_fluid = rho * flow_area * node_length * cp
+C_eff = C_solid * C_fluid / (C_solid + C_fluid)
+dt = safety_factor * min(C_eff / lambda)
+```
+
+Before the first `execute()` or without `solid_node_capacitance`, the method still returns `max_limit` for compatibility. Local implicit diagnostics include `coupling_tau_min_s`, `coupling_dt_limit_s`, and `dt_over_coupling_tau_max`; use these fields to verify whether V11/V13 time steps are resolving thin-wall fluid-solid exchange.

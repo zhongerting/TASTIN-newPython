@@ -1,7 +1,7 @@
 # ThermoCalc Codex 快速接管手册
 
 > 更新时间：2026-06-25
-> 适用范围：`ThermoCalc/` 模块及其必要的上层集成点。  
+> 适用范围：`ThermoCalc/` 模块及其必要的上层集成点。
 > 使用方式：后续 Codex 首次接管 ThermoCalc 时先读本文件；只有在修改具体功能时，才按“修改场景索引”继续回查源码。
 
 ## 1. 先看结论
@@ -150,7 +150,7 @@ calc_emission_point_production(...)
 
 | 入口 | 行为 | 当前注意事项 |
 |---|---|---|
-| `ThermoCalcModel(n_elements, n_nodes)` | 创建 `te_solver.InputData()` 并填默认值 | 若 `te_solver` 未成功导入，实例化仍会失败 |
+| `ThermoCalcModel(n_elements, n_nodes, lookup_db=None, enable_lookup=None, lookup_regions=None)` | 创建 `te_solver.InputData()` 并填默认值；可显式控制 emission lookup 加载 | 若 `enable_lookup=None`，沿用 `THERMOCALC_ENABLE_LOOKUP` / `THERMOCALC_LOOKUP_DB` 环境变量行为 |
 | `set_temperatures(T_em, T_co)` | 校验 `(N_elem, n_node)`，保存副本；电路已构建时写入每根 `SingleTEC` | 当前绑定暴露了 `Temitter`、`Tcollector` |
 | `setup_circuit_mode(mode_str, target_value, I_guess=150.0)` | 接受 `fixed_R`、`fixed_U`、`parallel_fixed_u`、`parallel_fixed_i`、`parallel_load_curve`；对串联 `fixed_I` 明确抛出 `ValueError` | `parallel_load_curve` 推荐配合 `set_load_curve()` 使用 |
 | `set_load_curve(current_a, voltage_v)` | 设置并联外部负载 `U_load=f(I_total)` 曲线 | 电流轴必须一维、有限且严格递增 |
@@ -174,7 +174,7 @@ $env:THERMOCALC_ENABLE_LOOKUP = "1"
 $env:THERMOCALC_LOOKUP_DB = "E:\项目任务\五院-电源\source_code\TASTIN-python\ThermoCalc\emission_database"
 ```
 
-`THERMOCALC_PYD_DIR` 会被插入到 `sys.path` 的最高优先级，用于在不覆盖根目录 `.pyd` 的情况下测试新扩展。只有同时设置 `THERMOCALC_ENABLE_LOOKUP=1` 和 `THERMOCALC_LOOKUP_DB` 时，`ThermoCalcModel.__init__()` 才会自动加载查表数据库。
+`THERMOCALC_PYD_DIR` 会被插入到 `sys.path` 的最高优先级，用于在不覆盖根目录 `.pyd` 的情况下测试新扩展。`ThermoCalcModel.__init__()` 现在优先使用显式参数：`enable_lookup=True/False` 可覆盖环境变量，`lookup_db` 可覆盖 `THERMOCALC_LOOKUP_DB`，`lookup_regions` 可覆盖 `THERMOCALC_LOOKUP_REGIONS`。当 `enable_lookup=None` 时，才沿用旧的环境变量自动加载路径。
 
 | 字段 | 绑定层期望维度 | 单位 | 包装层默认值 |
 |---|---|---|---|
@@ -330,7 +330,7 @@ post_step()
 | 非均匀网格完整数学验证仍有限 | `dlE/dlC` 和侧面积已逐节点化，但 `VcalcFVM()` 的界面距离仍沿用现有离散公式 | 修改电势离散时补专项守恒验证 |
 | `set_rload()` 构建前行为不完整 | 包装层尝试写 `_input_data.Rload/R_load`，当前 `InputData` 未绑定这些字段 | 构建后可写 `CircuitTECs.Rload`；构建前优先使用 `setup_circuit_mode('fixed_R', ...)` |
 | 原始指针生命周期风险 | `create_circuit()` 为每根 TFE `new` 对象；相关析构函数当前为空 | 若处理长时运行内存问题，专项检查所有权与释放逻辑 |
-| 查表需要显式启用和数据库覆盖 | 根目录生产 pyd 已包含当前查表接口，但数据库仍由环境变量加载 | 运行查表路径必须设置 `THERMOCALC_ENABLE_LOOKUP=1` 和 `THERMOCALC_LOOKUP_DB` |
+| 查表需要显式启用和数据库覆盖 | 根目录生产 pyd 已包含当前查表接口；数据库可由 `ThermoCalcModel` 显式参数或环境变量加载 | 算例层优先使用显式 `tec_lookup_*` 配置；旧 runner 仍可设置 `THERMOCALC_ENABLE_LOOKUP=1` 和 `THERMOCALC_LOOKUP_DB` |
 | 查表表外点会回退解析 | `thermionicEmission::calc()` 查表 miss 后继续原解析法 | 若希望完全避免解析失败输出，应扩大/修正表覆盖或改电路层策略 |
 | setup 阶段首次 TEC 仍可能慢且打印失败 | V13 `apply_wire_resistance()` 会重建电路并立即 `calculate()`；30 s 查表计时中 setup 首算约 `7.81 s` 且打印失败信息 | 正式推进 warm-start 后 TEC 单次约 `1.8 s`；setup 首算需单独优化 |
 
@@ -488,8 +488,8 @@ testModule/test_thermocalc_lookup.py
 
 - `ThermoCalc/emission_database/pcs_0p02_5torr/` 是当前 `0.02-5.0 torr` 原始/审计库，保留诊断字段和 `.optimized.npz` sidecar，不提交 git。
 - `ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr/` 是当前推荐运行库，只保留 `J/Vd/delta_V/phiE/phiC/lookup_safe/zero_mask` 和轴，并提供 `.tedb` 给 C++ 直接加载，不提交 git。
-- 自动加载需要同时设置 `THERMOCALC_ENABLE_LOOKUP=1` 和 `THERMOCALC_LOOKUP_DB`；默认只加载 `core`，更广覆盖由 `THERMOCALC_LOOKUP_REGIONS` 控制。
-- 2026-06-25 起根目录生产 `.pyd` 已包含当前查表和并联接口；查表仍需通过 `THERMOCALC_ENABLE_LOOKUP`、`THERMOCALC_LOOKUP_DB` 和可选 `THERMOCALC_LOOKUP_REGIONS` 显式启用。
+- 自动加载仍可通过 `THERMOCALC_ENABLE_LOOKUP=1` 和 `THERMOCALC_LOOKUP_DB`；新算例层也可以用 `tec_lookup_enabled/tec_lookup_db/tec_lookup_regions` 直接传入。默认只加载 `core`，更广覆盖由显式 regions 或 `THERMOCALC_LOOKUP_REGIONS` 控制。
+- 2026-06-25 起根目录生产 `.pyd` 已包含当前查表和并联接口；查表需通过 `ThermoCalcModel` 显式参数或 `THERMOCALC_ENABLE_LOOKUP`、`THERMOCALC_LOOKUP_DB`、可选 `THERMOCALC_LOOKUP_REGIONS` 启用。
 
 ## 17. 2026-06-23 dense runtime v2 补充
 
@@ -1138,3 +1138,37 @@ core heat - coolant enthalpy rise - TEC electric power ~= 1.329 kW
 ```
 
 Because the TEC solve converged and the radiator/coolant energy balance is sub-watt, the remaining kilowatt-scale term is a system transient storage term in the still-warming core/TFE/structural solids. Do not diagnose this specific residual as a ThermoCalc C++ fixed-U convergence failure unless future runs show non-finite TEC outputs, failed convergence flags, large circuit iteration counts, or discontinuous jumps in electrical power.
+
+## 2026-07-07 UE/UC persistence in upper-level TFE state
+
+`ThermoCalcModel.get_tec_results(idx)` already exposes `UE`, `UC`, `terminalPointUE1`, `terminalPointUE2`, `terminalPointUC1`, and `terminalPointUC2`. The upper-level `ReactorCore` path now stores those values into each `TFEUnit` restart state as raw electrode-potential diagnostics:
+
+```text
+.../electric/emitter_potential
+.../electric/collector_potential
+.../electric/emitter_collector_voltage_drop
+.../electric/terminal_point_ue1
+.../electric/terminal_point_ue2
+.../electric/terminal_point_uc1
+.../electric/terminal_point_uc2
+```
+
+This is a Python-side persistence change only. It does not alter the C++ TEC solve, Joule heat authority, plasma heat-flux formula, or circuit convergence logic.
+
+## 2026-07-09 case-level lookup control
+
+`ReactorCore` now accepts `tec_lookup_enabled`, `tec_lookup_db`, and `tec_lookup_regions` and passes them to every `ThermoCalcModel` it creates. `testModule/Full_Loop_Cases_10kW.FullLoopCoreConfig` exposes the same fields so V14_10kW/V15-style full-loop cases can enable or disable lookup without relying on process-wide environment variables.
+
+Precedence:
+
+```text
+explicit enable_lookup True/False > THERMOCALC_ENABLE_LOOKUP
+explicit lookup_db              > THERMOCALC_LOOKUP_DB
+explicit lookup_regions         > THERMOCALC_LOOKUP_REGIONS
+```
+
+Verification:
+
+```text
+E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe -m unittest testModule.test_thermocalc_lookup_config testModule.test_full_loop_10kw_core_geometry.FullLoop10kWCoreGeometryTests.test_v14_10kw_tec_lookup_config_reaches_thermocalc
+```
