@@ -817,3 +817,1589 @@ wall radiation boundaries, so radiator thermal tuning is exposed through
 `testModule/run_v13_caseA_eps088_wait_then_to10000.py` is a local helper that
 waits for the active `eps=0.88/0.88` long run to finish and then continues the
 same case to about `10000 s` absolute time.
+
+## 24. 2026-06-25 V11/V13 optional reserved parallel TEC circuit
+
+V11 and V13 now support one optional reserved parallel TEC circuit without changing the default case. The default remains:
+
+```text
+thermal ring multipliers:  Center=1, Ring1=6, Ring2=12, Ring3_TEC=15, Ring3_Open=3
+main TEC multipliers:      Center=1, Ring1=6, Ring2=12, Ring3_TEC=15, Ring3_Open=0
+```
+
+So the main circuit is still the existing 34-TEC fixed-voltage series circuit. `Ring3_Open` stays disconnected and the runner keeps the zero-source check unless the reserved circuit is explicitly enabled.
+
+The optional circuit uses only the three `Ring3_Open` TECs and is configured as a second independent `ThermoCalcModel`:
+
+```powershell
+# Fixed bus voltage for the reserved parallel circuit
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v13_caseA_closed_loop.py --duration 0.1 --record-interval 0.1 --restart-interval 0.1 --max-dt 0.1 --enable-reserved-parallel-tec --reserved-parallel-mode fixed_u --reserved-parallel-voltage 0.8
+
+# Fixed total current for the reserved parallel circuit
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v13_caseA_closed_loop.py --duration 0.1 --record-interval 0.1 --restart-interval 0.1 --max-dt 0.1 --enable-reserved-parallel-tec --reserved-parallel-mode fixed_i --reserved-parallel-current 1000.0
+
+# External load curve, CSV or NPZ, interpreted as U_load=f(I_total)
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v13_caseA_closed_loop.py --duration 0.1 --record-interval 0.1 --restart-interval 0.1 --max-dt 0.1 --enable-reserved-parallel-tec --reserved-parallel-mode load_curve --reserved-parallel-load-curve path\to\curve.csv
+```
+
+The same flags are available in `run_v11_caseA_closed_loop.py`. For `load_curve`, CSV may contain either `current_a,voltage_v` or `current,voltage` headers; `.npz` may contain `current_a/voltage_v` or `current/voltage`.
+
+Diagnostics:
+
+- `tec_total_voltage_v` and `tec_total_current_a` remain the main series-circuit terminal voltage/current for backward compatibility.
+- `tec_total_electric_power_w` is the sum of main series power and reserved parallel power.
+- `tec_main_*` records the main series circuit.
+- `tec_reserved_parallel_*` records the optional `Ring3_Open` parallel circuit and is `null` when disabled.
+- `reserved_parallel_tec_enabled` and `reserved_parallel_tec_mode` are written to `latest_state.json` and CSV history records.
+
+Validation completed on 2026-06-25:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m py_compile Components\ReactorCore.py testModule\run_v8_caseA_common.py testModule\test_core_assemble_v7_caseA.py testModule\run_v11_caseA_closed_loop.py testModule\run_v13_caseA_closed_loop.py testModule\test_reactorcore_tec_topology.py ThermoCalc\ThermoCalcWrapper.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_reactorcore_tec_topology.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_parallel.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_interface.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_lookup.py
+```
+
+V13 `0.1 s` smoke results:
+
+| Case | Result |
+| --- | --- |
+| Default, reserved circuit disabled | completed; `tec_reserved_parallel_* = null`, `Pel ~= 5403.650 W` |
+| Reserved `fixed_u`, `0.8 V` | completed; reserved branch `I ~= 1021.511 A`, `P ~= 817.209 W`, total `Pel ~= 6220.859 W` |
+| Reserved `fixed_i`, `1000 A` | completed; reserved branch `U ~= 0.812 V`, `I ~= 1000.148 A`, total `Pel ~= 6215.914 W` |
+| Reserved `load_curve` with `U=0.0008 I` | completed; reserved branch `U ~= 0.807 V`, `I ~= 1009.013 A`, total `Pel ~= 6218.004 W` |
+
+V11 `--create-init-only` completed both with the default disabled reserved circuit and with `--enable-reserved-parallel-tec --reserved-parallel-mode fixed_u --reserved-parallel-voltage 0.8`.
+
+## 25. 2026-06-25 V13 first-version radiator thermal shield
+
+V13 now has an optional first-version quasi-steady thermal shield for the TOPAZ-II pipe-fin radiator. It is default-off and only affects the V13 `RadiatorPipeWithFin` path. The model does not add a solid ODE and does not use the future `8 x 12` view-factor matrix; it updates each radiator unit's equivalent radiation background temperature before radiator `pre_step()`.
+
+Runner flags:
+
+```powershell
+--enable-radiation-shield
+--shield-active-until-s 10
+--shield-inner-emissivity 0.8
+--shield-outer-emissivity 0.8
+--shield-conductivity-w-m-k 1.0
+--shield-thickness-m 0.002
+--shield-view-factor 0.8
+--shield-solar-heat-flux-w-m2 0.0
+--shield-background-temperature-k 3.0
+--shield-relaxation 1.0
+```
+
+`--shield-active-until-s` is interpreted as relative time from the current run start; the runner stores the absolute cutoff in `radiation_shield_active_until_abs_s`.
+
+New diagnostics are included in V13 JSON/CSV:
+
+- `radiation_shield_enabled`
+- `radiation_shield_active`
+- `radiation_shield_effective_background_mean_k`
+- `radiation_shield_inner_temperature_mean_k`
+- `radiation_shield_outer_temperature_mean_k`
+- `radiation_shield_q_from_radiator_w`
+- `radiation_shield_q_to_space_w`
+- `radiation_shield_view_factor`
+- `radiation_shield_conductivity_w_m_k`
+- `radiation_shield_thickness_m`
+
+Validation completed:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_radiator_thermal_shield.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m py_compile Components\RadiatorThermalShield.py Components\RadiatorPipeWithFin.py testModule\test_core_assemble_v13_caseA.py testModule\run_v13_caseA_closed_loop.py testModule\test_radiator_thermal_shield.py
+```
+
+V13 `0.1 s` smoke from the current V12 warm restart:
+
+| Case | Result |
+| --- | --- |
+| Shield off | completed; `q_radiator_total_w ~= 105380.709 W` |
+| Shield on, `view_factor=0.8`, `thickness=0.002 m`, `k=1.0 W/m/K` | completed; `q_radiator_total_w ~= 93284.738 W`, effective background `~= 441.039 K`, outer shield mean `~= 424.709 K`, `q_to_space ~= 10641.871 W` |
+
+This first version is intended to prove the boundary-coupling workflow. A later version should replace the equivalent background model with axial aggregation to 12 radiator segments and an 8-shield-segment view-factor matrix.
+
+## 26. 2026-06-27 V13-start cold startup runner
+
+`testModule/run_v13_start_case.py` is the first V13-start cold-start runner built from the V13 closed-loop pipe-fin radiator case. It is intentionally separate from `run_v13_caseA_closed_loop.py` and does not load V10/V11/V13 warm restarts by default.
+
+Main startup assumptions:
+
+- Engineering profile starts from `373 K`; `--startup-profile titam` switches the initial fluid/solid temperature to `300 K` and uses `1.5 kg/s` target flow.
+- The runner explicitly cold-initializes all registered solids through `reset_solid_temperatures(...)`; V13 base builders otherwise keep several `ReactorCore/TFEUnit` default solid temperatures around `743 K`, `850 K`, `1200 K`, or `1550 K`, which is not valid for a cold-start calculation.
+- The simplified startup controller follows the cold-start document milestones: safety drums withdraw over `8 s`, control drums advance at `1.4 deg/s`, first critical is represented near `125 deg`, the low-power hold is `5 kW`, then ramps to `35 kW` at `600 W/s` and to `110 kW` at `80 W/s`.
+- TEC coupling is deferred. The runner does not build/apply ThermoCalc circuits during cold hydraulic initialization; it configures TEC, applies the V11/V13 half wire-resistance scale, and enables `core.enable_tec_coupled` only after both the post-critical time and emitter-temperature thresholds are satisfied. The default ThermoCalc update interval is `0.5 s`.
+- The emitter-collector vapor/gas gap is simplified by changing the TEC gap coupler's equivalent gas conductance from a helium value to a cesium value with a smooth transition.
+
+Radiator startup boundary handling:
+
+- The V13 radiator thermal shield is attached by default with the `fortran_shield2` model and remains active until the startup controller latches shield jettison at `core_inlet_temperature_k >= 400 K`.
+- The 78-tube external heat matrix in `Components/ExternalHeatSources` is applied to the `RadiatorPipeWithFin` wall outer boundary via one embedded matrix column per tube.
+- The 6-partition shield external heat matrix is sampled each step and mapped to the first six entries of the shield `qsss_w_m2` vector; the upper/lower entries are currently set to zero. This is a first modeling assumption and should be revisited if the source table gains explicit upper/lower shield partitions.
+
+Useful command:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v13_start_case.py --duration 10 --record-interval 1 --restart-interval 5 --max-dt 0.1 --output-dir testModule\v13_start_smoke_10s_stepiter300_20260627 --case-prefix v13_start_smoke_10s_stepiter300_20260627
+```
+
+Validation completed on 2026-06-27:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m py_compile Solvers\SystemManager.py testModule\v13_startup_control.py testModule\test_v13_startup_control.py testModule\run_v13_start_case.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_v13_startup_control.py
+```
+
+Current 10 s smoke result:
+
+- Completed from a `373 K` cold solid/fluid initialization; `cold_initialized_solid_count = 114`.
+- Mean emitter temperature started near `373.2 K`, confirming that the previous hot-solid initialization problem is fixed.
+- Core inlet temperature exceeded the `400 K` shield-jettison threshold within the first second when the full external heat matrices were applied, so the shield became inactive early. This is physically controlled by the current external-heat scale/area and low-temperature loop thermal inventory, not by a hard-coded time cutoff.
+- Several fluid steps still reported small Picard residual plateaus even with `--step-hydraulic-max-iter 300`; later calibration should check external-heat magnitude/area mapping and time-step limits before treating this as a topology failure.
+
+### 26.1 2026-06-28 V13-start W/m external heat and full cold initialization update
+
+User clarified that the 78-tube startup external-heating table is a line load in `W/m`, not a heat-flux density in `W/m2`. `testModule/v13_startup_control.py` now provides `MatrixColumnLineHeatSource`, which converts one matrix column as:
+
+```text
+Q_node [W] = q_line(t) [W/m] * node_length [m]
+q_equiv [W/m2] = Q_node / area_used_by_ExternalHeatFluxBC
+```
+
+This preserves the intended per-node heat power after `ExternalHeatFluxBC` multiplies by boundary area. `run_v13_start_case.py` defaults to `--tube-external-heat-units W/m`; `W/m2` remains available for compatibility.
+
+The previous V13-start cold-smoke still showed fast inlet heating even with external heat disabled. The root cause was incomplete cold initialization: solids were reset, but the hydraulic control volumes and `HydraulicNetwork.T_vec/h_vec` could retain warm V12/V13 defaults. `reset_fluid_temperatures(...)` now resets every hydraulic control volume `T/h`, clears transient fluid heat sources, and resynchronizes the network vectors before `initialize_system()`.
+
+Validation after this fix:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m py_compile Solvers\SystemManager.py testModule\v13_startup_control.py testModule\test_v13_startup_control.py testModule\run_v13_start_case.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_v13_startup_control.py
+```
+
+Short-run results:
+
+- `external_heat_scale=0`, `10 s`: inlet stayed near `373 K`, shield stayed active, proving full fluid/solid cold initialization.
+- default `W/m` external heat, `10 s`: inlet reached about `402 K` near `8 s`, shield jettisoned by the temperature trigger, mean emitter remained near `375 K`.
+- default `W/m` external heat, `120 s`, `max_dt=0.5 s`: reached `REACTIVITY_PULLBACK`, prescribed thermal power about `3.79 kW`, inlet about `511.6 K`, emitter about `480.1 K`. This larger time step produced sustained hydraulic residual warnings after about `57 s`, so the pre-TFE long run uses `max_dt=0.1 s`.
+
+Current pre-TFE long run launched in the background on 2026-06-28:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v13_start_case.py --duration 1500 --record-interval 10 --restart-interval 100 --max-dt 0.1 --step-hydraulic-max-iter 300 --output-dir testModule\v13_start_pre_tfe_1500s_20260628 --case-prefix v13_start_pre_tfe_1500s_20260628
+```
+
+This run intentionally stops before the default TEC enable time (`critical_time + 1500 s`, about `1597 s`) and is intended to cover cold startup through high-power hold before TFE ignition.
+
+### 26.2 2026-06-28 pre-TFE h-gap iteration
+
+The default `helium_gap_h_eq_w_m2_k=1200` full cold-to-1500 s run completed, but the pre-TFE state was cooler than the emitter ignition target:
+
+```text
+t = 1500 s, phase = CRITICAL_POWER_HOLD, Q = 110 kW
+core inlet ~= 826.6 K, core outlet ~= 918.5 K, mean emitter ~= 984.2 K
+TEC disabled, shield inactive
+```
+
+A 1500 s restart continuation to 1590 s with the same `h_eq=1200` cooled further to mean emitter about `970.7 K`. This indicates the case had already passed a thermal peak and would not approach the nominal `1050 K` emitter ignition window by simply holding the same settings.
+
+Short restart-based sensitivity from the 1500 s state showed the expected trend: reducing the pre-ignition He-side emitter-collector gap conductance raises emitter temperature and lowers coolant temperature.
+
+| He gap h_eq [W/m2/K] | 1590 s mean emitter [K] | 1590 s inlet [K] | Note |
+| --- | ---: | ---: | --- |
+| 800 | ~1002.1 | ~789.3 | Warmer emitter, still below ignition window |
+| 600 | ~1031.0 | ~787.1 | Near pre-ignition target without crossing 1050 K |
+| 400 | ~1081.6 | ~782.8 | Crosses ignition-window temperature |
+
+Based on this, a full cold-start `h_eq=600` pre-TFE run was launched in the background:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v13_start_case.py --duration 1590 --record-interval 10 --restart-interval 100 --max-dt 0.1 --step-hydraulic-max-iter 300 --helium-gap-h-eq-w-m2-k 600 --tfe-start-after-critical-s 100000 --output-dir testModule\v13_start_pre_tfe_h600_1590s_20260628 --case-prefix v13_start_pre_tfe_h600_1590s_20260628
+```
+
+The high `--tfe-start-after-critical-s` intentionally keeps TEC disabled so this remains a pre-TFE ignition thermal-hydraulic run.
+
+### 26.3 2026-06-28 V13-start restart continuation and active h600 run
+
+`run_v13_start_case.py` now supports `--restart-in` for V13-start restart continuation. The parser uses `allow_abbrev=False` so `--restart-in` cannot be accidentally interpreted as `--restart-interval`. Restart continuation rebuilds the same V13-start topology, attaches the radiator shield and external-heat boundary modifiers, loads `SystemManager.load_global_state(...)`, restores V13 design flows and pump head, and then lets the absolute-time startup controller select the current phase.
+
+The `h_eq=600` full cold-start pre-TFE run is active in the background:
+
+```text
+output: testModule/v13_start_pre_tfe_h600_1590s_20260628
+pid:    67352
+```
+
+Early monitor result:
+
+```text
+t = 10 s: Tin ~= 412.6 K, mean emitter ~= 376.4 K, TEC disabled, gap h_eq = 600 W/m2/K
+t = 30 s: Tin ~= 453.9 K, mean emitter ~= 402.9 K, TEC disabled
+```
+
+The run is progressing, not hung, but the early hydraulic residual plateau makes it slow: a 20 s wall-clock monitor showed about 19.6 s CPU progress and the log advanced from `t=31.7 s` to `t=34.2 s`. The current command intentionally keeps `--step-hydraulic-max-iter 300`; if this proves too slow, a later repeat can reduce the per-step limit after confirming that the residual plateau does not materially affect thermal trends.
+
+### 26.4 2026-06-28 h600 run speed mitigation
+
+The full cold `h_eq=600`, `step_hydraulic_max_iter=300` run progressed but was too slow in the early hydraulic residual plateau. A 60 s cold-start comparison with `--step-hydraulic-max-iter 50` produced the same 10/20/30/40 s temperatures as the interrupted 300-iteration run and completed the cold-start segment to 60 s:
+
+```text
+t = 60 s: Tin ~= 489.4 K, mean emitter ~= 443.4 K, TEC disabled, h_eq = 600 W/m2/K
+```
+
+That 60 s state is now used as the restart base for the remaining pre-TFE continuation to 1590 s:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v13_start_case.py --restart-in testModule\v13_start_h600_iter50_60s_20260628\v13_start_h600_iter50_60s_20260628_latest_restart.npz --duration 1530 --record-interval 10 --restart-interval 100 --max-dt 0.1 --step-hydraulic-max-iter 50 --helium-gap-h-eq-w-m2-k 600 --tfe-start-after-critical-s 100000 --output-dir testModule\v13_start_pre_tfe_h600_60to1590s_iter50_20260628 --case-prefix v13_start_pre_tfe_h600_60to1590s_iter50_20260628
+```
+
+Active background process:
+
+```text
+pid: 63684
+```
+
+Initial continuation monitor:
+
+```text
+absolute t ~= 70 s, relative continuation time ~= 10 s
+Tin ~= 497.3 K, mean emitter ~= 454.1 K, h_eq = 600 W/m2/K, TEC disabled
+```
+
+### 26.5 2026-06-28 active h600 continuation monitor
+
+The `v13_start_pre_tfe_h600_60to1590s_iter50_20260628` continuation remains active and is progressing normally. Monitor snapshot:
+
+```text
+pid: 63684
+absolute t ~= 140 s, relative continuation time ~= 80 s
+phase = FAST_POWER_RAMP
+Q ~= 12.63 kW
+Tin ~= 533.4 K
+mean emitter ~= 515.8 K
+TEC disabled
+```
+
+A 60 s wall-clock monitor showed about 57.9 s CPU progress and advanced the case from the pullback/low-power region into the fast power ramp. No `run.err` messages have appeared for this continuation so far.
+
+### 26.6 2026-06-28 completed segmented h600 pre-TFE startup chain
+
+The pure-cold to pre-TFE `h_eq=600 W/m2/K` startup calculation was completed as a segmented restart chain. This is a thermal-hydraulic startup demonstration driven by the engineering startup power schedule; TEC remains disabled by `--tfe-start-after-critical-s 100000`.
+
+Segment chain:
+
+| Segment | Output directory | Time span [s] | max_dt [s] | Hydraulic max iter | End state |
+| --- | --- | ---: | ---: | ---: | --- |
+| Cold initialization | `testModule/v13_start_h600_iter50_60s_20260628` | 0 -> 60 | 0.1 | 50 | `Tin ~= 489.4 K`, emitter `~= 443.4 K` |
+| Early continuation | `testModule/v13_start_pre_tfe_h600_60to1590s_iter50_20260628` | 60 -> 260 | 0.1 | 50 | `Tin ~= 594.1 K`, emitter `~= 618.4 K` |
+| Larger-step check | `testModule/v13_start_h600_260to460_dt05_test_20260628` | 260 -> 460 | 0.5 | 50 | `Tin ~= 698.1 K`, emitter `~= 814.3 K` |
+| Final pre-TFE continuation | `testModule/v13_start_pre_tfe_h600_460to1590s_dt05_20260628` | 460 -> 1590 | 0.5 | 50 | `Tin ~= 807.5 K`, emitter `~= 1131.2 K` |
+
+Final state at absolute `t ~= 1590 s`:
+
+```text
+phase = CRITICAL_POWER_HOLD
+core thermal power = 110000 W
+TEC coupled = false
+shield jettisoned = true
+core inlet = 807.517 K
+core outlet = 913.060 K
+core delta-T = 105.543 K
+mean emitter = 1131.202 K
+closed-loop flow = 1.29999996 kg/s
+radiator tube external heat = 11568.035 W
+radiator heat rejection total = 144715.930 W
+78-tube flow mean/min/max = 0.0166656 / 0.0159366 / 0.0187932 kg/s
+```
+
+The final segment `run.err` contains one startup-step hydraulic residual warning at `t=460 s`:
+
+```text
+Hydraulic step NOT converged after 50 iterations. Max residual: 3.760874e-04
+Fluid solver NOT converged at t=460.0000s
+```
+
+The warning did not stop the run and no later fatal error was recorded. Because the final emitter temperature is above the nominal `1050 K` ignition threshold while TEC is intentionally disabled, this chain is best treated as a successful pre-TFE thermal-hydraulic startup reachability run, not as the final calibrated ignition-boundary case. A later TFE ignition calculation should restart from this state or from a retuned endpoint, then enable TEC and cesium-gap behavior explicitly.
+
+### 26.7 2026-06-28 zero-power shield-only cooling check and external-heat unit correction
+
+The embedded `is58p5_w0_8p12_N78_sum` tube matrix should be treated as `W/m2`, not `W/m`. The earlier `W/m` pre-TFE runs are therefore diagnostic only and should not be used as a physical startup baseline. `run_v13_start_case.py` now defaults `--tube-external-heat-units W/m2`; the legacy `W/m` conversion remains available only for explicit sensitivity checks.
+
+A zero-core-power cooling case was run to isolate the radiator/shield thermal behavior without startup power ramp:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v13_start_case.py --duration 500 --record-interval 10 --restart-interval 100 --max-dt 0.5 --step-hydraulic-max-iter 50 --fixed-startup-power-w 0 --source-power-w 0 --shield-jettison-temperature-k 1000000000 --tube-external-heat-units W/m2 --tube-external-heat-area-fraction 0 --output-dir testModule\v13_start_zero_power_shield_only_500s_20260628 --case-prefix v13_start_zero_power_shield_only_500s_20260628
+```
+
+This case keeps the shield active, applies the N6 shield external heat table, and disables direct N78 tube-wall heating by setting `--tube-external-heat-area-fraction 0`. Results show no reverse heating of the coolant:
+
+| t [s] | Tin [K] | Tout [K] | Radiator out [K] | Mean emitter [K] | q_rad total [W] | Shield effective background [K] | Tube external heat [W] |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 | 372.704 | 372.608 | 372.564 | 372.953 | 500.827 | 364.842 | 0.0 |
+| 60 | 371.853 | 372.193 | 371.819 | 372.459 | 612.455 | 362.402 | 0.0 |
+| 120 | 371.061 | 371.478 | 371.032 | 371.774 | 679.765 | 360.446 | 0.0 |
+| 240 | 369.221 | 369.674 | 369.222 | 369.945 | 603.667 | 359.712 | 0.0 |
+| 360 | 368.627 | 368.937 | 368.612 | 369.016 | 466.613 | 361.331 | 0.0 |
+| 500 | 367.352 | 367.793 | 367.271 | 367.973 | 1013.908 | 350.567 | 0.0 |
+
+Interpretation: with direct tube-wall external heat disabled and the shield retained, the coolant cools slowly from `373 K` to about `367.35 K` over `500 s`. The shield background stays around `350-365 K`, so it reduces net radiative loss but does not heat the loop above its initial temperature. This supports treating previous rapid warmup as a boundary-application error, not as a deep-space radiation-temperature error.
+
+### 26.8 2026-06-28 corrected shield-startup run after external-heat fix
+
+After correcting the startup boundary interpretation, the startup run was repeated with direct N78 tube-wall external heat disabled and the external heat table unit treated as `W/m2`. The shield still receives the N6 external heat table and is jettisoned by the inlet-temperature trigger.
+
+Command:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\run_v13_start_case.py --duration 1590 --record-interval 20 --restart-interval 100 --max-dt 0.5 --step-hydraulic-max-iter 50 --helium-gap-h-eq-w-m2-k 600 --tfe-start-after-critical-s 100000 --tube-external-heat-units W/m2 --tube-external-heat-area-fraction 0 --shield-jettison-temperature-k 400 --output-dir testModule\v13_start_corrected_shield_startup_1590s_20260628 --case-prefix v13_start_corrected_shield_startup_1590s_20260628
+```
+
+Representative records:
+
+| t [s] | Phase | Q_core [kW] | Tin [K] | Tout [K] | Mean emitter [K] | Shield active | Shield bg [K] | q_rad total [kW] | Tube external heat [W] |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: |
+| 20 | CONTROL_DRUM_APPROACH | 0.001 | 372.314 | 372.552 | 372.896 | true | 364.439 | 0.513 | 0.0 |
+| 100 | INITIAL_SUPERCRITICAL_RAMP | 0.453 | 371.246 | 371.661 | 372.103 | true | 359.871 | 0.727 | 0.0 |
+| 140 | FAST_POWER_RAMP | 12.629 | 371.259 | 372.559 | 378.566 | true | 354.840 | 1.045 | 0.0 |
+| 180 | SLOW_POWER_RAMP | 35.217 | 376.982 | 382.998 | 411.018 | true | 362.500 | 1.109 | 0.0 |
+| 220 | SLOW_POWER_RAMP | 38.417 | 396.645 | 406.274 | 448.429 | true | 384.362 | 1.272 | 0.0 |
+| 240 | SLOW_POWER_RAMP | 40.017 | 404.256 | 417.375 | 464.935 | false | 3.000 | 9.045 | 0.0 |
+| 500 | SLOW_POWER_RAMP | 60.817 | 524.357 | 551.232 | 642.740 | false | 3.000 | 25.740 | 0.0 |
+| 800 | SLOW_POWER_RAMP | 84.817 | 623.017 | 672.355 | 816.146 | false | 3.000 | 51.899 | 0.0 |
+| 1000 | SLOW_POWER_RAMP | 100.817 | 671.252 | 736.292 | 912.425 | false | 3.000 | 70.371 | 0.0 |
+| 1120 | CRITICAL_POWER_HOLD | 110.000 | 695.466 | 769.981 | 964.763 | false | 3.000 | 81.385 | 0.0 |
+| 1300 | CRITICAL_POWER_HOLD | 110.000 | 719.217 | 802.593 | 1007.717 | false | 3.000 | 93.193 | 0.0 |
+| 1590 | CRITICAL_POWER_HOLD | 110.000 | 733.807 | 823.482 | 1031.198 | false | 3.000 | 101.128 | 0.0 |
+
+Final state at `1590 s`:
+
+```text
+phase = CRITICAL_POWER_HOLD
+core power = 110 kW
+TEC coupled = false
+shield jettisoned = true
+core inlet/outlet = 733.807 / 823.482 K
+mean emitter = 1031.198 K
+radiator heat rejection = 101.128 kW
+coolant enthalpy rise = 101.661 kW
+closed-loop flow = 1.300000 kg/s
+78-tube flow mean/min/max = 0.0166667 / 0.0159400 / 0.0187875 kg/s
+```
+
+Compared with the earlier incorrect `W/m` + direct tube heating chain, the corrected run is much cooler and no longer shows artificial external warmup. At `1590 s`, the mean emitter is close to but still below the nominal `1050 K` TFE ignition threshold. This endpoint is a better pre-TFE restart candidate than the previous `1131 K` endpoint, but a real ignition run may need additional high-power hold time, a slightly different gap conductance, or an explicit ignition criterion sweep.
+
+Caveat: with `--step-hydraulic-max-iter 50`, the run produced repeated hydraulic residual warnings in the mid-transient, mainly after about `294 s`. The run completed and the thermal trajectory is smooth, but a final production startup baseline should repeat a narrower segment with stricter hydraulic convergence or a smaller `max_dt`.
+
+### 26.9 2026-06-28 ThermoCalc low-temperature zero-emission guard
+
+A ThermoCalc regression was added for low-temperature fixed-voltage TEC startup states. The reproduced bad case was one TEC with `TE=800 K`, `TC=600 K`, `Tcs=520 K`, `fixed_u=0.8 V`, and 37 axial nodes; before the fix it entered `ThermoCalcModel.calculate()` and did not return within the test timeout.
+
+`ThermoCalc/ThermoCalcWrapper.py` now skips C++ circuit iteration when all emitter temperatures are below the default zero-emission cutoff `1000 K`. The skipped result is an open-circuit zero-current state with zero TEC heat terms and diagnostic fields `zero_emission_skipped` / `zero_emission_reason` in `get_global_results()`.
+
+Relevant verification:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_interface.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_parallel.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_lookup.py
+```
+
+### 26.10 2026-06-28 V13-start cesium conditioning before TEC electrical startup
+
+The V13-start TEC ignition path now treats cesium conditioning as a prerequisite for electrical generation. This avoids forcing the external circuit solver into a low-temperature, low-emission operating point that is not a meaningful power-generation state.
+
+Current startup sequence:
+
+1. Helium-gap thermal startup with TEC electrical calculation disabled.
+2. Cesium conditioning with TEC electrical calculation still disabled. The controller ramps `startup_cs_fraction` toward `1` and lowers the TEC gap equivalent conductance toward the V13 cesium-side value.
+3. Electrical TEC startup only after cesium and emitter-temperature gates are satisfied. The main TEC circuit starts in fixed-resistance mode and switches to fixed total voltage only if the finite main voltage reaches the configured switch voltage.
+
+Relevant runner controls in `testModule/run_v13_start_case.py`:
+
+- `--tec-electrical-start-after-cesium-s`
+- `--tec-electrical-start-cs-fraction`
+- `--tec-electrical-start-emitter-temperature-k`
+- `--startup-main-tec-initial-mode fixed_r|fixed_u`
+- `--startup-main-tec-load-resistance-ohm`
+- `--startup-main-tec-load-resistance-scope total|per_tec`
+- `--startup-main-tec-switch-voltage-v`
+- `--initial-cs-fraction`
+
+The startup runner now records TEC solver diagnostics in history and `latest_state.json`: `tec_solver_mode`, `tec_solver_converged`, `tec_solver_iteration_count`, `tec_solver_zero_emission_skipped`, `tec_solver_zero_emission_reason`, and `tec_solver_output_finite`.
+
+`Components/ReactorCore.py` also synchronizes TEC group temperatures immediately before `ThermoCalc.calculate()`. This is required for restart-based ignition runs: without the explicit sync, the wrapper could see stale/default low emitter temperatures after the thermal model had already reached the intended startup state.
+
+Stable cesium-conditioned, pre-electrical restart:
+
+```text
+testModule/v13_start_cesium_conditioning_plus1000s_20260628/v13_start_cesium_conditioning_plus1000s_20260628_latest_restart.npz
+```
+
+Final state of that pre-electrical segment:
+
+```text
+t = 4090 s
+startup_cs_fraction = 0.9999983895
+startup_tec_gap_h_eq_w_m2_k = 250.0006
+mean emitter ~= 1198.96 K
+core inlet/outlet ~= 746.56 / 842.32 K
+TEC electrical calculation disabled
+```
+
+The stable fixed-resistance electrical continuation used ThermoCalc lookup tables and interpreted `0.0044 ohm` as a per-TEC load for the 34-TEC main series chain:
+
+```text
+R_total = 34 * 0.0044 = 0.1496 ohm
+```
+
+Stable fixed-R restart:
+
+```text
+testModule/v13_start_tec_fixedr_totalR_lookup_500s_20260628/v13_start_tec_fixedr_totalR_lookup_500s_20260628_latest_restart.npz
+```
+
+Final state of that fixed-R segment:
+
+```text
+t = 4612 s
+Rload = 0.1496 ohm
+tec_main_voltage_v ~= 9.70466 V
+tec_main_current_a ~= 64.8707 A
+tec_main_electric_power_w ~= 629.55 W
+mean emitter ~= 1188.26 K
+core inlet/outlet ~= 745.85 / 841.21 K
+fixed-voltage switch not triggered
+```
+
+A fixed-R load scan from this thermal state did not reach the target `27.2 V`; even high-load/open-circuit-direction cases remained near `20 V`. Direct fixed-voltage `27.2 V` is not yet a reliable continuation point with the current local backend because a lookup-enabled diagnostic returned non-finite voltage output with `iteration_count=100`.
+
+Therefore the current continuation gate is:
+
+- If the ThermoCalc backend is updated to make fixed-U `27.2 V` finite and converged, continue from the stable fixed-R restart above.
+- Otherwise, keep TEC electrical startup gated until the thermal state or physical assumptions are adjusted enough for the fixed-R ramp to approach the target voltage.
+
+Detailed run notes and the load-scan table are in `testModule/V13_STARTUP_TEC_IGNITION_STATUS_20260628.md`.
+
+### 26.10 2026-06-28 ThermoCalc C++ no-hang iteration fallback
+
+The ThermoCalc low-temperature regression now has two checks:
+
+- default path: Python zero-emission guard skips a known non-generating low-temperature fixed-voltage case;
+- diagnostic path: with `THERMOCALC_DISABLE_ZERO_EMISSION_GUARD=1`, the same case still returns through the rebuilt C++ circuit solver instead of hanging.
+
+`testModule/test_thermocalc_interface.py` covers both cases. The second case verifies that users can keep TEC enabled while exploring uncertain startup states: if the state cannot produce a meaningful electrical solution, ThermoCalc returns finite diagnostics instead of blocking the whole transient run.
+
+### 26.11 2026-06-28 updated ThermoCalc backend fixed-U smoke and TEC temperature gate
+
+After the C++ iteration guard update, `ThermoCalc/te_solver.cp312-win_amd64.pyd` was rebuilt locally at `2026-06-28 23:42:33` (`396288` bytes). A `0.5 s` V13-start smoke from the stable fixed-R restart completed without hanging:
+
+```text
+output: testModule/v13_start_tec_fixedu27p2_smoke_0p5s_20260628
+restart_in: testModule/v13_start_tec_fixedr_totalR_lookup_500s_20260628/v13_start_tec_fixedr_totalR_lookup_500s_20260628_latest_restart.npz
+tec_solver_mode = fixed_u
+tec_solver_output_finite = True
+tec_solver_converged = False
+tec_solver_iteration_count = 45
+tec_main_voltage_v = 27.2 V
+tec_main_current_a = 0.0 A
+tec_main_electric_power_w = 0.0 W
+mean_emitter_temperature_k ~= 1224.24 K
+```
+
+This proves the local backend now returns a finite non-converged state instead of entering the previous dead loop, but it does not prove that fixed-U `27.2 V` is physically usable at the current startup thermal state.
+
+A no-time-advance ThermoCalc sensitivity from the same restart estimated the temperature margin to the fixed-R switch point. With the selected startup resistance `R_total = 0.1496 ohm`, the fixed-R voltage rises from about `9.84 V` at the current synced temperature field to about `27.66 V` only after adding a synthetic `+400 K` emitter offset. In mean-temperature terms this corresponds to roughly `1.58e3 K` for this diagnostic. Higher startup resistance reaches the voltage threshold earlier (`R=1 ohm` crosses near a `+250 K` offset; high-load/open-direction `R=100 ohm` crosses near `+100 K`), but that is a modeling/electrical-startup choice.
+
+Therefore the current production continuation should not switch to fixed total voltage yet. Continue fixed-R only if the thermal model can plausibly raise the emitter field toward the switch condition, or explicitly revise the startup load strategy before launching a long steady-state run.
+
+### 26.12 2026-06-29 R=100 ohm fixed-R startup continuation check
+
+A higher startup resistance was tested after the ThermoCalc no-hang backend update. The `R_total=100 ohm` fixed-R path continued stably for `100 s` from the earlier 20 s R=100 ohm smoke and did not force fixed-U mode.
+
+```text
+output: testModule/v13_start_tec_fixedr_R100_20to120s_20260629
+t = 4732 s
+tec_solver_mode = fixed_r
+tec_solver_converged = True
+tec_solver_iteration_count = 2
+tec_main_voltage_v ~= 23.18796 V
+tec_main_current_a ~= 0.23188 A
+tec_main_electric_power_w ~= 5.3768 W
+mean_emitter_temperature_k ~= 1196.56 K
+core inlet/outlet ~= 745.41 / 840.72 K
+fixed-voltage switch not triggered
+```
+
+The voltage and emitter temperature both increased during this segment, but the endpoint is still below the `27.2 V` fixed-voltage switching threshold. This supports using the updated backend for continued fixed-R startup exploration, while still keeping the fixed-U transition gated by actual voltage rather than forcing it at the current thermal state.
+
+### 26.13 2026-06-29 R=100 ohm fixed-R plateau below rated voltage
+
+The `R_total=100 ohm` fixed-resistance startup path was continued for another `500 s` with the `27.2 V` automatic switch gate still enabled.
+
+```text
+output: testModule/v13_start_tec_fixedr_R100_120to620s_20260629
+time span: 4732 s -> 5232 s
+tec_solver_mode = fixed_r
+tec_solver_converged = True
+tec_solver_iteration_count = 2
+tec_main_voltage_v ~= 23.32207 V
+tec_main_current_a ~= 0.23322 A
+tec_main_electric_power_w ~= 5.4392 W
+mean_emitter_temperature_k ~= 1199.03 K
+core inlet/outlet ~= 746.65 / 842.47 K
+fixed-voltage switch not triggered
+```
+
+The voltage plateaued around `23.32 V`; the final 100 s slope was slightly negative despite a small ongoing mean-emitter temperature increase. Therefore, under the current `110 kW` startup thermal state and `R=100 ohm` startup load, continuing fixed-R alone is unlikely to reach the `27.2 V` switch gate. The remaining limitation is now physical/modeling, not the previous ThermoCalc dead loop.
+
+### 26.14 2026-06-29 150 kW sensitivity reaches fixed-R voltage gate but fixed-U stalls
+
+A diagnostic 150 kW sensitivity from the `R=100 ohm` plateau state showed that the rated-voltage gate is thermally reachable when the emitter field is hotter:
+
+```text
+output: testModule/v13_start_tec_fixedr_R100_power150k_200s_20260629
+fixed-startup-power-w = 150000
+Rload = 100 ohm
+20 s: U ~= 26.656 V, mean emitter ~= 1230.20 K
+40 s: U ~= 28.301 V, mean emitter ~= 1255.42 K
+```
+
+The `40 s` fixed-R record exceeded the `27.2 V` automatic switch threshold. The process then stopped writing records and consumed CPU until it was manually stopped, indicating trouble after the switch point.
+
+To isolate the issue, the same case was repeated with the switch threshold set to `999 V`, producing a high-temperature fixed-R restart at `t=5272 s`. From this restart:
+
+```text
+fixed-R 0.5 s smoke: completed, U ~= 28.710 V, I ~= 0.2871 A, P ~= 8.24 W, converged=True, iteration_count=2
+fixed-U 27.2 V 0.5 s smoke: did not return within 600 s and was manually stopped
+```
+
+Current implication: the startup fixed-R gate can be crossed by raising the thermal state, but the fixed-U circuit solve at that switch point is still not usable for long transient continuation. The ThermoCalc low-temperature dead-loop guard is not sufficient for this high-temperature fixed-U case; further fixed-U solver repair or a more gradual voltage-control transition is required before launching a final steady-state run.
+
+### 26.15 2026-06-29 fixed-U switch-point stall root cause: lookup coverage gap
+
+Systematic debugging narrowed the high-temperature fixed-U stall to ThermoCalc lookup coverage and repeated full series circuit solves. At the `150 kW / R=100 ohm` switch-point restart (`t=5272 s`), a fixed-R ThermoCalc solve completed but took about `23.6 s` even with lookup enabled:
+
+```text
+mode = fixed_r
+Uout ~= 28.70997 V
+Iout ~= 0.28710 A
+converged = True
+iteration_count = 2
+lookup_found = 1221 / 1258 emission points
+lookup_miss = 37 points
+miss TE ~= 1769.97-1862.02 K
+miss TC ~= 1100.49-1133.69 K
+miss Vo ~= 0.88392-0.90588 V
+```
+
+The dense runtime v2 table currently leaves this region partly uncovered: `accident` reaches `TE=2400 K` but only `TC=1100 K`; `high_power` reaches higher `TC` only for `TE>=2160 K`; `core` only covers `TC<=900 K`. Thus the hottest collector nodes at the switch point fall back to the analytic thermionic solve. Fixed-R can still return because it converges in two outer iterations, but fixed-U repeatedly calls the full series `circuitCalc(I)` path and can spend many minutes in these fallback-heavy trial states.
+
+Current implication: before a final automatic fixed-R-to-fixed-U steady run, regenerate or add lookup coverage for the switch-point band, at minimum approximately `TE=1700-1900 K`, `TC=1100-1150 K`, `Vo=0.8-1.0 V`, `Tcs=600 K`, or extend the `accident` region to `TC>=1150 K` over the relevant range. Then rerun the fixed-U `27.2 V` smoke from `testModule/v13_start_tec_fixedr_R100_power150k_60s_noswitch_20260629_latest_restart.npz`.
+
+### 26.16 2026-06-29 augmented switch-point lookup and post-guard fixed-U result
+
+After the ThermoCalc C++ no-hang update, a local augmented dense runtime manifest was created at:
+
+```text
+ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr_augmented/runtime_dense_manifest.json
+```
+
+It references the existing `pcs_0p02_5torr` runtime `.tedb` files and adds a small `switch_point` region for the previously missed high-collector-temperature band. This is generated runtime data and should not be committed to git by default.
+
+With environment variables:
+
+```powershell
+$env:THERMOCALC_ENABLE_LOOKUP='1'
+$env:THERMOCALC_LOOKUP_DB='...\ThermoCalc\emission_runtime_db_v2\pcs_0p02_5torr_augmented'
+$env:THERMOCALC_LOOKUP_REGIONS='switch_point,core,startup,high_power,accident'
+```
+
+the `150 kW / R=100 ohm` switch-point fixed-R diagnostic loaded 5 dense regions, converged in 2 outer iterations, and covered all emission points:
+
+```text
+Uout ~= 28.68281 V
+Iout ~= 0.28683 A
+ThermoCalc calculate ~= 0.61 s
+lookup_found = 1258 / 1258
+```
+
+A fixed-U `27.2 V` `0.5 s` V13-start smoke from the same restart then completed rather than hanging, but remained non-converged and expensive:
+
+```text
+output = testModule/v13_start_tec_fixedu27p2_power150k_from5272_0p5s_auglookup_20260629
+wall time ~= 430.6 s
+tec_solver_mode = fixed_u
+tec_solver_output_finite = True
+tec_solver_converged = False
+tec_solver_iteration_count = 100
+reported Uout ~= 35.105 V
+reported Iout ~= 172.932 A
+reported electric power ~= 6070.83 W
+```
+
+The old dead loop is therefore fixed, and the switch-point lookup gap is closed, but the current fixed-voltage circuit branch is still not production-ready for automatic V13 startup continuation. It returns finite diagnostics at the iteration cap instead of solving the `27.2 V` operating point.
+
+### 26.17 2026-06-29 fixed-U bracketing repair and hot switch-point lookup extension
+
+The high-temperature `fixed_u` issue after the `R=100 ohm` startup voltage gate was traced to two independent causes:
+
+1. The old `circuitTECs::uFixedCircuitCalc()` used an unbounded secant path and did not require voltage residual convergence before declaring or leaving output state.
+2. As the V13 fixed-voltage segment warmed, the local switch-point lookup extension became too narrow. At `t=5314 s`, the miss band had moved to about `TE=1880-1925 K`, `TC=1164-1173 K`, `Vo~=0.918 V`, `Tcs=600 K`.
+
+Source-side fixed-U repair:
+
+```text
+ThermoCalc/circuitTECs.cpp::uFixedCircuitCalc()
+```
+
+now samples non-negative current guesses, brackets `Utarget - circuitCalc(I)`, solves with a guarded secant/bisection hybrid, and only reports convergence when the voltage residual is satisfied. A small regression assertion was added to `testModule/test_thermocalc_interface.py` so the standard high-temperature fixed-U interface path must converge to its target voltage.
+
+Lookup-side extension:
+
+```text
+ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr_switch_point_hot/
+  switch_point_hot.runtime.v2.npz
+  runtime_dense_manifest.json
+```
+
+covers `TE=1700-2300 K`, `TC=1080-1300 K`, `Vo=0.70-1.20 V`, `Tcs=580/590/600/610 K` with `74152` safe points. The augmented manifest now loads:
+
+```text
+switch_point_hot, switch_point, accident, core, high_power, startup
+```
+
+Validation used the rebuilt test pyd via `THERMOCALC_PYD_DIR=ThermoCalc/build_cp312/Release`; the root production pyd was not overwritten in this step.
+
+Key results:
+
+```text
+ThermoCalc interface checks passed.
+ThermoCalc lookup checks passed.
+
+Initial high-temperature fixed-U isolated solve:
+  Uout = 27.2 V
+  Iout ~= 1.2148 A
+  converged = True
+  iteration_count = 10
+  ThermoCalc wall ~= 0.736 s
+
+Automatic fixed-R -> fixed-U 2 s smoke:
+  switch at t=5272.5 s, fixed-R U ~= 28.7095 V
+  subsequent fixed-U records converged at 27.2 V
+
+Fixed-U 20 s continuation:
+  all records converged, iteration_count 7-11
+  final U = 27.2 V, I ~= 2.499 A, P ~= 67.98 W
+
+At t=5314 s before hot lookup:
+  fixed-U isolated solve still converged but took ~= 28.7 s
+  lookup_found = 1254 / 1258
+
+After switch_point_hot:
+  lookup_found = 1258 / 1258
+  fixed-U isolated solve took ~= 4.25 s
+
+Fixed-U 40 s continuation from t=5314 s:
+  all records converged
+  final t = 5354 s
+  U = 27.2 V, I ~= 4.026 A, P ~= 109.50 W
+  mean emitter ~= 1310.85 K
+  core inlet/outlet ~= 770.36 / 883.56 K
+```
+
+Current status: the fixed-R to fixed-U control chain is now numerically viable over the tested startup segment when using the rebuilt pyd and augmented local lookup data. The case is not yet steady; longer fixed-voltage continuation will likely need either the hot lookup band to remain adequate up to the eventual emitter/collector temperatures or a more complete dense runtime export covering this startup trajectory.
+
+### 2026-06-29 correction: 150 kW runs are diagnostic only
+
+The `power150k` V13 startup directories are not official V13 cold-start physics results. They were created only to force the fixed-R voltage gate above `27.2 V` so the fixed-voltage ThermoCalc branch and lookup coverage could be debugged.
+
+The official V13 cold-start continuation remains startup_thermal_power_w = 110000 W; do not mix the power150k diagnostic trajectories into V13 thermal balance, startup-performance, or V11/V13 comparison conclusions.
+
+Official V13 startup interpretation remains based on the startup-control `110 kW` hold unless the model assumptions are explicitly changed. The latest official `110 kW`, `R_total=100 ohm` fixed-resistance continuation is:
+
+```text
+output = testModule/v13_start_tec_fixedr_R100_120to620s_20260629
+absolute_time = 5232 s
+core/startup thermal power = 110000 W
+mode = fixed_r
+R_total = 100 ohm
+U ~= 23.3221 V
+I ~= 0.233221 A
+P_e ~= 5.439 W
+mean emitter ~= 1199.03 K
+core inlet/outlet ~= 746.65 / 842.47 K
+fixed-voltage switch = not triggered
+last-100-s voltage slope ~= -1.28e-5 V/s
+```
+
+Therefore, under the current `110 kW` thermal state and `R_total=100 ohm` startup load, the formal fixed-R path has not reached the rated `27.2 V` switch condition. Any `150 kW` fixed-U continuation should be cited only as a numerical solver/lookup diagnostic, not as the V13 cold-start operating trajectory.
+
+### 2026-06-29 official 110 kW load-ceiling probe
+
+A no-time-advance electrical probe was run from the official `110 kW` restart:
+
+```text
+restart = testModule/v13_start_tec_fixedr_R100_120to620s_20260629/v13_start_tec_fixedr_R100_120to620s_20260629_latest_restart.npz
+absolute_time = 5232 s
+startup power = 110000 W
+mean emitter from rebuilt system ~= 1199.43 K
+TEC gap h_eq ~= 250 W/m2/K
+```
+
+The root production pyd probe with a broad scan did not return and had to be stopped, so the two decisive points were repeated with the verified rebuilt test pyd via `THERMOCALC_PYD_DIR=ThermoCalc/build_cp312/Release` and the augmented lookup regions. This did not overwrite the production pyd.
+
+```text
+R_total = 100 ohm:   U ~= 23.2822 V, I ~= 0.232822 A, P ~= 5.421 W, converged=True, iteration_count=2
+R_total = 1e6 ohm:  U ~= 23.3653 V, I ~= 2.34e-5 A, P ~= 5.46e-4 W, converged=True, iteration_count=2
+```
+
+Interpretation: at the current official `110 kW` thermal state, even the near-open-circuit load voltage is only about `23.37 V`, below the `27.2 V` fixed-voltage switch threshold. Continuing the same fixed-R strategy cannot produce a legitimate switch to rated fixed-voltage generation unless the emitter/collector thermal state or the startup electrical/physical assumptions are changed. The earlier `150 kW` runs remain solver diagnostics only.
+
+### 2026-06-29 official 110 kW R=100 continuation timeout check
+
+A formal continuation was attempted from the official `5232 s` restart without changing the startup power:
+
+```text
+restart = testModule/v13_start_tec_fixedr_R100_120to620s_20260629/v13_start_tec_fixedr_R100_120to620s_20260629_latest_restart.npz
+output = testModule/v13_start_tec_fixedr_R100_620to720s_20260629
+requested duration = 100 s
+startup power = 110000 W
+R_total = 100 ohm
+switch voltage = 27.2 V
+```
+
+The process timed out after 30 min of wall time and was stopped manually. It had written history records through `t=5312 s` but the latest restart/state had only reached `t=5282 s` because the next restart interval had not completed.
+
+Written history trend:
+
+```text
+t=5252 s: U ~= 23.120 V, mean emitter ~= 1198.55 K
+t=5272 s: U ~= 23.103 V, mean emitter ~= 1198.20 K
+t=5292 s: U ~= 22.981 V, mean emitter ~= 1198.46 K
+t=5312 s: U ~= 22.941 V, mean emitter ~= 1198.78 K
+```
+
+The run remained in `fixed_r` and did not trigger the `27.2 V` fixed-voltage gate. This reinforces the official-path conclusion: under the current `110 kW`, `R_total=100 ohm` startup state, continuing the same fixed-resistance strategy is moving away from the voltage threshold, not toward it. The timeout also shows that the current production pyd/runtime path is not suitable for further long official startup continuation without first resolving the ThermoCalc performance/hang behavior or explicitly switching to a verified rebuilt backend.
+
+### 2026-06-29 official 110 kW emitter-temperature margin probe
+
+A no-time-advance ThermoCalc probe was run from the official `110 kW` restart to estimate how much hotter the emitter field must be before the startup voltage gate is physically reachable. The probe only changed the ThermoCalc input temperature matrix and did not modify the solid/restart state.
+
+```text
+restart = testModule/v13_start_tec_fixedr_R100_120to620s_20260629/v13_start_tec_fixedr_R100_120to620s_20260629_latest_restart.npz
+absolute_time = 5232 s
+startup power = 110000 W
+mean TEC emitter input = 1192.77 K
+mean TEC collector input = 908.87 K
+near-open load = R_total = 1e6 ohm
+backend = verified rebuilt pyd via THERMOCALC_PYD_DIR=ThermoCalc/build_cp312/Release
+```
+
+Near-open-circuit voltage versus uniform emitter offset:
+
+```text
+dTE =   0 K: U ~= 23.370 V
+dTE =  25 K: U ~= 25.235 V
+dTE =  50 K: U ~= 27.166 V
+dTE =  75 K: U ~= 29.116 V
+dTE = 100 K: U ~= 31.017 V
+```
+
+Linear interpolation between `25 K` and `50 K` gives a `27.2 V` crossing at approximately `dTE ~= 50.4 K`. Thus the official `110 kW` state is only about `50 K` short in emitter-side voltage margin for a near-open-circuit load. The formal transient, however, was trending slightly cooler/lower-voltage under `R_total=100 ohm`, so reaching the gate by simply continuing the current trajectory is still unlikely.
+
+Interpretation: the limiting issue is primarily the startup thermal state seen by the TECs, not the fixed-voltage switch implementation. Plausible next modeling actions are to heat/hold the emitter field by revisiting startup power schedule, cesium-gap conductance trajectory, radiator/shield heat rejection during ignition, or the electrical load schedule; forcing fixed-U at the current unmodified `110 kW` restart remains unjustified.
+
+### 2026-06-29 cesium-gap h_eq sensitivity for official 110 kW startup
+
+To test whether the `27.2 V` gate is reachable without raising reactor power above the official `110 kW` hold, two thermal-only continuations were run from the official `5232 s` restart. TEC electrical calculation was deliberately disabled by delaying the electrical-start gate, but the cesium gap conductance was changed and applied to the thermal model.
+
+Common setup:
+
+```text
+restart = testModule/v13_start_tec_fixedr_R100_120to620s_20260629/v13_start_tec_fixedr_R100_120to620s_20260629_latest_restart.npz
+startup power = 110000 W
+TEC electrical calculation = disabled during thermal hold
+initial Cs fraction ~= 1.0
+```
+
+`h_eq = 150 W/m2/K` for `200 s`:
+
+```text
+output = testModule/v13_start_h150_tec_off_200s_20260629
+t=5432 s
+console mean emitter ~= 1295.49 K
+TEC input mean emitter ~= 1288.62 K
+TEC input mean collector ~= 900.24 K
+R_total=100 ohm probe: U ~= 37.514 V, I ~= 0.3751 A, P ~= 14.07 W
+R_total=1e6 ohm probe: U ~= 38.264 V
+```
+
+`h_eq = 200 W/m2/K` for `200 s`:
+
+```text
+output = testModule/v13_start_h200_tec_off_200s_20260629
+t=5432 s
+console mean emitter ~= 1241.66 K
+TEC input mean emitter ~= 1235.09 K
+TEC input mean collector ~= 906.57 K
+R_total=100 ohm probe: U ~= 29.542 V, I ~= 0.2954 A, P ~= 8.73 W
+R_total=1e6 ohm probe: U ~= 29.881 V
+```
+
+Interpretation: lowering the Cs-filled gap conductance from `250` to `200 W/m2/K` during the post-cesium thermal hold is already enough to exceed the rated-voltage gate at official `110 kW`; `150 W/m2/K` overshoots substantially. This points to the Cs-gap thermal trajectory as a plausible startup-control lever, unlike the earlier diagnostic `150 kW` power increase.
+
+### 2026-06-29 h_eq=200 automatic fixed-R to fixed-U smoke
+
+A short automatic electrical-start smoke was then run from the `h_eq=200` thermal hold restart:
+
+```text
+restart = testModule/v13_start_h200_tec_off_200s_20260629/v13_start_h200_tec_off_200s_20260629_latest_restart.npz
+output = testModule/v13_start_h200_fixedr_to_fixedu_2s_20260629
+startup power = 110000 W
+initial mode = fixed_r
+R_total = 100 ohm
+switch voltage = 27.2 V
+target fixed voltage = 27.2 V
+backend = verified rebuilt pyd via THERMOCALC_PYD_DIR=ThermoCalc/build_cp312/Release
+```
+
+The automatic switch triggered at `t=5432.5 s`:
+
+```text
+t=5432.5 s: fixed_r, U ~= 29.767 V, I ~= 0.2977 A, P ~= 8.86 W, converged=True, iter=2
+t=5433.0 s: fixed_u, U = 27.2 V, I ~= 1.2977 A, P ~= 35.30 W, converged=True, iter=29
+t=5433.5 s: fixed_u, U = 27.2 V, I ~= 1.2978 A, P ~= 35.30 W, converged=True, iter=42
+t=5434.0 s: fixed_u, U ~= 27.178 V, I ~= 1.3272 A, P ~= 36.07 W, converged=False, iter=47
+```
+
+Conclusion: the official `110 kW` startup can reach and trigger the rated-voltage gate if the Cs-filled gap conductance trajectory is made more insulating, with `h_eq=200 W/m2/K` as a useful first candidate. However, the fixed-voltage branch is still too slow and marginal for long steady continuation: even with the rebuilt pyd and augmented lookup, a `2 s` smoke took several minutes and the final record was close to target but non-converged. Before launching a long fixed-U steady run, improve fixed-U iteration performance/robustness or add a staged voltage-control transition.
+
+### 2026-06-29 fixed-U startup switch optimization after h_eq=200 smoke
+
+The first `h_eq=200` automatic fixed-R to fixed-U smoke proved the thermal path can trigger the `27.2 V` gate, but fixed-U was too slow and marginal:
+
+```text
+baseline output = testModule/v13_start_h200_fixedr_to_fixedu_2s_20260629
+wall ~= 390 s for 2 s physical time
+fixed-U records: iter 29 / 42 / 47
+last record: U ~= 27.178 V, converged=False
+```
+
+Root cause: after switching from `R_total=100 ohm`, the fixed-R current is only about `0.298 A`, while the fixed-U operating current is near `1 A`. The series fixed-U solver was using the switch current as its first guess and then spending many full `circuitCalc()` calls in broad bracket/secant search.
+
+Source-side change in `ThermoCalc/circuitTECs.cpp::uFixedCircuitCalc()`:
+
+- keep the bounded bracket/secant structure and low-temperature no-hang guards;
+- use `0.05 V` as the fixed-voltage engineering residual tolerance;
+- prioritize candidate currents around `I_guess + 1 A` before the wider fallback samples, which matches the V13 switch current jump;
+- keep fixed-U public output semantics as `Uout=Utarget` on convergence.
+
+Verification used only the rebuilt test pyd in `ThermoCalc/build_cp312/Release` through `THERMOCALC_PYD_DIR`; the root production pyd was not overwritten.
+
+Regression checks:
+
+```text
+testModule/test_thermocalc_interface.py: passed
+testModule/test_thermocalc_lookup.py: passed, lookup speedup ~= 37.6x
+```
+
+Optimized smoke:
+
+```text
+output = testModule/v13_start_h200_fixedr_to_fixedu_2s_plus1first_20260629
+wall ~= 88 s for 2 s physical time
+switch at t=5432.5 s from fixed_r U ~= 29.767 V
+
+fixed-U records:
+t=5433.0 s: U=27.2 V, I ~= 0.9644 A, P ~= 26.23 W, converged=True, iter=15
+t=5433.5 s: U=27.2 V, I ~= 1.1383 A, P ~= 30.96 W, converged=True, iter=3
+t=5434.0 s: U=27.2 V, I ~= 1.3208 A, P ~= 35.93 W, converged=True, iter=4
+```
+
+Current implication: the official `110 kW`, `h_eq=200 W/m2/K` startup path is now numerically viable for a short fixed-R to fixed-U transition smoke with the rebuilt test pyd. It is still not ready to claim steady state: the root production pyd has not been replaced, the hydraulic solver still reports the known first-step residual warning, and a longer fixed-U continuation is needed to verify lookup coverage and stable energy balance.
+
+### 2026-06-29 fixed-U short continuation after sample-order optimization
+
+After the `I_guess + 1 A` prioritized sample order in `uFixedCircuitCalc()`, the `h_eq=200` fixed-R to fixed-U smoke was repeated:
+
+```text
+output = testModule/v13_start_h200_fixedr_to_fixedu_2s_plus1first_20260629
+wall ~= 88 s for 2 s physical time
+switch at t=5432.5 s from fixed_r U ~= 29.767 V
+fixed-U records all converged:
+  t=5433.0 s: U=27.2 V, I ~= 0.9644 A, P ~= 26.23 W, iter=15
+  t=5433.5 s: U=27.2 V, I ~= 1.1383 A, P ~= 30.96 W, iter=3
+  t=5434.0 s: U=27.2 V, I ~= 1.3208 A, P ~= 35.93 W, iter=4
+```
+
+A fixed-voltage continuation from that restart also completed:
+
+```text
+restart = testModule/v13_start_h200_fixedr_to_fixedu_2s_plus1first_20260629/v13_start_h200_fixedr_to_fixedu_2s_plus1first_20260629_latest_restart.npz
+output = testModule/v13_start_h200_fixedu27p2_plus5s_20260629
+mode = fixed_u
+target voltage = 27.2 V
+wall ~= 163 s for 5 s physical time
+
+records:
+t=5435 s: U=27.2 V, I ~= 1.4214 A, P ~= 38.66 W, iter=16, converged=True
+t=5436 s: U=27.2 V, I ~= 1.8037 A, P ~= 49.06 W, iter=3, converged=True
+t=5437 s: U=27.2 V, I ~= 2.2148 A, P ~= 60.24 W, iter=3, converged=True
+t=5438 s: U=27.2 V, I ~= 1.8341 A, P ~= 49.89 W, iter=1, converged=True
+t=5439 s: U=27.2 V, I ~= 1.7341 A, P ~= 47.17 W, iter=7, converged=True
+```
+
+Current status: with the rebuilt test pyd, the official `110 kW`, `h_eq=200 W/m2/K` startup route can pass the fixed-R to fixed-U transition and sustain a short fixed-U continuation. This is still not a steady result. The next calculation should extend fixed-U in moderate chunks while monitoring lookup coverage, hydraulic residuals, current/power oscillation, and energy balance before attempting an overnight run.
+
+### 2026-06-29 fixed-U plus20s continuation status
+
+The optimized fixed-U path was continued from `t=5439 s` for another `20 s`:
+
+```text
+restart = testModule/v13_start_h200_fixedu27p2_plus5s_20260629/v13_start_h200_fixedu27p2_plus5s_20260629_latest_restart.npz
+output = testModule/v13_start_h200_fixedu27p2_plus20s_20260629
+mode = fixed_u
+target voltage = 27.2 V
+thermo update interval = 0.5 s
+wall ~= 947 s for 20 s physical time
+```
+
+All 10 recorded fixed-U points converged. Endpoint:
+
+```text
+t = 5459 s
+U = 27.2 V
+I ~= 1.1384 A
+P_e ~= 30.97 W
+mean emitter ~= 1240.59 K
+core inlet/outlet ~= 745.80 / 838.74 K
+q_radiator_total ~= 107.46 kW
+coolant enthalpy rise ~= 105.34 kW
+core_heat - coolant_enthalpy - electric ~= 4.63 kW
+```
+
+Last-10-s trends:
+
+```text
+dI/dt ~= -2.69e-2 A/s
+dP_e/dt ~= -0.732 W/s
+dT_emitter/dt ~= +5.18e-2 K/s
+dT_inlet/dt ~= -1.06e-1 K/s
+dq_rad/dt ~= -72.5 W/s
+```
+
+Interpretation: the fixed-U continuation is numerically stable over this medium segment, but it is not near steady. Electrical output is still relaxing downward while the emitter temperature is slowly recovering. Continue in moderate chunks before attempting an overnight steady run.
+
+### 2026-06-29 fixed-U plus40s/plus60s continuation status
+
+The optimized `h_eq=200 W/m2/K`, `fixed_u=27.2 V` path was continued in two additional 20 s chunks, still with `thermo_update_interval=0.5 s` and the rebuilt test pyd.
+
+`plus40s` segment:
+
+```text
+restart = testModule/v13_start_h200_fixedu27p2_plus20s_20260629/v13_start_h200_fixedu27p2_plus20s_20260629_latest_restart.npz
+output = testModule/v13_start_h200_fixedu27p2_plus40s_20260629
+wall ~= 490 s for 20 s physical time
+all records converged
+endpoint t=5479 s:
+  U = 27.2 V
+  I ~= 1.0404 A
+  P_e ~= 28.30 W
+  mean emitter ~= 1240.80 K
+  core inlet/outlet ~= 745.34 / 838.81 K
+  q_radiator_total ~= 107.46 kW
+  coolant enthalpy rise ~= 105.93 kW
+  core_heat - coolant_enthalpy - electric ~= 4.04 kW
+last-10-s trends:
+  dI/dt ~= -1.93e-2 A/s
+  dP_e/dt ~= -0.525 W/s
+  dT_emitter/dt ~= +4.67e-2 K/s
+```
+
+`plus60s` segment:
+
+```text
+restart = testModule/v13_start_h200_fixedu27p2_plus40s_20260629/v13_start_h200_fixedu27p2_plus40s_20260629_latest_restart.npz
+output = testModule/v13_start_h200_fixedu27p2_plus60s_20260629
+wall ~= 856 s for 20 s physical time
+all records converged
+endpoint t=5499 s:
+  U = 27.2 V
+  I ~= 1.0344 A
+  P_e ~= 28.13 W
+  mean emitter ~= 1240.94 K
+  core inlet/outlet ~= 745.32 / 838.84 K
+  q_radiator_total ~= 107.45 kW
+  coolant enthalpy rise ~= 106.00 kW
+  core_heat - coolant_enthalpy - electric ~= 3.97 kW
+last-10-s trends:
+  dI/dt ~= -1.71e-2 A/s
+  dP_e/dt ~= -0.464 W/s
+  dT_emitter/dt ~= +4.50e-2 K/s
+```
+
+Interpretation: fixed-U electrical convergence is now robust over the tested `60 s` continuation after switching, but the coupled thermal state is not steady. The residual thermal imbalance remains about `4 kW`, and the emitter is still rising slowly while electric output relaxes downward. The run is also still expensive at `0.5 s` TEC update frequency. Before an overnight run, either accept the cost and continue in longer chunks, or test a larger TEC update interval / further C++ inner-loop optimization.
+
+### 2026-06-29 fixed-U TEC update interval 1.0 s check
+
+A speed/accuracy check was run from the `t=5499 s` fixed-U restart by increasing the ThermoCalc update interval from `0.5 s` to `1.0 s` while keeping `max_dt=0.5 s`:
+
+```text
+restart = testModule/v13_start_h200_fixedu27p2_plus60s_20260629/v13_start_h200_fixedu27p2_plus60s_20260629_latest_restart.npz
+output = testModule/v13_start_h200_fixedu27p2_plus80s_tec1s_20260629
+duration = 20 s
+mode = fixed_u
+target voltage = 27.2 V
+thermo_update_interval = 1.0 s
+wall ~= 169 s for 20 s physical time
+```
+
+All records converged. Endpoint:
+
+```text
+t = 5519 s
+U = 27.2 V
+I ~= 1.0645 A
+P_e ~= 28.95 W
+mean emitter ~= 1241.06 K
+core inlet/outlet ~= 745.35 / 838.87 K
+q_radiator_total ~= 107.47 kW
+coolant enthalpy rise ~= 106.00 kW
+core_heat - coolant_enthalpy - electric ~= 3.97 kW
+```
+
+Last-10-s trends:
+
+```text
+dI/dt ~= -1.50e-2 A/s
+dP_e/dt ~= -0.408 W/s
+dT_emitter/dt ~= +4.41e-2 K/s
+dT_inlet/dt ~= +5.06e-2 K/s
+dq_rad/dt ~= -36.4 W/s
+```
+
+Comparison to the previous `0.5 s` segment indicates the physical trend is consistent, while wall time improved substantially. The case is still not steady, but `thermo_update_interval=1.0 s` is a reasonable setting for the next longer fixed-U continuation.
+
+### 2026-06-29 fixed-U plus180s with 1.0 s TEC update
+
+A longer fixed-U continuation was run after accepting `thermo_update_interval=1.0 s` as a speed-improving setting:
+
+```text
+restart = testModule/v13_start_h200_fixedu27p2_plus80s_tec1s_20260629/v13_start_h200_fixedu27p2_plus80s_tec1s_20260629_latest_restart.npz
+output = testModule/v13_start_h200_fixedu27p2_plus180s_tec1s_20260629
+duration = 100 s
+mode = fixed_u
+target voltage = 27.2 V
+thermo_update_interval = 1.0 s
+wall ~= 1267 s for 100 s physical time
+```
+
+All 10 recorded points converged. Endpoint:
+
+```text
+t = 5619 s
+U = 27.2 V
+I ~= 0.9685 A
+P_e ~= 26.34 W
+mean emitter ~= 1243.84 K
+core inlet/outlet ~= 745.63 / 840.81 K
+q_radiator_total ~= 107.98 kW
+coolant enthalpy rise ~= 107.87 kW
+core_heat - coolant_enthalpy - electric ~= 2.11 kW
+```
+
+Last-50-s trends:
+
+```text
+dI/dt ~= 0 A/s
+dP_e/dt ~= 0 W/s
+dT_emitter/dt ~= +2.92e-2 K/s
+dT_inlet/dt ~= +1.53e-2 K/s
+dq_rad/dt ~= +8.59 W/s
+```
+
+Interpretation: the fixed-voltage electrical solution is now stable over a `100 s` continuation and electric output has flattened near `26.3 W` for this low-power startup state. The thermal system is still not steady: emitter temperature is still rising and the residual heat balance remains about `2.1 kW`. Continue in longer but still bounded chunks, for example `300-500 s`, before declaring a near-steady startup fixed-U state or launching an overnight run.
+
+### 2026-06-29 fixed-U plus480s near-steady continuation
+
+A `300 s` continuation was run from the `t=5619 s` restart using the accepted `thermo_update_interval=1.0 s` setting:
+
+```text
+restart = testModule/v13_start_h200_fixedu27p2_plus180s_tec1s_20260629/v13_start_h200_fixedu27p2_plus180s_tec1s_20260629_latest_restart.npz
+output = testModule/v13_start_h200_fixedu27p2_plus480s_tec1s_20260629
+duration = 300 s
+mode = fixed_u
+target voltage = 27.2 V
+thermo_update_interval = 1.0 s
+wall ~= 5618 s for 300 s physical time
+```
+
+All 10 recorded points converged. Endpoint:
+
+```text
+t = 5919 s
+U = 27.2 V
+I ~= 0.9552 A
+P_e ~= 25.98 W
+mean emitter ~= 1248.11 K
+core inlet/outlet ~= 747.86 / 843.78 K
+q_radiator_total ~= 109.24 kW
+coolant enthalpy rise ~= 108.72 kW
+core_heat - coolant_enthalpy - electric ~= 1.26 kW
+```
+
+Last-150-s trends:
+
+```text
+dI/dt ~= +2.08e-4 A/s
+dP_e/dt ~= +5.66e-3 W/s
+dT_emitter/dt ~= +9.72e-3 K/s
+dT_inlet/dt ~= -4.22e-3 K/s
+dq_rad/dt ~= -2.06 W/s
+d(coolant enthalpy rise)/dt ~= +5.95 W/s
+```
+
+Interpretation: this is close to a stable fixed-voltage startup state but not a strict steady state. Electrical output is nearly flat near `26 W`, while the thermal system still has about `1.26 kW` residual heat imbalance and a small positive emitter-temperature drift. Another several-hundred-second continuation should reduce the remaining drift, but the current run speed is about `18.7 wall-s / physical-s`, so an overnight run is appropriate only if this cost is acceptable.
+
+### 2026-06-29 fixed-U plus1780s continuation
+
+A `1000 s` official continuation from the `t=6219 s` restart completed under the formal `110 kW` startup power, `h_eq=200 W/m2/K`, `fixed_u=27.2 V`, and `thermo_update_interval=1.0 s` settings:
+
+```text
+output = testModule/v13_start_h200_fixedu27p2_plus1780s_tec1s_20260629
+t = 7219 s
+U = 27.2 V
+I ~= 1.3873 A
+P_e ~= 37.74 W
+mean emitter ~= 1247.23 K
+core inlet/outlet ~= 746.84 / 842.74 K
+q_radiator_total ~= 108.69 kW
+coolant enthalpy rise ~= 108.70 kW
+core_heat - coolant_enthalpy - electric ~= 1.27 kW
+```
+
+All fixed-U records converged; the only stderr entry was the known first-step hydraulic residual warning at the restart boundary. Last-five-record slopes were small (`dP_e/dt ~= -1.86e-5 W/s`, `dT_emitter/dt ~= +1.21e-4 K/s`, `dq_radiator/dt ~= +4.89e-2 W/s`), so the state is close but still not a strict thermal steady state. A `5000 s` continuation is running from this restart in `testModule/v13_start_h200_fixedu27p2_plus6780s_tec1s_20260629` with PID `58580`.
+### 2026-06-29 fixed-U plus6780s long continuation
+
+A `5000 s` official continuation from the `t=7219 s` restart completed under the formal `110 kW` startup power, `h_eq=200 W/m2/K`, `fixed_u=27.2 V`, and `thermo_update_interval=1.0 s` settings:
+
+```text
+output = testModule/v13_start_h200_fixedu27p2_plus6780s_tec1s_20260629
+t = 12219 s
+U = 27.2 V
+I ~= 1.3838 A
+P_e ~= 37.64 W
+mean emitter ~= 1247.53 K
+core inlet/outlet ~= 747.12 / 843.17 K
+q_radiator_total ~= 108.86 kW
+coolant enthalpy rise ~= 108.86 kW
+core_heat - coolant_enthalpy - electric ~= 1.10 kW
+```
+
+All history records converged in fixed-U mode with `iteration_count = 1` after the restart transient. The only stderr entry was the known first-step hydraulic residual warning at `t=7219 s`. Recent trends over the last five records were still positive but small:
+
+```text
+dP_e/dt ~= -1.86e-5 W/s
+dT_emitter/dt ~= +5.86e-5 K/s
+dT_inlet/dt ~= +5.41e-5 K/s
+dq_radiator/dt ~= +3.27e-2 W/s
+d(coolant enthalpy rise)/dt ~= +3.27e-2 W/s
+```
+
+Interpretation: the official fixed-U startup path remains stable and near steady, but the remaining storage term is still about `1.10 kW`. A longer `30000 s` steady approach run was launched from this restart:
+
+```text
+output = testModule/v13_start_h200_fixedu27p2_plus36780s_tec1s_20260629
+pid = 19504
+```
+### 2026-06-29 fixed-U plus36780s first history checkpoint
+
+The `30000 s` long steady-approach run has written its first formal history record, confirming that the restart-load `tec_solver_converged=False` flag was only an initial latest-state artifact. The first recorded point is converged:
+
+```text
+output = testModule/v13_start_h200_fixedu27p2_plus36780s_tec1s_20260629
+pid = 19504
+record = first history row
+t = 14219 s
+relative time = 2000 s
+startup thermal power = 110000 W
+mode = fixed_u
+converged = True
+iteration_count = 1
+U = 27.2 V
+I ~= 1.3826 A
+P_e ~= 37.61 W
+mean emitter ~= 1247.64 K
+core inlet/outlet ~= 747.22 / 843.32 K
+q_radiator_total ~= 108.92 kW
+coolant enthalpy rise ~= 108.92 kW
+core_heat - coolant_enthalpy - electric ~= 1.04 kW
+```
+
+Drift from the previous segment endpoint (`12219 -> 14219 s`):
+
+```text
+dP_e/dt ~= -1.60e-5 W/s
+dT_emitter/dt ~= +5.46e-5 K/s
+dT_inlet/dt ~= +5.04e-5 K/s
+dq_radiator/dt ~= +3.05e-2 W/s
+d(coolant enthalpy rise)/dt ~= +3.05e-2 W/s
+```
+
+Interpretation: the official `110 kW` fixed-U path is continuing normally and remains numerically stable. The thermal balance is still closing slowly, with the residual storage term reduced from about `1.10 kW` to about `1.04 kW` over this first `2000 s` checkpoint. Continue the long run before claiming strict steady state.
+### 2026-06-29 correction: cesium TEC gap h_eq should be 29 W/m2/K
+
+User review caught that the previous `h_eq=200 W/m2/K` fixed-U continuations used an artificial sensitivity value, not the physical cesium-vapor TEC gap setting. The V7 steady CaseA configuration uses `tec_gap_config h_eq=29.0 W/m2/K`, and the V13 cold-start cesium-filled gap should be consistent with that value unless explicitly running a sensitivity case.
+
+Code correction:
+
+```text
+testModule/v13_startup_control.py: V13StartupControlConfig.cesium_gap_h_eq_w_m2_k default = 29.0
+testModule/run_v13_start_case.py: --cesium-gap-h-eq-w-m2-k default = 29.0
+testModule/test_v13_startup_control.py: added defaults tests for config and runner CLI
+```
+
+Verification:
+
+```text
+testModule/test_v13_startup_control.py: passed
+python -m py_compile testModule/v13_startup_control.py testModule/run_v13_start_case.py testModule/test_v13_startup_control.py: passed
+```
+
+Therefore, the earlier `h_eq=200` results must be treated as numerical/control diagnostics only, not as official V13 physical startup results.
+
+Corrected `h_eq=29` restart path:
+
+```text
+base restart = testModule/v13_start_cesium_conditioning_plus1000s_20260628/v13_start_cesium_conditioning_plus1000s_20260628_latest_restart.npz
+base state: t=4090 s, Cs fraction ~= 1, TEC disabled, old h_eq ~= 250 W/m2/K
+```
+
+A corrected thermal hold with TEC disabled was run using `h_eq=29.0`:
+
+```text
+output = testModule/v13_start_h29_tec_off_200s_20260629
+t = 4290 s
+core power = 110000 W
+TEC disabled
+h_eq = 29.0 W/m2/K
+core inlet/outlet ~= 722.28 / (history endpoint) K
+mean emitter ~= 1513.22 K
+```
+
+Then a `2 s` fixed-R to fixed-U smoke was run:
+
+```text
+output = testModule/v13_start_h29_fixedr_to_fixedu_2s_20260629
+fixed-R at t=4290.5 s: U ~= 65.04 V, I ~= 0.650 A, P_e ~= 42.3 W, converged=True
+switch to fixed-U 27.2 V triggered immediately after the first fixed-R record
+fixed-U at t=4292.0 s: U=27.2 V, I ~= 351.17 A, P_e ~= 9.55 kW, converged=True
+```
+
+Short fixed-U continuation:
+
+```text
+output = testModule/v13_start_h29_fixedu27p2_plus20s_20260629
+t = 4312 s
+U=27.2 V
+I ~= 259.10 A
+P_e ~= 7.05 kW
+mean emitter ~= 1490.42 K
+core inlet/outlet ~= 728.01 / 818.14 K
+core_heat - coolant_enthalpy - electric ~= 0.76 kW
+```
+
+Medium fixed-U continuation:
+
+```text
+output = testModule/v13_start_h29_fixedu27p2_plus220s_20260629
+t = 4512 s
+U=27.2 V
+I ~= 211.67 A
+P_e ~= 5.76 kW
+mean emitter ~= 1506.67 K
+core inlet/outlet ~= 731.35 / 819.28 K
+q_radiator_total ~= 99.65 kW
+coolant enthalpy rise ~= 99.69 kW
+core_heat - coolant_enthalpy - electric ~= 4.55 kW
+```
+
+A `1000 s` fixed-U continuation with `thermo_update_interval=1.0 s` completed:
+
+```text
+output = testModule/v13_start_h29_fixedu27p2_plus1220s_tec1s_20260629
+t = 5512 s
+U=27.2 V
+I ~= 209.72 A
+P_e ~= 5.70 kW
+mean emitter ~= 1541.95 K
+core inlet/outlet ~= 735.62 / 825.70 K
+q_radiator_total ~= 102.08 kW
+coolant enthalpy rise ~= 102.11 kW
+core_heat - coolant_enthalpy - electric ~= 2.19 kW
+```
+
+Interpretation: with the corrected `h_eq=29.0 W/m2/K`, the V13 startup enters a meaningful TEC generation regime. The fixed-R voltage gate is crossed naturally, fixed-U solves converge, and electric power is now in the expected kilowatt range rather than the invalid tens-of-watts result from `h_eq=200`. The state is still not strict steady because the emitter and radiator heat rejection are drifting; a `5000 s` continuation is running:
+
+```text
+output = testModule/v13_start_h29_fixedu27p2_plus6220s_tec1s_20260629
+pid = 53696
+```
+### 2026-06-29 correction: TFE ignition timing for cesium gap and fixed-R startup
+
+User clarified the startup sequence: at `critical_time + 1500 s`, TFE ignition should immediately replace the emitter-collector gap equivalent heat-transfer coefficient with the cesium-vapor value `h_eq=29.0 W/m2/K`. The fixed-resistance external circuit should participate from this ignition point so voltage/current develop while the emitter warms; once the terminal voltage reaches `27.2 V`, the main circuit switches to fixed total voltage.
+
+This supersedes the previous workflow that first ran a separate TEC-off thermal hold after cesium conditioning. Those TEC-off hold runs remain useful diagnostics, but are not the formal startup sequence.
+
+Code updates:
+
+```text
+testModule/v13_startup_control.py
+  - default cesium_gap_h_eq_w_m2_k = 29.0
+  - TFE ignition latches by time after critical, not by emitter-temperature gate
+  - once ignition latches, cs_fraction = 1.0 and h_eq immediately equals the cesium value
+  - default electrical start gates are zero, so fixed-R TEC coupling starts at TFE ignition
+
+testModule/run_v13_start_case.py
+  - --cesium-gap-h-eq-w-m2-k default = 29.0
+  - --tec-electrical-start-after-cesium-s default = 0.0
+  - --tec-electrical-start-cs-fraction default = 0.0
+  - --tec-electrical-start-emitter-temperature-k default = 0.0
+
+testModule/test_v13_startup_control.py
+  - added/updated tests for TFE ignition immediately setting h_eq=29 and enabling fixed-R TEC
+```
+
+Verification:
+
+```text
+testModule/test_v13_startup_control.py: passed
+python -m py_compile testModule/v13_startup_control.py testModule/run_v13_start_case.py testModule/test_v13_startup_control.py: passed
+```
+
+Corrected sequence test from the `t=1590 s` pre-ignition restart:
+
+```text
+base restart = testModule/v13_start_corrected_shield_startup_1590s_20260628/v13_start_corrected_shield_startup_1590s_20260628_latest_restart.npz
+base state: t=1590 s, time_after_critical ~= 1492.7 s, TEC off, h_eq=600 W/m2/K, mean emitter ~= 1031.2 K
+```
+
+With the corrected controller, TEC coupling enabled automatically at `t ~= 1597.342 s` and `h_eq=29.0` was applied from ignition.
+
+Fixed-R load tests:
+
+```text
+R_total = 0.0044 ohm
+output = testModule/v13_start_h29_tfe_ignition_fixedr_300s_20260629
+stable fixed-R, but voltage only rose to ~= 2.23 V by t=1890 s; no switch.
+
+R_total = 0.05 ohm
+output = testModule/v13_start_h29_tfe_ignition_fixedr_R005_500s_20260629
+stable fixed-R, voltage rose to ~= 16.40 V by t=2090 s; no switch.
+
+R_total = 0.083 ohm from the warmed R=0.05 restart
+output = testModule/v13_start_h29_fixedr_R0083_fromR005_200s_20260629
+stable fixed-R, voltage rose to ~= 21.97 V by t=2290 s; no switch.
+
+R_total = 0.105 ohm from the warmed R=0.083 restart
+output = testModule/v13_start_h29_fixedr_R0105_fromR0083_100s_20260629
+stable fixed-R, voltage rose to ~= 24.68 V by t=2390 s; no switch.
+
+R_total = 0.12 ohm from the warmed R=0.105 restart
+output = testModule/v13_start_h29_fixedr_R012_fromR0105_50s_20260629
+stable fixed-R, voltage rose to ~= 26.20 V by t=2440 s; no switch.
+
+R_total = 0.125 ohm from the warmed R=0.12 restart
+output = testModule/v13_start_h29_fixedr_R0125_fromR012_20s_20260629
+stable fixed-R, peak voltage ~= 26.72 V; no switch.
+
+R_total = 0.131 ohm from the warmed R=0.125 restart
+output = testModule/v13_start_h29_fixedr_R0131_fromR013_10s_20260629
+fixed-R at t=2480.5 s: U ~= 27.246 V, I ~= 207.98 A, P_e ~= 5.67 kW
+automatic switch to fixed-U 27.2 V succeeded; subsequent fixed-U records converged.
+```
+
+A direct `R_total=0.10 ohm` run from cold TFE ignition was attempted, but it consumed CPU without writing a first history record and was stopped. A `per_tec` interpretation of `0.0044 ohm` also failed by producing non-finite axial Joule heat after early records. Therefore, the currently stable route is staged fixed-R resistance from low value to approximately `0.131 ohm` as the emitter warms, followed by fixed-U.
+
+Fixed-U continuation after successful switch:
+
+```text
+output = testModule/v13_start_h29_fixedu_fromR0131_plus1000s_20260629
+t = 3490 s
+U = 27.2 V
+I ~= 209.68 A
+P_e ~= 5.70 kW
+mean emitter ~= 1543.14 K
+core inlet/outlet ~= 735.61 / 825.68 K
+q_radiator_total ~= 102.07 kW
+coolant enthalpy rise ~= 102.10 kW
+core_heat - coolant_enthalpy - electric ~= 2.20 kW
+```
+
+The result is in the expected kilowatt range and comparable to the V11 electrical output scale, but it is not yet strict steady state. A corrected-sequence `5000 s` fixed-U continuation is now running:
+
+```text
+output = testModule/v13_start_h29_fixedu_fromR0131_plus6000s_tec1s_20260629
+pid = 77012
+```
+### 2026-06-29 corrected ignition fixed-U plus6000s checkpoint
+
+The corrected-sequence fixed-U continuation from the successful `R_total=0.131 ohm` switch completed a further `5000 s` segment:
+
+```text
+output = testModule/v13_start_h29_fixedu_fromR0131_plus6000s_tec1s_20260629
+start = 3490 s
+end = 8490 s
+startup power = 110000 W
+h_eq = 29.0 W/m2/K
+mode = fixed_u
+U = 27.2 V
+```
+
+Endpoint:
+
+```text
+t = 8490 s
+I ~= 209.47 A
+P_e ~= 5.70 kW
+mean emitter ~= 1544.62 K
+core inlet/outlet ~= 736.45 / 826.92 K
+q_radiator_total ~= 102.55 kW
+coolant enthalpy rise ~= 102.55 kW
+core_heat - coolant_enthalpy - electric ~= 1.75 kW
+```
+
+All records converged with `tec_solver_iteration_count = 1` after restart. The only stderr entry was the known first-step hydraulic residual warning at the restart boundary. Recent slopes over the last five records:
+
+```text
+dP_e/dt ~= -8.16e-4 W/s
+dT_emitter/dt ~= +3.10e-5 K/s
+dT_inlet/dt ~= +5.07e-5 K/s
+dq_radiator/dt ~= +2.93e-2 W/s
+d(coolant enthalpy rise)/dt ~= +2.93e-2 W/s
+```
+
+Interpretation: the corrected TFE ignition path is stable and in the expected kilowatt electrical-output range, but it is still not a strict steady state because the residual storage term is about `1.75 kW`. A longer `30000 s` fixed-U continuation is now running:
+
+```text
+output = testModule/v13_start_h29_fixedu_fromR0131_plus36000s_tec1s_20260629
+pid = 79504
+```
+### 2026-06-29 V13 cold-start fixed-U handoff residual interpretation
+
+The corrected V13 cold-start path now treats TFE ignition at `critical_time + 1500 s` as the point where the TEC gap is set directly to the V7 steady Cs-vapor value `h_eq = 29.0 W/m2/K` and the main TEC electrical solve is enabled. The stable demonstrated handoff is staged total fixed-R warmup to about `0.131 ohm`, followed by automatic switch to fixed-U `27.2 V`.
+
+The latest long continuation was stopped by request instead of forcing strict steady state:
+
+```text
+output = testModule/v13_start_h29_fixedu_fromR0131_plus36000s_tec1s_20260629
+history final time = 32490 s
+latest saved restart = testModule/v13_start_h29_fixedu_fromR0131_plus36000s_tec1s_20260629/v13_start_h29_fixedu_fromR0131_plus36000s_tec1s_20260629_latest_restart.npz
+```
+
+At the final history row, `q_radiator_total - coolant_enthalpy_rise = -0.136 W`, while `core_heat - coolant_enthalpy_rise - TEC_electric = 1329.281 W`. Since the radiator/coolant balance is sub-watt and the TEC fixed-U solve converged in one iteration with finite outputs, this residual should be interpreted as transient storage in the still-warming core/TFE/structural solids, not as a hydraulic/radiator/ThermoCalc accounting failure.
+
+For later long continuations, use the latest restart above and track `core_heat - coolant_dh - electric` as the storage residual. A practical near-steady acceptance gate is to reduce that residual below the task-specific tolerance, for example `<0.5 kW` or `<1%` core power, and confirm small final-window slopes in inlet/outlet coolant temperature, mean emitter temperature and radiator heat rejection.
+
+Restart timestamp note: in the stopped `plus36000s` run, the CSV history reached `t = 32490 s`, but the latest restart file stores `System/global_time = 28490 s` and `System/last_dt = 0.5 s`. Use the restart for resumable continuation and the CSV final row for the latest residual diagnosis.
+
+### 2026-06-29 residual diagnostic fields added to V13 startup runner
+
+`testModule/run_v13_start_case.py` now writes derived energy residual diagnostics into every startup history row and `latest_state.json` `latest_record`:
+
+```text
+core_heat_minus_coolant_enthalpy_minus_electric_w
+core_heat_minus_radiator_minus_electric_w
+corrected_core_energy_residual_w = core_heat_power - coolant_enthalpy_rise - terminal_electric - tec_wire_joule_loss
+corrected_loop_energy_residual_w = core_heat_power + radiator_tube_external_heat_w - q_radiator_total_w - terminal_electric - tec_wire_joule_loss
+radiator_minus_coolant_enthalpy_w
+tec_wire_joule_loss_w
+core_energy_storage_residual_rel
+radiator_coolant_balance_rel
+```
+
+`q_radiator_total_w - coolant_enthalpy_rise_w` remains the main loop closure check for radiator/coolant exchange. `radiator_tube_external_heat_w` is an explicit heat input term and is **not** treated as an error term. For transient runs, interpret `corrected_core_energy_residual_w` as the storage imbalance of core plus connected structure after excluding wire Joule loss; `corrected_loop_energy_residual_w` includes the explicit external heat input as a source. Fins in this runner are quasi-steady and do not add a separate storage term in the startup residual bookkeeping.
+
+Verification:
+
+```text
+E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe testModule\test_v13_startup_control.py
+E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe -m py_compile testModule\run_v13_start_case.py testModule\test_v13_startup_control.py
+```
+
+### 2026-06-30 local implicit fluid-solid dt limit
+
+`SystemManager.compute_adaptive_dt()` now receives a strict fluid-solid coupling time-scale limit even when V11/V13 use `solid_ode_method=implicit_euler` and `fluid_solid_coupling_scheme=local_implicit`. The limiting coupler value is `safety_factor * min(C_eff / lambda)` after the first coupler execution. This prevents thin radiator/header walls from being advanced only by `max_dt` when local implicit exchange is enabled.
+
+Verification added:
+
+```text
+E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe -m unittest testModule.test_local_implicit_heat_exchange testModule.test_system_manager_lifecycle
+```
+
+For V11/V13 timing comparisons, record `coupling_tau_min_s`, `coupling_dt_limit_s`, and `dt_over_coupling_tau_max` from coupler diagnostics when diagnosing unexpectedly small adaptive time steps or wall/fluid temperature reversals.
+
+### 2026-07-10 V14_10kW powered debug baseline
+
+`testModule/Full_Loop_Cases_10kW/` is the active 10 kW V14 heat-pipe-radiator package. It should be treated as a local branch of the full-loop work: keep new 10 kW modeling changes inside this directory unless the user explicitly asks to promote them back into `Full_Loop_Cases` or shared component code.
+
+Primary docs:
+
+```text
+testModule/Full_Loop_Cases_10kW/README.md
+testModule/Full_Loop_Cases_10kW/V14_210kW_debug/README.md
+testModule/Full_Loop_Cases_10kW/V14_210kW_debug/TUNING_LOG.md
+```
+
+Primary powered runner:
+
+```text
+testModule/Full_Loop_Cases_10kW/V14_210kW_debug/run_v14_210kw_debug.py
+```
+
+Run assumptions used by the current debug baseline:
+
+```text
+core power = 210000 W
+loop flow target = 2.46 kg/s
+solid solver = implicit_euler
+space temperature = 4 K
+external orbital heat flux = disabled
+TEC lookup = enabled for powered tuning runs
+main TEC target = about 206 A and 10.44 kW net electric power
+```
+
+Use direct runner invocations for `V14_210kW_debug`. Avoid `python -m unittest` for this staged debug workflow; it previously stalled and is not the intended entry. For syntax-level checks, use `py_compile` on the edited runner/builder files.
+
+Current best restart:
+
+```text
+testModule/Full_Loop_Cases_10kW/V14_210kW_debug/runs/final_eps07475_u50p65_wire0335_1200s_from7964/stage_01_restart.npz
+```
+
+Current best parameters:
+
+```text
+radiator_emissivity = 0.7475
+tec_voltage = 50.65 V
+wire_resistance_scale = 0.335
+hp_up_view_factor = 0.0
+upper_hp_down_view_factor = 0.3
+lower_hp_down_view_factor = 0.4
+```
+
+Endpoint summary at `t=9163.85 s`:
+
+```text
+core inlet/outlet = 754.738 / 845.773 K
+TEC current = 206.569 A
+TEC net electric power = 10.463 kW
+total radiator rejection = 195.212 kW
+required pump head = 27.880 kPa
+```
+
+Interpretation: the result is close to the requested `754.45 K` inlet, `845.65 K` outlet, `206 A`, and `10.44 kW`, but remains slightly hot and slightly high in current/power. Treat it as a working continuation baseline. If tighter calibration is required, make small changes to radiator emissivity or wire-resistance scale and validate with at least a 1200 s window; 1 s electrical checks are not reliable final evidence for this case.

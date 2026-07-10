@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Embedded orbital heat-flux tables derived from the legacy Fortran radiator input.
 
@@ -11,6 +13,8 @@ from dataclasses import dataclass
 from typing import Dict, Tuple
 
 import numpy as np
+
+from .w0_8p12_sum_data import load_w0_8p12_sum_matrices
 
 
 def _parse_numeric_row(text: str) -> np.ndarray:
@@ -151,6 +155,54 @@ def _build_fortran_orbital_heat_tables() -> Dict[int, EmbeddedFluxTable]:
 
     return tables
 
-
 FORTRAN_ORBITAL_HEAT_TABLES = _build_fortran_orbital_heat_tables()
 FORTRAN_ORBITAL_HEAT_TABLE_LIBRARY = EmbeddedFluxTableLibrary(FORTRAN_ORBITAL_HEAT_TABLES)
+
+
+@dataclass(frozen=True)
+class EmbeddedFluxMatrix:
+    """Embedded orbital heat-flux matrix with one time column and N flux columns."""
+
+    key: str
+    time: np.ndarray
+    values: np.ndarray
+    source: str = ""
+    periodic: bool = True
+
+
+class EmbeddedFluxMatrixLibrary:
+    """Lookup helper for embedded orbital heat-flux matrices."""
+
+    def __init__(self, matrices: Dict[str, EmbeddedFluxMatrix]):
+        self.matrices = dict(matrices)
+
+    def get_matrix(self, key: str) -> EmbeddedFluxMatrix:
+        try:
+            return self.matrices[key]
+        except KeyError as exc:
+            available = ", ".join(sorted(self.matrices)) or "<none>"
+            raise KeyError(f"Unknown embedded flux matrix '{key}'. Available: {available}") from exc
+
+    def available_keys(self) -> Tuple[str, ...]:
+        return tuple(sorted(self.matrices.keys()))
+
+
+def _build_w0_8p12_orbital_heat_matrices() -> Dict[str, EmbeddedFluxMatrix]:
+    """Build fixed sum-flux matrices for w0=8.12deg and i_s=58.5deg."""
+    matrices = {}
+    for key, data in load_w0_8p12_sum_matrices().items():
+        if data.ndim != 2 or data.shape[1] < 2:
+            raise ValueError(f"Embedded flux matrix '{key}' must contain time plus flux columns")
+        matrices[key] = EmbeddedFluxMatrix(
+            key=key,
+            time=data[:, 0].astype(float),
+            values=data[:, 1:].astype(float),
+            source="Components.ExternalHeatSources.w0_8p12_sum_data",
+            periodic=True,
+        )
+    return matrices
+
+
+W0_8P12_ORBITAL_HEAT_MATRICES = _build_w0_8p12_orbital_heat_matrices()
+W0_8P12_ORBITAL_HEAT_MATRIX_LIBRARY = EmbeddedFluxMatrixLibrary(W0_8P12_ORBITAL_HEAT_MATRICES)
+

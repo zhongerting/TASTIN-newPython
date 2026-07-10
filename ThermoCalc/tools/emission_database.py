@@ -35,6 +35,13 @@ SOURCE_REGIONS = {
     "high_power": 2,
     "accident": 3,
 }
+PCS_MIN_TORR = 0.02
+PCS_MAX_TORR = 5.0
+PCS_SPACING = "log"
+
+
+def pcs_axis_spec(count: int) -> tuple[float, float, int, str]:
+    return (PCS_MIN_TORR, PCS_MAX_TORR, count, PCS_SPACING)
 
 REGIONS: dict[str, dict[str, Any]] = {
     "core": {
@@ -43,7 +50,7 @@ REGIONS: dict[str, dict[str, Any]] = {
         "te": (1300.0, 2150.0, 86, True),
         "tc": (700.0, 900.0, 41, True),
         "vo": (0.0, 3.5, 71, True),
-        "pcs": (0.5, 2.0, 41, "log"),
+        "pcs": pcs_axis_spec(41),
         "target_points_per_chunk": 250_000,
         "worker_group": "A",
     },
@@ -53,7 +60,7 @@ REGIONS: dict[str, dict[str, Any]] = {
         "te": (700.0, 1300.0, 31, False),
         "tc": (500.0, 800.0, 31, True),
         "vo": (0.0, 3.5, 36, True),
-        "pcs": (0.5, 2.0, 21, "log"),
+        "pcs": pcs_axis_spec(21),
         "target_points_per_chunk": 250_000,
         "worker_group": "B",
     },
@@ -63,7 +70,7 @@ REGIONS: dict[str, dict[str, Any]] = {
         "te": (2150.0, 2400.0, 26, True),
         "tc": (750.0, 1000.0, 26, True),
         "vo": (0.0, 3.5, 71, True),
-        "pcs": (0.5, 2.0, 41, "log"),
+        "pcs": pcs_axis_spec(41),
         "target_points_per_chunk": 250_000,
         "worker_group": "C",
         "drop_te_le": 2150.0,
@@ -74,7 +81,7 @@ REGIONS: dict[str, dict[str, Any]] = {
         "te": (700.0, 2400.0, 86, True),
         "tc": (500.0, 1100.0, 61, True),
         "vo": (0.0, 3.5, 36, True),
-        "pcs": (0.1, 4.0, 31, "log"),
+        "pcs": pcs_axis_spec(31),
         "target_points_per_chunk": 300_000,
         "worker_group": "D",
     },
@@ -248,7 +255,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "te_solver_pyd": pyd_info(),
         "diagnostic_interface": "te_solver.calc_emission_point",
         "d_gap": float(args.d_gap),
-        "pressure_formula": "Pcs = 2.45e8 / sqrt(Tcs) * exp(-8910 / Tcs)",
+        "pressure_unit": "torr",
+        "pressure_formula": "Pcs_torr = 2.45e8 / sqrt(Tcs) * exp(-8910 / Tcs)",
         "field_groups": {
             "float_fields": list(FLOAT_FIELDS),
             "int_fields": list(INT_FIELDS),

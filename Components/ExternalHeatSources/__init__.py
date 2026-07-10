@@ -19,7 +19,12 @@ from abc import ABC, abstractmethod
 from typing import Tuple, Union, Optional
 import numpy as np
 
-from .embedded_flux_tables import FORTRAN_ORBITAL_HEAT_TABLE_LIBRARY, EmbeddedFluxTableLibrary
+from .embedded_flux_tables import (
+    FORTRAN_ORBITAL_HEAT_TABLE_LIBRARY,
+    W0_8P12_ORBITAL_HEAT_MATRIX_LIBRARY,
+    EmbeddedFluxMatrixLibrary,
+    EmbeddedFluxTableLibrary,
+)
 
 
 class BaseExternalHeatSource(ABC):
@@ -457,6 +462,80 @@ class OrbitalTableHeatSource(BaseExternalHeatSource):
             self.table_ids = self._normalize_table_ids(self.table_ids)
         if table_ids is not None:
             self.table_ids = self._normalize_table_ids(table_ids)
+        if scale_factor is not None:
+            self.scale_factor = float(scale_factor)
+        if offset is not None:
+            self.offset = float(offset)
+        if periodic is not None:
+            self.periodic = bool(periodic)
+
+
+
+class OrbitalMatrixHeatSource(BaseExternalHeatSource):
+    """Matrix lookup orbital heat source driven by packaged w0=8.12deg sum data."""
+
+    def __init__(self,
+                 shape: Tuple[int, ...],
+                 matrix_key: str,
+                 matrix_library: EmbeddedFluxMatrixLibrary = W0_8P12_ORBITAL_HEAT_MATRIX_LIBRARY,
+                 scale_factor: float = 1.0,
+                 offset: float = 0.0,
+                 periodic: bool = True):
+        super().__init__(shape)
+        self.matrix_library = matrix_library
+        self.matrix_key = str(matrix_key)
+        self.matrix = None
+        self.scale_factor = float(scale_factor)
+        self.offset = float(offset)
+        self.periodic = bool(periodic)
+        self._load_and_validate_matrix()
+
+    def _load_and_validate_matrix(self):
+        self.matrix = self.matrix_library.get_matrix(self.matrix_key)
+        expected = int(np.prod(self.shape))
+        actual = int(self.matrix.values.shape[1])
+        if actual != expected:
+            raise ValueError(
+                f"Orbital heat matrix {self.matrix_key!r} column count {actual} does not match heat source shape {self.shape} ({expected} nodes)."
+            )
+
+    @staticmethod
+    def _wrap_time_to_matrix(time: float, sample_time: np.ndarray) -> float:
+        start = float(sample_time[0])
+        end = float(sample_time[-1])
+        step = float(sample_time[1] - sample_time[0]) if sample_time.size > 1 else 0.0
+        period = (end - start) + step
+        if period <= 0.0:
+            return float(time)
+        return ((float(time) - start) % period) + start
+
+    def get_heat_flux(self, time: float) -> np.ndarray:
+        sample_time = float(time)
+        if self.periodic and self.matrix.periodic:
+            sample_time = self._wrap_time_to_matrix(sample_time, self.matrix.time)
+        values = np.empty(self.matrix.values.shape[1], dtype=float)
+        for index in range(self.matrix.values.shape[1]):
+            values[index] = np.interp(sample_time, self.matrix.time, self.matrix.values[:, index])
+        values *= self.scale_factor
+        if self.offset != 0.0:
+            values += self.offset
+        return values.reshape(self.shape)
+
+    def update_params(self,
+                      matrix_key: str = None,
+                      scale_factor: float = None,
+                      offset: float = None,
+                      periodic: bool = None,
+                      matrix_library: EmbeddedFluxMatrixLibrary = None):
+        reload_matrix = False
+        if matrix_library is not None:
+            self.matrix_library = matrix_library
+            reload_matrix = True
+        if matrix_key is not None:
+            self.matrix_key = str(matrix_key)
+            reload_matrix = True
+        if reload_matrix:
+            self._load_and_validate_matrix()
         if scale_factor is not None:
             self.scale_factor = float(scale_factor)
         if offset is not None:

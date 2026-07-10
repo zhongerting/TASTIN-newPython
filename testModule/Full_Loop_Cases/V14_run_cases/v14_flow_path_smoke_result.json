@@ -1,0 +1,53 @@
+{
+  "case": "V14_flow_path_hydraulic_only_smoke",
+  "case_version": "v14_heatpipe_radiator_full_loop",
+  "description": "Hydraulic-only closed-loop V14 smoke. Thermal radiation emissivities are set to zero and no SystemManager thermal coupling step is run.",
+  "fixed_pressure_boundary_volumes": [],
+  "hydraulic_init_converged": true,
+  "hydraulic_init_dt_s": 0.01,
+  "hydraulic_max_iter": 1000,
+  "hydraulic_step_completed": true,
+  "hydraulic_step_dt_s": 0.0001,
+  "hydraulic_tol_kg_s": 0.0001,
+  "max_abs_flow_kg_s_after_step": 1.1570159565474887,
+  "max_flow_kg_s_after_step": 1.1570159565474887,
+  "max_pressure_pa_after_step": 206003.06044967787,
+  "min_flow_kg_s_after_step": -0.10448180173738683,
+  "min_pressure_pa_after_step": 200171.77252766184,
+  "n_junctions": 231,
+  "n_volumes": 222,
+  "nonfinite_flow_junctions": [],
+  "nonfinite_pressure_volumes": [],
+  "pressure_reference_volumes": [
+    "CoreInletConnector"
+  ],
+  "pump_single_head_pa": 3233.28,
+  "pump_total_head_pa": 6466.56,
+  "selected_junction_flows_kg_s": {
+    "J_A1_I1_to_O1_to_O1": 0.10433921694529472,
+    "J_CoreInletSegment_to_CoreInletConnector": 1.1570159562562397,
+    "J_HotOutletBranch_1_to_InletMix_I1": 0.19346040302565903,
+    "J_I1_to_A1_I1_to_O1": 0.10433921755076198,
+    "J_Manifold_1_to_RadiatorOutletHeader": 0.20882101772944373,
+    "J_OutletMix_O1_Manifold_1": 0.20882101802325803,
+    "J_PumpA": 1.1570159565474887,
+    "J_PumpB": 1.1570159564978215,
+    "J_PumpOutletNode_to_CoreInletSegment": 1.157015956450341,
+    "J_RadiatorInletHeader_to_HotOutletBranch_1": 0.3869208471622165
+  },
+  "selected_volume_pressures_pa": {
+    "CoreInletConnector": 205000.0,
+    "CoreInletSegment_Vol_01": 205501.5300331022,
+    "CoreOutletConnector": 201957.50715459156,
+    "HotOutletBranch_1_Vol_01": 201654.2547551035,
+    "InletMix_I1": 201801.6936913541,
+    "Manifold_1_Vol_01": 201143.4507215788,
+    "OutletMix_O1": 201688.81564544988,
+    "PumpMidNode": 202903.521919117,
+    "PumpOutletNode": 206003.06044967787,
+    "RadiatorInletHeader_Vol_01": 201455.98048907093,
+    "RadiatorOutletHeader_Vol_01": 200171.77252766184
+  },
+  "single_ring_branch_flow_design_kg_s": 0.21666666666666667,
+  "total_flow_design_kg_s": 1.3
+}

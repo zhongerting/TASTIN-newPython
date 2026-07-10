@@ -320,3 +320,26 @@ source.add_source(EarthIRHeatSource(shape=boundary.shape))
 - `AlbedoHeatSource` 与 `EarthIRHeatSource` 是简化常值模型。
 - 查表法输出总热流，不分离太阳、反照率和地球红外分量。
 - `OrbitalHeatSource` 的几何模型适合简化分析，复杂遮挡、姿态变化和真实可见因子需要后续扩展。
+
+
+
+### `OrbitalMatrixHeatSource`
+
+Matrix lookup external heat source for the fixed case `w0=8.12deg, i_s=58.5deg`. Only the pre-summed `sum` heat flux is packaged, so the runtime does not add solar, albedo, and Earth IR components separately.
+
+Packaged matrices are embedded in `Components/ExternalHeatSources/w0_8p12_sum_data.py`:
+
+| `matrix_key` | Columns |
+| --- | --- |
+| `is58p5_w0_8p12_N6_sum` | 6 |
+| `is58p5_w0_8p12_N78_sum` | 78 |
+| `is58p5_w0_8p12_N200_sum` | 200 |
+
+`OrbitalMatrixHeatSource` returns `W/m2`. `ExternalHeatFluxBC` remains responsible for multiplying by the boundary or fin illuminated area and converting the load to `W`. The matrix column count must match `np.prod(shape)`; this class performs time interpolation and periodic wrapping only, not spatial resampling.
+
+```python
+source = OrbitalMatrixHeatSource(
+    shape=boundary.shape,
+    matrix_key="is58p5_w0_8p12_N6_sum",
+)
+```

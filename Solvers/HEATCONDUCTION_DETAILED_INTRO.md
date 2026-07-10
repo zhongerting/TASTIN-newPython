@@ -620,6 +620,20 @@ solid.boundaries["outer"].clear_conditions()
 
 然后再添加目标边界条件。
 
+### 8.2.1 边界叠加缓存
+
+`BoundaryRegion._accumulate_bc()` 仍在使用：`add_resistance_condition()`、`add_convection_condition()`、`add_flux_condition()` 和 `add_dynamic_radiation_condition()` 添加条件时会调用它，为 `G_sum/J_sum/Q_sum_flux` 提供初始化缓存。正式求解路径中的 `compute_net_flux_for_solver()` 会在每次计算边界热流时重新清零并重建这些缓存；隐式导热矩阵装配随后读取 `G_sum/R_eff/T_eff/Q_sum_flux`。
+
+热阻到电导的转换遵循以下约定：
+
+```text
+R_ext = inf  -> G = 0       # 绝热
+R_ext = 0    -> G = 1e20    # 定温/Dirichlet 极限
+R_ext > 0    -> G = 1/R_ext
+```
+
+因此 `R_ext=0` 是有效的定温边界表达，不应被当作绝热。固定热流 `FluxBC` 进入 `Q_sum_flux`，不进入 `J_sum`。
+
 ### 8.3 物性函数需要支持向量输入
 
 `BaseHeatConduction._update_properties()` 直接向材料对象传入数组：
@@ -651,7 +665,23 @@ k = i * n_y + j
 
 `BaseHeatConduction` now supports a per-solid default ODE method through `solid.ode_method` and `solid.set_ode_method(method)`. The default is still `BDF`, so existing `SystemManager` calls to `solid.step(dt)` keep their previous behavior unless a component sets a different method on that solid.
 
-`BaseHeatConduction.step(dt, method=None, **kwargs)` uses `self.ode_method` when `method is None`; passing `method` explicitly overrides only that single call. Supported methods are the SciPy `solve_ivp` methods `RK45`, `RK23`, `DOP853`, `Radau`, `BDF`, and `LSODA`. `BDF` and `Radau` continue to receive available sparse Jacobian structure.
+`BaseHeatConduction.step(dt, method=None, **kwargs)` uses `self.ode_method` when `method is None`; passing `method` explicitly overrides only that single call. Supported methods are the SciPy `solve_ivp` methods `RK45`, `RK23`, `DOP853`, `Radau`, `BDF`, and `LSODA`, plus `implicit_euler` for generic `HeatConduction1D/2D`. `BDF` and `Radau` continue to receive available sparse Jacobian structure.
+
+`implicit_euler` performs a backward-Euler sparse algebraic solve once per global `SystemManager.step()` time step. In this mode, resistance/convection/dynamic-radiation boundary terms are assembled into the implicit matrix, while pure `FluxBC` terms stay on the explicit RHS.
+
+Implementation note for the optimized path: generic `HeatConduction1D/2D` cache the CSC sparse matrix pattern after the first implicit step for a fixed mesh shape. Later steps update only numeric `data` entries, including conductance and boundary-linearization diagonal terms. This removes Python edge-loop assembly from the hot path while keeping material and radiation coefficients free to change each step. There is no cross-solid assembly and no LU/factorization cache in this round.
+
+If implicit solve fails, `HeatConduction.step()` warns and falls back to `solve_ivp`.
+
+Because `implicit_euler` is first-order and intentionally dissipative, compare it against `solve_ivp` with the same global `max_dt` when validating system cases. In the 2026-06-24 V13 no-TEC 1 s smoke, `max_dt=0.1 s` kept the core outlet difference to about `0.11 K`; `max_dt=0.5 s` showed visibly larger backward-Euler damping.
+
+For local performance regression checks, use:
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\benchmark_heatconduction_implicit.py --steps-1d 40 --steps-2d 20 --n1d 4000 --n2d-x 90 --n2d-y 90
+```
+
+2026-06-24 post-optimization reference on this machine: 1D 4000-node implicit stepping `0.001869 s/step`; 2D 90x90 implicit stepping `0.026584 s/step`.
 
 V8 CaseA 的公共入口 `testModule/run_v8_caseA_common.py` 会在构建后和加载 restart 后统一调用 `solid.set_ode_method()`。默认 `--solid-ode-method` 为 `LSODA`，并覆盖 `SystemManager.solid_components` 中注册的全部堆芯固体，包括 TFE 内部固体、全局慢化剂环、筒体、反射层和网格化间隙固体。显式传入 `BDF`、`Radau` 等合法方法可恢复或切换该算例的固体积分器。
 

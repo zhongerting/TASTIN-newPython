@@ -24,7 +24,10 @@ using namespace std;
 // 电路计算模式枚举
 enum class CalculationMode {
     FixedVoltage, // 固定电压模式
-    FixedResistance // 固定电阻模式
+    FixedResistance, // 固定电阻模式
+    ParallelFixedVoltage,
+    ParallelFixedCurrent,
+    ParallelLoadCurve
 };
 
 struct InputData {
@@ -73,6 +76,8 @@ struct InputData {
     double target_val;      // 目标值 (Utarget 或 Rload)
     double I_total_init;    // 整个电路的初始电流猜测 Iout
     double R_load_init;     // 初始负载电阻 (如果是定电压模式可能用不到，但留着备用)
+    py::array_t<double> loadCurveCurrent; // 并联负载曲线电流轴 [A]
+    py::array_t<double> loadCurveVoltage; // 并联负载曲线电压轴 [V]
 };
 
 // -------------------------------------------------------------------------
@@ -94,6 +99,15 @@ std::vector<double> get_row_vector(const py::array_t<double>& arr, int i) {
 double get_scalar(const py::array_t<double>& arr, int i) {
     auto r = arr.unchecked<1>();
     return r(i);
+}
+
+std::vector<double> get_vector_1d(const py::array_t<double>& arr) {
+    auto r = arr.unchecked<1>();
+    std::vector<double> vec(static_cast<std::size_t>(r.shape(0)));
+    for (py::ssize_t i = 0; i < r.shape(0); ++i) {
+        vec[static_cast<std::size_t>(i)] = r(i);
+    }
+    return vec;
 }
 
 void require_1d(const char* name, const py::array_t<double>& arr, int n_rows) {
@@ -135,6 +149,13 @@ void validate_input(const InputData& data) {
     require_1d("U_init", data.U_init, data.N_elements);
     require_1d("d_gap", data.d_gap, data.N_elements);
     require_1d("Itarget", data.Itarget, data.N_elements);
+    if (data.mode == CalculationMode::ParallelLoadCurve) {
+        if (data.loadCurveCurrent.ndim() != 1 || data.loadCurveVoltage.ndim() != 1 ||
+            data.loadCurveCurrent.shape(0) != data.loadCurveVoltage.shape(0) ||
+            data.loadCurveCurrent.shape(0) < 2) {
+            throw py::value_error("ParallelLoadCurve requires loadCurveCurrent/loadCurveVoltage with matching shape (n>=2,).");
+        }
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -201,15 +222,38 @@ std::unique_ptr<circuitTECs> create_circuit(const InputData& data) {
     // --- 设置全局电路参数 ---
     circuit->nTECs = data.N_elements;
     circuit->Iout = data.I_total_init;
+    circuit->isFixedU = false;
+    circuit->isFixedR = false;
+    circuit->isParallelFixedU = false;
+    circuit->isParallelFixedI = false;
+    circuit->isParallelLoadCurve = false;
+    circuit->Utarget = data.target_val;
+    circuit->Itarget = data.target_val;
+    circuit->Rload = data.target_val;
+
     if (data.mode == CalculationMode::FixedVoltage) {
         circuit->isFixedU = true;
-        circuit->isFixedR = false;
         circuit->Utarget = data.target_val;
     } 
-    else {
-        circuit->isFixedU = false;
+    else if (data.mode == CalculationMode::FixedResistance) {
         circuit->isFixedR = true;
         circuit->Rload = data.target_val;
+    }
+    else if (data.mode == CalculationMode::ParallelFixedVoltage) {
+        circuit->isParallelFixedU = true;
+        circuit->Utarget = data.target_val;
+        circuit->Uout = data.target_val;
+    }
+    else if (data.mode == CalculationMode::ParallelFixedCurrent) {
+        circuit->isParallelFixedI = true;
+        circuit->Itarget = data.target_val;
+        circuit->Iout = data.I_total_init;
+    }
+    else if (data.mode == CalculationMode::ParallelLoadCurve) {
+        circuit->isParallelLoadCurve = true;
+        circuit->Utarget = data.target_val;
+        circuit->Uout = data.target_val;
+        circuit->setLoadCurve(get_vector_1d(data.loadCurveCurrent), get_vector_1d(data.loadCurveVoltage));
     }
 
     return circuit;
@@ -503,6 +547,9 @@ PYBIND11_MODULE(te_solver, m) {
     py::enum_<CalculationMode>(m, "CalculationMode")
         .value("FixedVoltage", CalculationMode::FixedVoltage)
         .value("FixedResistance", CalculationMode::FixedResistance)
+        .value("ParallelFixedVoltage", CalculationMode::ParallelFixedVoltage)
+        .value("ParallelFixedCurrent", CalculationMode::ParallelFixedCurrent)
+        .value("ParallelLoadCurve", CalculationMode::ParallelLoadCurve)
         .export_values();
 
     // 2. 绑定 InputData (只读写属性即可)
@@ -527,7 +574,9 @@ PYBIND11_MODULE(te_solver, m) {
         .def_readwrite("wireU", &InputData::wireU)
         .def_readwrite("mode", &InputData::mode)
         .def_readwrite("target_val", &InputData::target_val)
-        .def_readwrite("I_total_init", &InputData::I_total_init);
+        .def_readwrite("I_total_init", &InputData::I_total_init)
+        .def_readwrite("loadCurveCurrent", &InputData::loadCurveCurrent)
+        .def_readwrite("loadCurveVoltage", &InputData::loadCurveVoltage);
 
     // 3. 绑定 singleThermionicEnergyConversion 类
     // 重点：暴露核心物理向量，以便 Python 端可以直接修改
@@ -572,8 +621,16 @@ PYBIND11_MODULE(te_solver, m) {
         .def_readwrite("Rload", &circuitTECs::Rload)
         .def_readwrite("Iout", &circuitTECs::Iout)
         .def_readwrite("Uout", &circuitTECs::Uout)
+        .def_readwrite("Itarget", &circuitTECs::Itarget)
         .def_readwrite("isFixedU", &circuitTECs::isFixedU)
         .def_readwrite("isFixedR", &circuitTECs::isFixedR)
+        .def_readwrite("isParallelFixedU", &circuitTECs::isParallelFixedU)
+        .def_readwrite("isParallelFixedI", &circuitTECs::isParallelFixedI)
+        .def_readwrite("isParallelLoadCurve", &circuitTECs::isParallelLoadCurve)
+        .def_readwrite("converged", &circuitTECs::converged)
+        .def_readwrite("iterationCount", &circuitTECs::iterationCount)
+        .def_readwrite("branchCurrents", &circuitTECs::branchCurrents)
+        .def_readwrite("branchVoltages", &circuitTECs::branchVoltages)
         .def("set_tcs", [](circuitTECs& circuit, const py::array_t<double>& values) {
             int n_elements = static_cast<int>(circuit.TECs.size());
             int n_axi = n_elements == 0 ? 0 : static_cast<int>(circuit.TECs[0]->Tcs.size());
@@ -584,6 +641,12 @@ PYBIND11_MODULE(te_solver, m) {
                 rows.push_back(get_row_vector(values, i));
             }
             circuit.setTcs(rows);
+        })
+        .def("set_load_curve", [](circuitTECs& circuit, const py::array_t<double>& current, const py::array_t<double>& voltage) {
+            if (current.ndim() != 1 || voltage.ndim() != 1 || current.shape(0) != voltage.shape(0)) {
+                throw py::value_error("current and voltage must be one-dimensional arrays with the same length.");
+            }
+            circuit.setLoadCurve(get_vector_1d(current), get_vector_1d(voltage));
         })
         // 核心计算函数
         .def("calc", &circuitTECs::circuitTECsCalc);

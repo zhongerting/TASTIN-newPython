@@ -148,6 +148,10 @@ V10 CaseA 位于 `testModule/test_core_assemble_v10_caseA.py`，运行入口为 
 
 V11 CaseA 位于 `testModule/test_core_assemble_v11_caseA.py`，运行入口为 `testModule/run_v11_caseA_closed_loop.py`。V11 复用当前 V10 调参后的几何、NaK78 工质、辐射率、半导线电阻、RK45 固体求解和局部隐式流固换热设置；删除 V10 的开式入口/出口边界，在 `CoreInletConnector` 使用 `is_pressure_reference=True` 作为唯一被动压力参考点，并在 `RadiatorOuterHeader_52` 与 `V11_PumpOutletDistributor_51` 之间加入两台串联相同 `PumpJunction`。默认总泵压头为 `6466.56 Pa`，每台泵 `3233.28 Pa`。V11 应先从当前 V10 restart 注入状态，runner 会在注入时重建泵后冷回流段压力场；不要在注入前做冷态闭式水力初始化，也不要把实际流动节点设为 `is_pressure_boundary=True`，否则会冻结该节点焓/温度。
 
+2026-06-25 起，V11/V13 默认仍只启用主串联 TEC 电路，`Ring3_Open` 代表的 3 根 TEC 默认断开；需要把这三根预留 TEC 接入独立并联电路时，在 runner 中使用 `--enable-reserved-parallel-tec` 以及 `--reserved-parallel-mode fixed_u|fixed_i|load_curve`。详细接口、诊断字段和验证命令见 `testModule/AI_AGENT_TESTMODULE_ANALYSIS.md` 与 `ThermoCalc/AI_AGENT_THERMOCALC_ANALYSIS.md`。
+
+2026-06-25 起，V13 可选启用第一版准稳态遮热罩模型，默认关闭。该模型只通过 `RadiatorPipeWithFin` 的等效辐射背景温度改变管翅式辐射器对外散热，不引入全局 ODE，也不影响 V10/V11。入口参数和验证记录见 `testModule/AI_AGENT_TESTMODULE_ANALYSIS.md`。
+
 2026-06-11 V9 已完成无 TEC 预热和带 TEC 续算验证：`testModule/v9_caseA_open_loop_tec_3000s/` 最终绝对时间约 `5010 s`，入口温度约 `743.000 K`，出口温度约 `838.944 K`，进出口温差约 `95.944 K`，冷却剂焓升约 `108745.775 W`，端电功率约 `4870.107 W`。该目录是本地运行产物，不应默认提交；需要复现实验时优先使用 V9 runner 和 V9 restart。
 
 ### 5.2 集流环冷却回路路径
@@ -180,7 +184,7 @@ V11 CaseA 位于 `testModule/test_core_assemble_v11_caseA.py`，运行入口为 
 
 这些问题在进一步修改或运行前需要主动核验：
 
-1. `ThermoCalc` 已于 2026-06-01 闭合逐节点侧面积、`phiE/phiC/Vd` 结果读取和构建后 `Tcs` 热更新，并重新构建 `te_solver.cp312-win_amd64.pyd`。`fixed_I` 仍不支持，包装层会明确拒绝该模式。
+1. `ThermoCalc` 已于 2026-06-01 闭合逐节点侧面积、`phiE/phiC/Vd` 结果读取和构建后 `Tcs` 热更新，并重新构建 `te_solver.cp312-win_amd64.pyd`。串联 `fixed_I` 仍不支持，包装层会明确拒绝该模式；V11/V13 的并联固定总电流只用于可选预留并联电路，应通过 `ReactorCore.setup_reserved_parallel_tec_circuit(mode_str="fixed_i", ...)` 映射到 `parallel_fixed_i`。
 2. 默认 `python` 仍为 3.9.13，而主要扩展为 `te_solver.cp312-win_amd64.pyd`。如果使用 Python 运行，请使用 `E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe`；运行 ThermoCalc 必须使用 ABI 匹配的 Python 3.12 环境；本轮验证解释器记录在 `ThermoCalc/AI_AGENT_THERMOCALC_ANALYSIS.md`。
 3. `Correlations.h_single_crossflow_pipe()` 当前调用参数不足，直接使用会触发运行时 `TypeError`。
 4. `Materials/Fluids/NaK78.py` 仅部分实现；主用液态 NaK78 类是 `SodiumPotassium78`。不要仅按文件名推断模型使用的冷却剂。
@@ -258,3 +262,9 @@ V9 复用该导线电阻和 NaK78 冷却剂约定。冷态直接启动 TEC 可�
 ## 13. 2026-06-02 全局慢化剂映射顺序补充
 
 `ReactorCore.pre_step()` 必须先执行 `TFEUnit.pre_step()` 更新内部等效 moderator 外边界温度，再刷新该 moderator 的边界热流缓存，最后将外流按 `tfe_multipliers` 聚合到全局慢化剂环。不得直接复用旧时间层 `BoundaryRegion.current_flux`；该错误在 restart 后会放大为首步非物理源项脉冲。
+
+## 14. 2026-06-28 ThermoCalc 低温零发射保护
+
+`ThermoCalcModel.calculate()` 在进入 C++ 电路迭代前会进行低温零发射快速判定：当所有发射极温度低于默认 `THERMOCALC_ZERO_EMISSION_TE_MAX_K=1000 K` 时，直接返回开路零电流、零 TEC 热源结果，并在 `get_global_results()` 中标记 `zero_emission_skipped=True`。这不是禁用 TEC，而是避免启动低温下无发电能力的 fixed-voltage 电路迭代卡死；详细说明见 [`ThermoCalc/AI_AGENT_THERMOCALC_ANALYSIS.md`](./ThermoCalc/AI_AGENT_THERMOCALC_ANALYSIS.md)。
+
+补充：2026-06-28 起，除了 Python 层低温零发射预判，`ThermoCalc` C++ 电路层也加入了退化迭代快速跳出；因此启动/过渡工况可以默认保持 TEC 开启，无法形成有效电解的状态会返回有限的零电流或未收敛诊断，而不是长期卡在 `ThermoCalcModel.calculate()`。详细见 ThermoCalc 手册。

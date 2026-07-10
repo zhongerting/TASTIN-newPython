@@ -11,6 +11,7 @@ from Components.ExternalHeatSources import (
     EarthIRHeatSource,
     ExternalHeatFluxBC,
     OrbitalHeatSource,
+    OrbitalMatrixHeatSource,
     OrbitalTableHeatSource,
 )
 from Solvers.Couplers import FluidSolidCouple
@@ -321,6 +322,20 @@ class RingHP(BaseComponent):
     def _build_external_heat_source(shape: tuple, external_heat_config: Dict[str, Any]) -> CompositeHeatSource:
         """构造与 HPwithFin 测试脚本一致的轨道外热流对象。"""
         composite_source = CompositeHeatSource(shape)
+
+        if external_heat_config.get('use_w0_8p12_matrix', False):
+            matrix_n = int(external_heat_config.get('matrix_n', int(np.prod(shape))))
+            matrix_key = external_heat_config.get('matrix_key', f'is58p5_w0_8p12_N{matrix_n}_sum')
+            composite_source.add_source(
+                OrbitalMatrixHeatSource(
+                    shape=shape,
+                    matrix_key=matrix_key,
+                    scale_factor=external_heat_config.get('table_scale_factor', 1.0),
+                    offset=external_heat_config.get('table_offset', 0.0),
+                    periodic=external_heat_config.get('table_periodic', True)
+                )
+            )
+            return composite_source
 
         if external_heat_config.get('use_embedded_table', False):
             composite_source.add_source(

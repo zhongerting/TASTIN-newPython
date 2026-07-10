@@ -67,4 +67,14 @@ NaK fluid channel
 
 当前 `Tout=727 K` 是后续重新标定显式翅片模型的目标，不是该测试的硬通过条件。
 
+## 7. 2026-06-25 runtime radiation background
+
+`RadiatorPipeWithFin` now exposes `set_radiation_background_temperature(value)` for optional external boundary modifiers such as the V13 startup thermal shield. The value may be a scalar or one value per axial node. It updates:
+
+- bare tube `DynamicRadiationResistanceBC` background temperature;
+- the reduced-order fin radiation solve;
+- `get_heat_exchange_breakdown()` tube/fin radiation diagnostics.
+
+When the shield is disabled, the component keeps the historical default background `T_space`, so existing V12/V13 cases are unchanged. The current shield integration is intentionally a boundary modifier, not a new radiator solid or fluid component.
+
 2026-06-16 warm-start 优化 100 s 对比：默认 `eps_tube=eps_fin=0.80`、`n_axial=8`、`n_fin_width=12` 下，墙钟时间由 `152.88 s` 降至 `143.04 s`，平均翅片迭代数由 `5.44` 降至 `2.33`；出口温度差约 `3.8e-8 K`，总排热相对差约 `6.0e-8 %`。

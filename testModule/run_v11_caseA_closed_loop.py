@@ -25,6 +25,7 @@ from run_v8_caseA_common import (
     get_solid_ode_methods,
     get_wire_resistance,
     json_default,
+    load_tec_load_curve,
     parse_solid_ode_method,
     parse_v8_multipliers,
     passive_tec_source_totals,
@@ -62,6 +63,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pipe-n-nodes", type=int, default=8)
     parser.add_argument("--external-pipe-n-nodes", type=int, default=5)
     parser.add_argument("--target-voltage", type=float, default=27.2)
+    parser.add_argument("--enable-reserved-parallel-tec", action="store_true")
+    parser.add_argument("--reserved-parallel-mode", choices=("fixed_u", "fixed_i", "load_curve"), default="fixed_u")
+    parser.add_argument("--reserved-parallel-voltage", type=float, default=0.8)
+    parser.add_argument("--reserved-parallel-current", type=float, default=6000.0)
+    parser.add_argument("--reserved-parallel-load-curve", default=None)
     parser.add_argument("--thermo-update-interval", type=float, default=0.8)
     parser.add_argument("--disable-tec-coupled", action="store_true")
     parser.add_argument("--inlet-temperature-k", type=float, default=727.0)
@@ -110,6 +116,36 @@ def parse_args() -> argparse.Namespace:
     if args.fluid_solid_coupling_scheme == "current":
         args.fluid_solid_coupling_scheme = "local_implicit"
     return args
+
+
+def configure_core_tec_circuits(core, args: argparse.Namespace) -> None:
+    """Configure the legacy main series TEC circuit and optional reserved parallel circuit."""
+    core.setup_tec_circuit("fixed_u", float(args.target_voltage), I_guess=150.0, topology="series")
+    if not bool(args.enable_reserved_parallel_tec):
+        if hasattr(core, "disable_reserved_parallel_tec_circuit"):
+            core.disable_reserved_parallel_tec_circuit()
+        return
+
+    mode = str(args.reserved_parallel_mode)
+    load_curve = load_tec_load_curve(args.reserved_parallel_load_curve)
+    if mode == "fixed_u":
+        target_value = float(args.reserved_parallel_voltage)
+    elif mode == "fixed_i":
+        target_value = float(args.reserved_parallel_current)
+    elif mode == "load_curve":
+        if load_curve is None:
+            raise ValueError("--reserved-parallel-load-curve is required when --reserved-parallel-mode=load_curve.")
+        target_value = float(args.reserved_parallel_voltage)
+    else:
+        raise ValueError(f"Unsupported reserved parallel TEC mode: {mode}")
+
+    core.setup_reserved_parallel_tec_circuit(
+        mode_str=mode,
+        target_value=target_value,
+        I_guess=float(args.reserved_parallel_current),
+        multipliers={"Ring3_Open": int(core.tfe_multipliers.get("Ring3_Open", 0))},
+        load_curve=load_curve,
+    )
 
 
 def flatten_for_csv(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -370,7 +406,7 @@ def build_case(args: argparse.Namespace) -> Dict[str, Any]:
     core.enable_tec_coupled = not bool(args.disable_tec_coupled)
     core.thermo_update_interval = float(args.thermo_update_interval)
     if core.enable_tec_coupled:
-        core.setup_tec_circuit("fixed_u", args.target_voltage, I_guess=150.0)
+        configure_core_tec_circuits(core, args)
     core.update_neutronic_power(
         p_total=TOTAL_POWER_W,
         p_fiss=TOTAL_POWER_W,
@@ -383,7 +419,7 @@ def build_case(args: argparse.Namespace) -> Dict[str, Any]:
     core.post_step(0.0, float(system.global_time))
     if core.enable_tec_coupled and core.thermo_calc is not None:
         apply_wire_resistance(core, scale=float(args.wire_resistance_scale))
-        core._last_thermo_update_time = float(system.global_time)
+        core.set_thermo_update_time(float(system.global_time))
     core.pre_step(0.0, float(system.global_time))
     build["fluid_solid_coupling_scheme"] = args.fluid_solid_coupling_scheme
     build["fluid_solid_coupler_count"] = apply_fluid_solid_coupling_scheme(
@@ -400,6 +436,10 @@ def build_case(args: argparse.Namespace) -> Dict[str, Any]:
             for value in build["wire_resistance_ohm"]
         ]
     build["tec_coupled_enabled"] = bool(core.enable_tec_coupled)
+    build["tec_topology"] = str(getattr(core, "tec_topology", "series"))
+    build["tec_circuit_mode"] = str(getattr(core, "tec_circuit_mode", "fixed_u"))
+    build["reserved_parallel_tec_enabled"] = bool(getattr(core, "reserved_parallel_tec_enabled", False))
+    build["reserved_parallel_tec_mode"] = str(args.reserved_parallel_mode)
     build["migration_summary"] = migration
     return build
 
@@ -438,6 +478,10 @@ def write_latest_state(path: Path, build: Dict[str, Any], args: argparse.Namespa
         "solid_ode_methods": get_solid_ode_methods(build),
         "wire_resistance_ohm": build["wire_resistance_ohm"],
         "tec_coupled_enabled": build["tec_coupled_enabled"],
+        "tec_topology": build.get("tec_topology"),
+        "tec_circuit_mode": build.get("tec_circuit_mode"),
+        "reserved_parallel_tec_enabled": build.get("reserved_parallel_tec_enabled"),
+        "reserved_parallel_tec_mode": build.get("reserved_parallel_tec_mode"),
         "ring_multipliers": build["ring_multipliers"],
         "tec_ring_multipliers": build["tec_ring_multipliers"],
         "migration_summary": build.get("migration_summary"),
@@ -514,6 +558,10 @@ def main() -> None:
         **v11_basic_diagnostics(build),
         "fluid_solid_coupling_scheme": build["fluid_solid_coupling_scheme"],
         "wire_resistance_scale": build["wire_resistance_scale"],
+        "tec_topology": build.get("tec_topology"),
+        "tec_circuit_mode": build.get("tec_circuit_mode"),
+        "reserved_parallel_tec_enabled": build.get("reserved_parallel_tec_enabled"),
+        "reserved_parallel_tec_mode": build.get("reserved_parallel_tec_mode"),
     }
     system.save_global_state(str(latest_restart_path))
     write_latest_state(
@@ -570,9 +618,10 @@ def main() -> None:
             next_control_time = min(next_control_time + float(args.pump_control_interval), target_time)
 
         if float(system.global_time) >= next_record_time - 1.0e-10:
-            passive = passive_tec_source_totals(build)
-            if any(value != 0.0 for value in passive.values()):
-                raise RuntimeError(f"Ring3_Open TEC sources are not zero: {passive}")
+            if not bool(build.get("reserved_parallel_tec_enabled", False)):
+                passive = passive_tec_source_totals(build)
+                if any(value != 0.0 for value in passive.values()):
+                    raise RuntimeError(f"Ring3_Open TEC sources are not zero: {passive}")
             record = {
                 **v11_basic_diagnostics(build),
                 "relative_time_s": float(system.global_time) - start_time,
@@ -583,6 +632,10 @@ def main() -> None:
                 "wire_resistance_scale": build["wire_resistance_scale"],
                 "wire_resistance_ohm": build["wire_resistance_ohm"],
                 "tec_coupled_enabled": build["tec_coupled_enabled"],
+                "tec_topology": build.get("tec_topology"),
+                "tec_circuit_mode": build.get("tec_circuit_mode"),
+                "reserved_parallel_tec_enabled": build.get("reserved_parallel_tec_enabled"),
+                "reserved_parallel_tec_mode": build.get("reserved_parallel_tec_mode"),
                 "target_flow_kg_s": float(args.target_flow_kg_s),
                 "flow_error_kg_s": float(build["pump_a"].W + build["pump_b"].W) * 0.5 - float(args.target_flow_kg_s),
             }

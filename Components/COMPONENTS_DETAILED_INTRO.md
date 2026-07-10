@@ -94,6 +94,10 @@ RadiatorPipeWithFin
   -> HeatConduction2D tube wall
   -> FluidSolidCouple
   -> reduced-order copper fin radiation branch
+
+RadiatorThermalShield
+  -> quasi-steady equivalent shield background
+  -> updates RadiatorPipeWithFin radiation background
 ```
 
 两条主路径：
@@ -117,6 +121,7 @@ RadiatorPipeWithFin
 | `Pipe.py` | 单壁管道流固耦合组件 |
 | `AnnularPipe.py` | 环形管道双壁流固耦合组件 |
 | `RadiatorPipeWithFin.py` | NaK 辐射管与铜带降维翅片组件 |
+| `RadiatorThermalShield.py` | V13 管翅式辐射器可选准稳态遮热罩边界组件 |
 | `HPwithFin.py` | 带降维翅片的热管散热器 |
 | `RingHP.py` | 集流环与代表性热管阵列组件 |
 | `TFEUnit.py` | 热离子燃料元件装配体 |
@@ -602,6 +607,9 @@ Delta p_hp = K_eq * 0.5 * rho * v_nom^2
 | `T_space` | 外部空间温度 |
 | `alpha_tec` | TEC 热源亚松弛系数 |
 | `enable_tec_coupled` | 是否启用 TEC 耦合 |
+| `tec_lookup_enabled` | Optional explicit ThermoCalc lookup switch; `None` keeps environment-variable behavior |
+| `tec_lookup_db` | Optional explicit ThermoCalc lookup database path passed to `ThermoCalcModel` |
+| `tec_lookup_regions` | Optional lookup region tuple/list passed to `ThermoCalcModel` |
 
 主要接口：
 
@@ -610,7 +618,8 @@ Delta p_hp = K_eq * 0.5 * rho * v_nom^2
 - `get_reactivity_feedback()`：返回总反馈。
 - `calibrate_reactivity_feedback_reference()`：建立反馈参考态。
 - `get_effective_reactivity_feedback()`：返回扣除参考态后的有效反馈。
-- `setup_tec_circuit()`：配置 ThermoCalc 电路模式。
+- `setup_tec_circuit(mode_str, target_value, I_guess=150.0, topology="series", load_curve=None)`：配置主 TEC 电路；默认 `topology="series"`，保持旧算例行为。
+- `setup_reserved_parallel_tec_circuit(...)`：可选启用预留并联 TEC 电路，默认只用于 `Ring3_Open` 代表的 3 根 TEC。
 - `attach_point_reactor()` / `initialize_point_reactor()`：挂接并初始化点堆模型。
 - `update_neutronic_power()`：将堆功率分配给代表性 TFE。
 - `advance_neutronics()` / `commit_neutronics()`：推进并提交点堆状态。
@@ -776,6 +785,40 @@ system.add_component(core)
 core.setup_tec_circuit(mode_str="fixed_u", target_value=V_target, I_guess=I_guess)
 ```
 
+V11/V13 默认使用主串联电路：`Center=1`、`Ring1=6`、`Ring2=12`、`Ring3_TEC=15`，合计 34 根 TEC；`Ring3_Open=3` 默认断开并每步清零主动 TEC 源。需要启用预留并联时，单独调用 `setup_reserved_parallel_tec_circuit()`，使 `Ring3_Open` 的 3 根 TEC 作为并联支路接入第二个独立电路。
+
+同一根 TEC 只能属于一个电路；当前不支持支路内串联再并联的复杂混联：
+
+- `topology="series"`：默认旧行为，支持 `fixed_u` 和 `fixed_r`；串联 `fixed_i` 仍由 ThermoCalc wrapper 明确拒绝。
+- 预留并联电路：`fixed_u -> parallel_fixed_u`，`fixed_i -> parallel_fixed_i`，`load_curve -> parallel_load_curve`。
+- 主串联和预留并联是两个独立的 `ThermoCalcModel`，共享堆芯时间步和温度同步，但分别计算电路端电压、电流和热源。
+- `get_tec_circuit_global_results()` 返回按电路组命名的结果字典，当前固定键为 `main` 和可选 `reserved_parallel`。
+
+```python
+# 启用 Ring3_Open 预留三根 TEC 的并联定母线电压
+core.setup_reserved_parallel_tec_circuit(mode_str="fixed_u", target_value=V_bus)
+
+# 并联定总电流
+core.setup_reserved_parallel_tec_circuit(mode_str="fixed_i", target_value=I_target)
+
+# 并联外部负载曲线，曲线格式为 U_load=f(I_total)
+core.setup_reserved_parallel_tec_circuit(
+    mode_str="load_curve",
+    target_value=R_hint,
+    load_curve=(current_a, voltage_v),
+)
+```
+
+V11/V13 运行器输出兼容旧字段，但口径需要注意：
+
+| 字段 | 口径 |
+| --- | --- |
+| `tec_total_voltage_v` | 主串联电路端电压；独立多电路没有单一总端电压 |
+| `tec_total_current_a` | 主串联电路端电流；独立多电路没有单一总端电流 |
+| `tec_total_electric_power_w` | 主串联电功率 + 预留并联电功率 |
+| `tec_main_*` | 主串联电路诊断 |
+| `tec_reserved_parallel_*` | 预留并联电路诊断；未启用时为 `None/null` |
+
 ### 点堆推进和断点续算顺序
 
 正常时间步由 `SystemManager` 统一调度：
@@ -812,6 +855,9 @@ component.save_step_state()
 | 字段 | 默认值 | 作用 |
 | --- | --- | --- |
 | `use_embedded_table` | `False` | 使用内嵌 Fortran 查表热流 |
+| `use_w0_8p12_matrix` | `False` | Use fixed `w0=8.12deg, i_s=58.5deg` embedded sum matrix heat flux; this path returns immediately and does not add other external heat sources |
+| `matrix_n` | `np.prod(shape)` | Select `is58p5_w0_8p12_N{matrix_n}_sum`; supported values are 6, 78, and 200 |
+| `matrix_key` | auto | Explicit embedded matrix key, for example `is58p5_w0_8p12_N6_sum` |
 | `table_ids` | `1` | 查表编号，可为标量或可广播到边界形状的数组 |
 | `table_scale_factor` | `1.0` | 查表值缩放系数 |
 | `table_offset` | `0.0` | 查表值偏置，单位 W/m2 |
@@ -833,6 +879,8 @@ component.save_step_state()
 | `*_by_node` | 无 | 对单个字段逐节点覆盖；支持下表字段 |
 
 `*_by_node` 支持：`table_ids`、`surface_normal_angles`、`solar_constant`、`orbit_height`、`orbit_period`、`orbit_inclination`、`albedo_factor`、`earth_ir_flux`、`wall_illumination_factor`、`fin_illuminated_area_scale`、`fin_loading_mode`、`table_scale_factor`、`table_offset`、`table_periodic`、`add_solar`、`add_albedo`、`add_earth_ir`、`use_embedded_table`。
+
+When `use_w0_8p12_matrix=True`, `RingHP` builds `OrbitalMatrixHeatSource` first and returns the composite source directly. The embedded matrix is already the summed heat flux, so `use_embedded_table`, `add_solar`, `add_albedo`, and `add_earth_ir` are not added on top.
 
 当 `use_embedded_table=True` 时，当前实现优先使用查表热源并直接返回，不再叠加 `add_solar`、`add_albedo` 和 `add_earth_ir`。
 
@@ -860,6 +908,20 @@ external_heat_config = {
 }
 ring_hp = RingHP(..., external_heat_config=external_heat_config)
 ```
+
+
+Matrix lookup example:
+
+```python
+external_heat_config = {
+    "use_w0_8p12_matrix": True,
+    "matrix_n": 6,
+    "table_periodic": True,
+}
+
+ring_hp = RingHP(..., external_heat_config=external_heat_config)
+```
+
 
 切换为翅片直接吸热，并让不同代表热管使用不同查表编号：
 
@@ -972,16 +1034,68 @@ joulePowerE / joulePowerC [W]
 
 `TFEUnit.update_joule_power_sources()` 和 `TECPair.set_joule_heating_axial_power()` 按每个轴向列内的二维控制体体积比例分配功率，并保持每列总功率不变。旧电场接口继续保留，用于兼容和诊断，不再作为 TEC 生产热源的权威路径。
 
+## 2026-06-25 V13 遮热罩第一版
+
+`Components/RadiatorThermalShield.py` 是 V13 管翅式辐射器的可选准稳态遮热罩边界组件。它不返回固体 ODE，也不改变水力网络；启用后作为 `SystemManager.components` 中排在辐射器之前的组件，每步先计算等效遮热罩背景温度，再通过 `RadiatorPipeWithFin.set_radiation_background_temperature()` 更新裸管和降维翅片的辐射背景。
+
+第一版模型只使用等效遮挡系数、遮热罩厚度/导热系数、内外表面发射率和可选太阳热流来估算内外表面温度；尚未引入 `8 x 12` 角系数矩阵。默认不启用，因此历史 V13 算例仍直接向 `T_space=3 K` 深空辐射。
+
 ## 2026-06-02 全局慢化剂映射时间层修复
 
 `ReactorCore.pre_step()` 中的全局慢化剂源项转移必须按以下顺序执行：
 
+## 2026-06-26 控制转鼓反应性子模型
+
+`ReactorCore.py` 内新增独立的 `ControlDrumReactivityModel`，用于保存控制鼓角度和由文献拟合式得到的控制鼓反应性。模型默认 `enabled=False`，因此旧算例不显式配置时不会改变点堆推进。
+
+拟合式输出单位为 dollars ($)，角度单位为 `deg`，有效范围按 `0~180` 夹紧。`theta=0 deg` 表示控制鼓完全内旋，`theta=180 deg` 表示完全外旋。当前实现以 `reference_theta_deg=0` 作为默认角度参考，并使用冷态全内旋参考 `keff=0.952` 计算冷态基准反应性。进入 `PointReactor` 前会使用当前点堆的 `beta_total` 转换为无量纲 `rho`。
+
+启用方式：
+
+```python
+core.configure_control_drum_reactivity(
+    enabled=True,
+    theta_deg=theta_deg,
+    reference_theta_deg=0.0,
+    cold_reference_keff=0.952,
+)
+core.set_control_drum_angle(theta_deg)
+diagnostics = core.get_control_drum_diagnostics()
+```
+
+`advance_neutronics(dt, reactivity_control=...)` 中实际传给点堆的控制反应性为外部 `reactivity_control` 与控制鼓模型反应性之和。当前版本只提供静态角度到反应性的映射；安全鼓转动过程和功率提升控制过程不在本模型内模拟。
+
 ```text
 TFEUnit.pre_step()
   -> 更新内部等效 moderator 的外边界温度
+  -> 同步 TFE 内部固固/间隙耦合器
   -> 刷新内部 moderator 的物性、热阻、边界状态和热流缓存
   -> 读取 moderator 外流
   -> 按 tfe_multipliers 聚合到全局 moderator rings
 ```
 
 不得在 `TFEUnit.pre_step()` 之前读取内部 moderator 的 `BoundaryRegion.current_flux`。旧顺序会在正常推进中引入一步滞后，并在 restart 重建后把旧边界缓存作为首步源项注入全局慢化剂环。
+
+2026-06-24 进一步修复了同一位置的构造期边界占位问题。`GapCouple2D` 继承自 `SolidSolidCouple2D`，构造时会先在两侧边界挂载 `ResistanceBC(T_ext=300 K, R_ext=0)`，随后由 `sync()` 更新为真实间隙等效热阻和对侧表面温度。由于 `ReactorCore.pre_step()` 会在 `SystemManager` 常规耦合器同步之前读取 TFE 内部等效 moderator 外流，若不先同步 TFE 内部耦合器，`Center/Ring1/Ring2/Ring3_TEC/Ring3_Open` 的 `Moderator.left` 会短暂使用该零热阻占位边界，导致 `1/R = inf` 后被 `nan_to_num` 兜底。
+
+当前处理是在读取内部 moderator 热流前，对该 TFE 的内部 `couplers` 逐个调用 `sync()`。这只修正生命周期顺序，不改变 `GapCouple2D` 的物理模型，也不把间隙边界简化为纯定温边界。验证状态：`testModule.test_reactorcore_moderator_sync` 已覆盖 `ReactorCore.pre_step()` 不应消费零热阻边界；V13 no-TEC 5 s 运行时监视中零热阻边界求解事件为 0。
+
+同日补充修复了 `TFEUnit._build_couplers()` 构建阶段的同类问题。氦气隙 `collector_iclad_gap` 建立后，冷却剂流固耦合会为了获取套管边界热容调用 `InnerClad/OuterClad.initialize_state()`；该初始化会计算边界热流，因此必须在调用前同步已建立的内部耦合器。当前 `TFEUnit` 会在该初始化前调用 `_sync_existing_couplers()`，避免 `Center_InnerClad.left` 等边界消费 `R_ext=0, T_ext=300 K` 的构造期占位值。验证状态：`testModule.test_reactorcore_moderator_sync` 已覆盖 V13 构建阶段；V13 no-TEC 60 s 精确监视中 `R_ext=0, T_ext=300 K` 占位边界事件为 0。
+
+## 2026-07-07 TFE ThermoCalc electrode potential diagnostics
+
+`TFEUnit.ElectricFieldData` now keeps raw ThermoCalc electrode potentials in addition to the historical electric-field diagnostics. The older `emitter_voltage` and `collector_voltage` names are retained for compatibility, but they store axial electric field gradients from `electric_field_from_node_potential()`, not raw electrode potentials.
+
+New restart keys under each `.../TFEs/<name>/electric/` prefix are:
+
+```text
+emitter_potential
+collector_potential
+emitter_collector_voltage_drop
+terminal_point_ue1
+terminal_point_ue2
+terminal_point_uc1
+terminal_point_uc2
+```
+
+`ReactorCore._apply_tec_group_results()` fills these fields directly from `ThermoCalcModel.get_tec_results()` whenever TEC results are applied. Old restart files remain loadable because missing keys keep the zero-initialized defaults.

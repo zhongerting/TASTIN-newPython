@@ -48,6 +48,16 @@ def _env_flag(name: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return float(default)
+    try:
+        return float(value)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %.6g", name, value, default)
+        return float(default)
+
 def _normalize_lookup_regions(regions=None):
     if regions is None:
         text = os.environ.get("THERMOCALC_LOOKUP_REGIONS", "").strip()
@@ -218,15 +228,31 @@ class ThermoCalcModel:
     负责处理几何参数分配、状态初始化、底层 C++ 对象通信以及结果提取。
     """
 
-    def __init__(self, n_elements: int, n_nodes: int):
+    def __init__(self,
+                 n_elements: int,
+                 n_nodes: int,
+                 lookup_db: str = None,
+                 enable_lookup: bool = None,
+                 lookup_regions=None):
         self.N_elem = n_elements
         self.n_node = n_nodes
 
-        lookup_db = os.environ.get("THERMOCALC_LOOKUP_DB")
-        if lookup_db and _env_flag("THERMOCALC_ENABLE_LOOKUP"):
-            loaded_blocks = load_emission_lookup_database(lookup_db, enable=True)
-            logger.info("Loaded ThermoCalc emission lookup database: %s blocks", loaded_blocks)
-
+        if enable_lookup is None:
+            enable_lookup = _env_flag("THERMOCALC_ENABLE_LOOKUP")
+        selected_lookup_db = lookup_db if lookup_db is not None else os.environ.get("THERMOCALC_LOOKUP_DB")
+        self.lookup_db = selected_lookup_db
+        self.lookup_enabled = bool(enable_lookup)
+        self.lookup_regions = lookup_regions
+        self.lookup_loaded_blocks = 0
+        if selected_lookup_db and self.lookup_enabled:
+            self.lookup_loaded_blocks = load_emission_lookup_database(
+                selected_lookup_db,
+                enable=True,
+                regions=lookup_regions,
+            )
+            logger.info("Loaded ThermoCalc emission lookup database: %s blocks", self.lookup_loaded_blocks)
+        elif HAS_TE_SOLVER and hasattr(te_solver, "set_emission_lookup_enabled"):
+            te_solver.set_emission_lookup_enabled(False)
         # 保存底层的 C++ 计算核心对象
         self._circuit = None
         self._input_data = te_solver.InputData()
@@ -268,12 +294,20 @@ class ThermoCalcModel:
         # self._input_data.target_val = 0.0044
         self._input_data.target_val = 0.89 * 34
         self._input_data.I_total_init = 284.0
+        self._mode_str = "fixed_u"
+        self._load_curve_current = None
+        self._load_curve_voltage = None
+        if hasattr(self._input_data, "loadCurveCurrent"):
+            self._input_data.loadCurveCurrent = np.array([0.0, 1000.0], dtype=float)
+        if hasattr(self._input_data, "loadCurveVoltage"):
+            self._input_data.loadCurveVoltage = np.array([0.0, 100.0], dtype=float)
 
         # --- 温度场占位符 ---
         # 初始默认处于 600K 均匀状态
         self._T_emitter = np.full((self.N_elem, self.n_node), 600.0)
         self._T_collector = np.full((self.N_elem, self.n_node), 600.0)
-
+        self._zero_emission_skipped = False
+        self._zero_emission_reason = None
     def set_temperatures(self, T_em: np.ndarray, T_co: np.ndarray):
         """
         更新发射极与接收极温度场
@@ -299,17 +333,67 @@ class ThermoCalcModel:
         :param target_value: 目标阻值(Ohm) 或 电压(V) 或 电流(A)
         :param I_guess: 迭代猜测初始电流 (A)
         """
-        if mode_str.lower() == 'fixed_r':
+        mode_key = mode_str.lower()
+        self._mode_str = mode_key
+        if mode_key == 'fixed_r':
             self._input_data.mode = te_solver.CalculationMode.FixedResistance
-        elif mode_str.lower() == 'fixed_u':
+        elif mode_key == 'fixed_u':
             self._input_data.mode = te_solver.CalculationMode.FixedVoltage
-        elif mode_str.lower() == 'fixed_i':
+        elif mode_key == 'fixed_i':
             raise ValueError("fixed_I mode is not exposed by the ThermoCalc C++ binding.")
+        elif mode_key == 'parallel_fixed_u':
+            if not hasattr(te_solver.CalculationMode, "ParallelFixedVoltage"):
+                raise ValueError("parallel_fixed_u mode is not exposed by the ThermoCalc C++ binding.")
+            self._input_data.mode = te_solver.CalculationMode.ParallelFixedVoltage
+        elif mode_key == 'parallel_fixed_i':
+            if not hasattr(te_solver.CalculationMode, "ParallelFixedCurrent"):
+                raise ValueError("parallel_fixed_i mode is not exposed by the ThermoCalc C++ binding.")
+            self._input_data.mode = te_solver.CalculationMode.ParallelFixedCurrent
+        elif mode_key == 'parallel_load_curve':
+            if not hasattr(te_solver.CalculationMode, "ParallelLoadCurve"):
+                raise ValueError("parallel_load_curve mode is not exposed by the ThermoCalc C++ binding.")
+            self._input_data.mode = te_solver.CalculationMode.ParallelLoadCurve
+            if self._load_curve_current is None or self._load_curve_voltage is None:
+                max_i = max(float(I_guess) * 10.0, 1000.0)
+                self.set_load_curve(
+                    np.array([0.0, max_i], dtype=float),
+                    np.array([0.0, float(target_value) * max_i], dtype=float),
+                )
         else:
             raise ValueError(f"不支持的模式: {mode_str}")
 
         self._input_data.target_val = target_value
         self._input_data.I_total_init = I_guess
+        if self._circuit is not None:
+            self.build()
+
+    def set_load_curve(self, current_a, voltage_v):
+        """
+        设置并联外部负载 U-I 曲线。
+
+        :param current_a: 严格递增的总电流数组 [A]
+        :param voltage_v: 对应外部负载端电压数组 [V]
+        """
+        current = np.asarray(current_a, dtype=float)
+        voltage = np.asarray(voltage_v, dtype=float)
+        if current.ndim != 1 or voltage.ndim != 1 or current.shape != voltage.shape:
+            raise ValueError("load curve current_a and voltage_v must be 1D arrays with the same shape.")
+        if current.size < 2:
+            raise ValueError("load curve must contain at least two points.")
+        if not np.all(np.isfinite(current)) or not np.all(np.isfinite(voltage)):
+            raise ValueError("load curve values must be finite.")
+        if np.any(np.diff(current) <= 0.0):
+            raise ValueError("load curve current axis must be strictly increasing.")
+        self._load_curve_current = current.copy()
+        self._load_curve_voltage = voltage.copy()
+        if hasattr(self._input_data, "loadCurveCurrent"):
+            self._input_data.loadCurveCurrent = self._load_curve_current
+        if hasattr(self._input_data, "loadCurveVoltage"):
+            self._input_data.loadCurveVoltage = self._load_curve_voltage
+        if self._circuit is not None:
+            if not hasattr(self._circuit, "set_load_curve"):
+                raise AttributeError("[ThermoCalcWrapper] C++ circuit lacks set_load_curve().")
+            self._circuit.set_load_curve(self._load_curve_current, self._load_curve_voltage)
 
     def build(self):
         """
@@ -339,7 +423,88 @@ class ThermoCalcModel:
             self._circuit.Utarget = self._input_data.target_val
             self._circuit.Uout = self._input_data.target_val
             self._circuit.Iout = self._input_data.I_total_init
+        elif hasattr(te_solver.CalculationMode, "ParallelFixedVoltage") and self._input_data.mode == te_solver.CalculationMode.ParallelFixedVoltage:
+            self._circuit.isFixedR = False
+            self._circuit.isFixedU = False
+            self._circuit.isParallelFixedU = True
+            self._circuit.isParallelFixedI = False
+            self._circuit.isParallelLoadCurve = False
+            self._circuit.Utarget = self._input_data.target_val
+            self._circuit.Uout = self._input_data.target_val
+            self._circuit.Iout = self._input_data.I_total_init
+        elif hasattr(te_solver.CalculationMode, "ParallelFixedCurrent") and self._input_data.mode == te_solver.CalculationMode.ParallelFixedCurrent:
+            self._circuit.isFixedR = False
+            self._circuit.isFixedU = False
+            self._circuit.isParallelFixedU = False
+            self._circuit.isParallelFixedI = True
+            self._circuit.isParallelLoadCurve = False
+            self._circuit.Itarget = self._input_data.target_val
+            self._circuit.Iout = self._input_data.I_total_init
+        elif hasattr(te_solver.CalculationMode, "ParallelLoadCurve") and self._input_data.mode == te_solver.CalculationMode.ParallelLoadCurve:
+            self._circuit.isFixedR = False
+            self._circuit.isFixedU = False
+            self._circuit.isParallelFixedU = False
+            self._circuit.isParallelFixedI = False
+            self._circuit.isParallelLoadCurve = True
+            self._circuit.Utarget = self._input_data.target_val
+            self._circuit.Uout = self._input_data.target_val
+            self._circuit.Iout = self._input_data.I_total_init
+            if self._load_curve_current is not None and hasattr(self._circuit, "set_load_curve"):
+                self._circuit.set_load_curve(self._load_curve_current, self._load_curve_voltage)
 
+    def _should_skip_zero_emission(self) -> bool:
+        if _env_flag("THERMOCALC_DISABLE_ZERO_EMISSION_GUARD"):
+            return False
+        if self._T_emitter.size == 0 or self._T_collector.size == 0:
+            return False
+        if not np.all(np.isfinite(self._T_emitter)) or not np.all(np.isfinite(self._T_collector)):
+            return False
+        te_max = float(np.max(self._T_emitter))
+        cutoff = _env_float("THERMOCALC_ZERO_EMISSION_TE_MAX_K", 1000.0)
+        if te_max >= cutoff:
+            return False
+        self._zero_emission_reason = (
+            f"max emitter temperature {te_max:.3f} K below "
+            f"zero-emission cutoff {cutoff:.3f} K"
+        )
+        return True
+
+    def _apply_zero_emission_result(self):
+        if self._circuit is None:
+            return
+        zeros = np.zeros(self.n_node, dtype=float)
+        for tec in self._circuit.TECs:
+            tec.I = 0.0
+            tec.U = 0.0
+            tec.J = zeros.copy()
+            tec.V = zeros.copy()
+            tec.UE = zeros.copy()
+            tec.UC = zeros.copy()
+            tec.IEsecSingle = zeros.copy()
+            tec.ICsecSingle = zeros.copy()
+            tec.phiE = zeros.copy()
+            tec.phiC = zeros.copy()
+            tec.Vd = zeros.copy()
+            tec.joulePowerE = zeros.copy()
+            tec.joulePowerC = zeros.copy()
+            tec.terminalPointUE1 = 0.0
+            tec.terminalPointUE2 = 0.0
+            tec.terminalPointUC1 = 0.0
+            tec.terminalPointUC2 = 0.0
+        self._circuit.Iout = 0.0
+        if getattr(self._circuit, "isFixedU", False) or getattr(self._circuit, "isParallelFixedU", False):
+            self._circuit.Uout = float(self._input_data.target_val)
+        else:
+            self._circuit.Uout = 0.0
+        self._circuit.converged = True
+        self._circuit.iterationCount = 0
+        if getattr(self._circuit, "isParallelFixedU", False):
+            self._circuit.branchCurrents = np.zeros(self.N_elem, dtype=float)
+            self._circuit.branchVoltages = np.full(self.N_elem, float(self._input_data.target_val), dtype=float)
+        elif getattr(self._circuit, "isParallelFixedI", False) or getattr(self._circuit, "isParallelLoadCurve", False):
+            self._circuit.branchCurrents = np.zeros(self.N_elem, dtype=float)
+            self._circuit.branchVoltages = np.zeros(self.N_elem, dtype=float)
+        self._zero_emission_skipped = True
     @TEASAProfiler.profile
     def calculate(self, verbose: bool = False) -> float:
         """
@@ -350,7 +515,12 @@ class ThermoCalcModel:
             self.build()
 
         t0 = time.time()
-        self._circuit.calc()
+        if self._should_skip_zero_emission():
+            self._apply_zero_emission_result()
+        else:
+            self._zero_emission_skipped = False
+            self._zero_emission_reason = None
+            self._circuit.calc()
         t1 = time.time()
 
         dt_ms = (t1 - t0) * 1000.0
@@ -365,7 +535,15 @@ class ThermoCalcModel:
         return {
             "Iout": self._circuit.Iout,
             "Uout": self._circuit.Uout,
-            "Rload": self._circuit.Rload
+            "Rload": self._circuit.Rload,
+            "mode": self._mode_str,
+            "converged": bool(getattr(self._circuit, "converged", True)),
+            "iteration_count": int(getattr(self._circuit, "iterationCount", 0)),
+            "branch_currents": np.array(getattr(self._circuit, "branchCurrents", []), dtype=float),
+            "branch_voltages": np.array(getattr(self._circuit, "branchVoltages", []), dtype=float),
+            "effective_rload": self._circuit.Rload,
+            "zero_emission_skipped": bool(self._zero_emission_skipped),
+            "zero_emission_reason": self._zero_emission_reason,
         }
 
     def get_tec_results(self, idx: int):

@@ -11,6 +11,7 @@ root_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
+from Components.RadiatorThermalShield import RadiatorThermalShield
 from Solvers.Hydrodynamics.Components import FlowJunction, IncompressibleFluidVolume, PumpJunction
 from Solvers.Hydrodynamics.HydraulicNetwork import HydraulicNetwork
 from Solvers.SystemManager import SystemManager
@@ -263,6 +264,57 @@ def build_v13_case_a_system(
     return base
 
 
+def attach_radiator_thermal_shield(
+        build: Dict[str, Any],
+        active_until_s: Optional[float] = None,
+        background_temperature_k: float = 3.0,
+        shield_view_factor: float = 0.8,
+        inner_emissivity: float = 0.8,
+        outer_emissivity: float = 0.8,
+        conductivity_w_m_k: float = 1.0,
+        thickness_m: float = 0.002,
+        solar_heat_flux_w_m2: float = 0.0,
+        relaxation: float = 1.0,
+        model: str = "segment_balance") -> RadiatorThermalShield:
+    shield = RadiatorThermalShield(
+        name="V13_RadiatorThermalShield",
+        radiator_units=build["radiator_units"],
+        active_until_s=active_until_s,
+        background_temperature_k=background_temperature_k,
+        shield_view_factor=shield_view_factor,
+        inner_emissivity=inner_emissivity,
+        outer_emissivity=outer_emissivity,
+        conductivity_w_m_k=conductivity_w_m_k,
+        thickness_m=thickness_m,
+        solar_heat_flux_w_m2=solar_heat_flux_w_m2,
+        relaxation=relaxation,
+        model=model,
+    )
+    system = build["system"]
+    if shield not in system.components:
+        system.components.insert(0, shield)
+    build["radiator_thermal_shield"] = shield
+    return shield
+
+
+def radiator_thermal_shield_diagnostics(build: Dict[str, Any]) -> Dict[str, Any]:
+    shield = build.get("radiator_thermal_shield")
+    if shield is None:
+        return {
+            "radiation_shield_enabled": False,
+            "radiation_shield_active": False,
+            "radiation_shield_effective_background_mean_k": None,
+            "radiation_shield_inner_temperature_mean_k": None,
+            "radiation_shield_outer_temperature_mean_k": None,
+            "radiation_shield_q_from_radiator_w": 0.0,
+            "radiation_shield_q_to_space_w": 0.0,
+            "radiation_shield_view_factor": None,
+        }
+    diagnostics = shield.get_diagnostics()
+    diagnostics["radiation_shield_enabled"] = True
+    return diagnostics
+
+
 def set_v13_pump_total_head(build: Dict[str, Any], total_head_pa: float) -> None:
     total_head = float(total_head_pa)
     single_head = 0.5 * total_head
@@ -396,6 +448,7 @@ def v13_basic_diagnostics(build: Dict[str, Any]) -> Dict[str, Any]:
         **v13_flow_diagnostics(build),
         **radiator_flow_diagnostics(build),
         **radiator_radiation_breakdown(build),
+        **radiator_thermal_shield_diagnostics(build),
     }
 
 
@@ -404,7 +457,9 @@ __all__ = [
     "V13_DEFAULT_INLET_TEMPERATURE_K",
     "V13_DEFAULT_PUMP_TOTAL_HEAD_PA",
     "V13_DEFAULT_REFERENCE_PRESSURE_PA",
+    "attach_radiator_thermal_shield",
     "build_v13_case_a_system",
+    "radiator_thermal_shield_diagnostics",
     "reset_v13_design_flows",
     "set_v13_pump_total_head",
     "v13_basic_diagnostics",

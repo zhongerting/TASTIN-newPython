@@ -679,31 +679,75 @@ def _case_a_flow_diagnostics(build: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _case_a_electric_diagnostics(core: ReactorCore) -> Dict[str, Any]:
-    thermo_calc = getattr(core, "thermo_calc", None)
-    if thermo_calc is None:
+    def _empty() -> Dict[str, Any]:
         return {
             "tec_total_voltage_v": None,
             "tec_total_current_a": None,
             "tec_total_electric_power_w": None,
             "tec_load_resistance_ohm": None,
+            "tec_main_voltage_v": None,
+            "tec_main_current_a": None,
+            "tec_main_electric_power_w": None,
+            "tec_reserved_parallel_voltage_v": None,
+            "tec_reserved_parallel_current_a": None,
+            "tec_reserved_parallel_electric_power_w": None,
         }
+
+    def _power(results: Optional[Dict[str, Any]]) -> Optional[float]:
+        if not results:
+            return None
+        return float(results.get("Uout", 0.0)) * float(results.get("Iout", 0.0))
+
+    if hasattr(core, "get_tec_circuit_global_results"):
+        group_results = core.get_tec_circuit_global_results()
+        main_results = group_results.get("main")
+        if not main_results:
+            return _empty()
+        reserved_results = group_results.get("reserved_parallel")
+        main_voltage = float(main_results.get("Uout", 0.0))
+        main_current = float(main_results.get("Iout", 0.0))
+        main_power = _power(main_results)
+        reserved_power = _power(reserved_results)
+        total_power = float(main_power or 0.0) + float(reserved_power or 0.0)
+        return {
+            "tec_total_voltage_v": main_voltage,
+            "tec_total_current_a": main_current,
+            "tec_total_electric_power_w": total_power,
+            "tec_load_resistance_ohm": float(main_results.get("Rload", 0.0)),
+            "tec_main_voltage_v": main_voltage,
+            "tec_main_current_a": main_current,
+            "tec_main_electric_power_w": main_power,
+            "tec_reserved_parallel_voltage_v": (
+                None if not reserved_results else float(reserved_results.get("Uout", 0.0))
+            ),
+            "tec_reserved_parallel_current_a": (
+                None if not reserved_results else float(reserved_results.get("Iout", 0.0))
+            ),
+            "tec_reserved_parallel_electric_power_w": reserved_power,
+        }
+
+    thermo_calc = getattr(core, "thermo_calc", None)
+    if thermo_calc is None:
+        return _empty()
 
     global_results = thermo_calc.get_global_results()
     if not global_results:
-        return {
-            "tec_total_voltage_v": None,
-            "tec_total_current_a": None,
-            "tec_total_electric_power_w": None,
-            "tec_load_resistance_ohm": None,
-        }
+        return _empty()
 
     voltage = float(global_results.get("Uout", 0.0))
     current = float(global_results.get("Iout", 0.0))
+    power = voltage * current
     return {
         "tec_total_voltage_v": voltage,
         "tec_total_current_a": current,
-        "tec_total_electric_power_w": voltage * current,
+        "tec_total_electric_power_w": power,
         "tec_load_resistance_ohm": float(global_results.get("Rload", 0.0)),
+        "tec_main_voltage_v": voltage,
+        "tec_main_current_a": current,
+        "tec_main_electric_power_w": power,
+        "tec_reserved_parallel_voltage_v": None,
+        "tec_reserved_parallel_current_a": None,
+        "tec_reserved_parallel_electric_power_w": None,
     }
 
 

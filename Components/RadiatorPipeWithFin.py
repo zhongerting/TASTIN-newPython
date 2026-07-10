@@ -63,6 +63,8 @@ class RadiatorPipeWithFin(BaseComponent):
         self.tube_area_scale = float(tube_area_scale)
         self.fin_area_scale = float(fin_area_scale)
         self.T_space = float(T_space)
+        self._default_radiation_background_k = float(T_space)
+        self.radiation_background_temperature = np.full(self.n_axial, float(T_space), dtype=float)
         self.fin_conductivity = float(fin_conductivity)
         self.fin_view_factor = float(fin_view_factor)
         self.contact_resistance_m2k_w = float(contact_resistance_m2k_w)
@@ -155,6 +157,32 @@ class RadiatorPipeWithFin(BaseComponent):
         self._fin_scratch = {}
 
         self.wall.initialize_state()
+
+    def set_radiation_background_temperature(self, value):
+        """Update the equivalent radiation background used by tube and fin radiation."""
+        if np.isscalar(value):
+            background = np.full(self.n_axial, float(value), dtype=float)
+        else:
+            background = np.asarray(value, dtype=float)
+            if background.shape != (self.n_axial,):
+                background = np.broadcast_to(background, (self.n_axial,))
+                background = np.array(background, dtype=float, copy=True)
+        background = np.nan_to_num(
+            background,
+            nan=self._default_radiation_background_k,
+            posinf=1.0e6,
+            neginf=self._default_radiation_background_k,
+        )
+        background = np.maximum(background, 1.0e-3)
+        self.radiation_background_temperature[:] = background
+        self.T_space = float(np.mean(background))
+        self.bc_tube_radiation.update_params(T_env=background)
+
+    def restore_default_radiation_background(self):
+        self.set_radiation_background_temperature(self._default_radiation_background_k)
+
+    def get_radiation_surface_temperature(self):
+        return np.asarray(self.wall.boundaries["right"].T_surface, dtype=float).copy()
 
     @staticmethod
     def _solve_tridiagonal_inplace(a, b, c, d, c_prime, d_prime, solution):
@@ -266,9 +294,10 @@ class RadiatorPipeWithFin(BaseComponent):
         iteration_count = 0
         max_delta = 0.0
         for iteration in range(max_iter):
+            background_active = self.radiation_background_temperature[active]
             rad_term[:, :] = self.fin_emissivity * self.sigma * (
-                T_active ** 2 + self.T_space ** 2
-            ) * (T_active + self.T_space)
+                T_active ** 2 + background_active[:, np.newaxis] ** 2
+            ) * (T_active + background_active[:, np.newaxis])
             rad_term *= P_rad[:, np.newaxis] * dx[:, np.newaxis]
 
             a.fill(0.0)
@@ -278,17 +307,17 @@ class RadiatorPipeWithFin(BaseComponent):
 
             b[:, 0] = G_base + G + rad_term[:, 0]
             c[:, 0] = -G
-            d[:, 0] = G_base * T_root_active + rad_term[:, 0] * self.T_space
+            d[:, 0] = G_base * T_root_active + rad_term[:, 0] * background_active
 
             if nw > 1:
                 a[:, 1:-1] = -G[:, np.newaxis]
                 b[:, 1:-1] = 2.0 * G[:, np.newaxis] + rad_term[:, 1:-1]
                 c[:, 1:-1] = -G[:, np.newaxis]
-                d[:, 1:-1] = rad_term[:, 1:-1] * self.T_space
+                d[:, 1:-1] = rad_term[:, 1:-1] * background_active[:, np.newaxis]
 
                 a[:, -1] = -G
                 b[:, -1] = G + rad_term[:, -1]
-                d[:, -1] = rad_term[:, -1] * self.T_space
+                d[:, -1] = rad_term[:, -1] * background_active
 
             self._solve_tridiagonal_inplace(a, b, c, d, c_prime, d_prime, T_new)
             err = float(np.max(np.abs(T_new - T_active)))
@@ -304,7 +333,7 @@ class RadiatorPipeWithFin(BaseComponent):
             * self.sigma
             * P_rad[:, np.newaxis]
             * dx[:, np.newaxis]
-            * (T_active ** 4 - self.T_space ** 4),
+            * (T_active ** 4 - background_active[:, np.newaxis] ** 4),
             axis=1,
         )
         self.last_fin_iteration_count = int(iteration_count)
@@ -379,7 +408,7 @@ class RadiatorPipeWithFin(BaseComponent):
         active = self._active_fin_mask(T_root)
         lambda_raw = self._compute_fin_tangent_conductance(T_root, T_fin, active)
 
-        T_space_safe = max(self.T_space, 1.0e-3)
+        T_space_safe = np.maximum(self.radiation_background_temperature, 1.0e-3)
         T_seg_safe = np.maximum(T_fin, 1.0e-3)
         nw = self.n_fin_width
         dx_arr = np.zeros(self.n_axial, dtype=float)
@@ -391,8 +420,8 @@ class RadiatorPipeWithFin(BaseComponent):
             self.fin_emissivity
             * self.sigma
             * A_seg
-            * (T_seg_safe + T_space_safe)
-            * (T_seg_safe ** 2 + T_space_safe ** 2),
+            * (T_seg_safe + T_space_safe[:, np.newaxis])
+            * (T_seg_safe ** 2 + T_space_safe[:, np.newaxis] ** 2),
             axis=1,
         )
         lambda_fallback = np.clip(
@@ -407,7 +436,7 @@ class RadiatorPipeWithFin(BaseComponent):
         R_fin = self.contact_resistance + 1.0 / lambda_fin
         R_fin = np.nan_to_num(R_fin, nan=1.0e15, posinf=1.0e15, neginf=1.0e15)
         T_fin_eff = T_root - Q_fin * R_fin
-        T_fin_eff = np.nan_to_num(T_fin_eff, nan=self.T_space, posinf=1.0e12, neginf=-1.0e12)
+        T_fin_eff = np.nan_to_num(T_fin_eff, nan=float(np.mean(T_space_safe)), posinf=1.0e12, neginf=-1.0e12)
         self.bc_fin.update_params(T_ext=T_fin_eff, R_ext=R_fin)
 
         self.last_fin_temperature = np.array(T_fin, copy=True)
@@ -420,7 +449,10 @@ class RadiatorPipeWithFin(BaseComponent):
             self.tube_emissivity
             * self.sigma
             * self.tube_bare_area
-            * (np.asarray(self.wall.boundaries["right"].T_surface, dtype=float) ** 4 - self.T_space ** 4)
+            * (
+                np.asarray(self.wall.boundaries["right"].T_surface, dtype=float) ** 4
+                - self.radiation_background_temperature ** 4
+            )
         )
 
     def get_solids(self) -> list:
@@ -435,7 +467,7 @@ class RadiatorPipeWithFin(BaseComponent):
             self.tube_emissivity
             * self.sigma
             * self.tube_bare_area
-            * (T_wall ** 4 - self.T_space ** 4)
+            * (T_wall ** 4 - self.radiation_background_temperature ** 4)
         )
         return {
             "bare_radiation": tube_radiation,

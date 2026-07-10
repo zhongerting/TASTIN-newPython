@@ -25,6 +25,7 @@ from run_v8_caseA_common import (
     get_solid_ode_methods,
     get_wire_resistance,
     json_default,
+    load_tec_load_curve,
     parse_solid_ode_method,
     parse_v8_multipliers,
     passive_tec_source_totals,
@@ -35,6 +36,7 @@ from test_core_assemble_v13_caseA import (
     V13_DEFAULT_INLET_TEMPERATURE_K,
     V13_DEFAULT_PUMP_TOTAL_HEAD_PA,
     V13_DEFAULT_REFERENCE_PRESSURE_PA,
+    attach_radiator_thermal_shield,
     build_v13_case_a_system,
     reset_v13_design_flows,
     set_v13_pump_total_head,
@@ -78,6 +80,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--connector-length-m", type=float, default=0.02)
     parser.add_argument("--coolant-material", default=DEFAULT_COOLANT_MATERIAL)
     parser.add_argument("--target-voltage", type=float, default=27.2)
+    parser.add_argument("--enable-reserved-parallel-tec", action="store_true")
+    parser.add_argument("--reserved-parallel-mode", choices=("fixed_u", "fixed_i", "load_curve"), default="fixed_u")
+    parser.add_argument("--reserved-parallel-voltage", type=float, default=0.8)
+    parser.add_argument("--reserved-parallel-current", type=float, default=6000.0)
+    parser.add_argument("--reserved-parallel-load-curve", default=None)
     parser.add_argument("--thermo-update-interval", type=float, default=1.0)
     parser.add_argument("--disable-tec-coupled", action="store_true")
     parser.add_argument("--wire-resistance-scale", type=float, default=0.5)
@@ -103,6 +110,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fin-conductivity-w-m-k", type=float, default=348.9)
     parser.add_argument("--fin-view-factor", type=float, default=1.0)
     parser.add_argument("--fin-contact-resistance-m2k-w", type=float, default=0.0)
+    parser.add_argument("--enable-radiation-shield", "--enable-radiator-shield", dest="enable_radiation_shield", action="store_true")
+    parser.add_argument("--shield-active-until-s", type=float, default=None)
+    parser.add_argument("--shield-inner-emissivity", type=float, default=0.8)
+    parser.add_argument("--shield-outer-emissivity", type=float, default=0.8)
+    parser.add_argument("--shield-conductivity-w-m-k", type=float, default=1.0)
+    parser.add_argument("--shield-thickness-m", type=float, default=0.002)
+    parser.add_argument("--shield-view-factor", type=float, default=0.8)
+    parser.add_argument("--shield-solar-heat-flux-w-m2", type=float, default=0.0)
+    parser.add_argument("--shield-background-temperature-k", type=float, default=3.0)
+    parser.add_argument("--shield-relaxation", type=float, default=1.0)
+    parser.add_argument(
+        "--shield-model",
+        choices=("segment_balance", "fortran_shield2"),
+        default="segment_balance",
+    )
     parser.add_argument("--radiator-header-k-loss", type=float, default=1.0)
     parser.add_argument("--radiator-tube-inlet-k-loss", type=float, default=100.0)
     parser.add_argument("--radiator-tube-outlet-k-loss", type=float, default=100.0)
@@ -133,6 +155,36 @@ def parse_args() -> argparse.Namespace:
     if args.solid_ode_method == DEFAULT_SOLID_ODE_METHOD:
         args.solid_ode_method = parse_solid_ode_method("RK45")
     return args
+
+
+def configure_core_tec_circuits(core, args: argparse.Namespace) -> None:
+    """Configure the legacy main series TEC circuit and optional reserved parallel circuit."""
+    core.setup_tec_circuit("fixed_u", float(args.target_voltage), I_guess=150.0, topology="series")
+    if not bool(args.enable_reserved_parallel_tec):
+        if hasattr(core, "disable_reserved_parallel_tec_circuit"):
+            core.disable_reserved_parallel_tec_circuit()
+        return
+
+    mode = str(args.reserved_parallel_mode)
+    load_curve = load_tec_load_curve(args.reserved_parallel_load_curve)
+    if mode == "fixed_u":
+        target_value = float(args.reserved_parallel_voltage)
+    elif mode == "fixed_i":
+        target_value = float(args.reserved_parallel_current)
+    elif mode == "load_curve":
+        if load_curve is None:
+            raise ValueError("--reserved-parallel-load-curve is required when --reserved-parallel-mode=load_curve.")
+        target_value = float(args.reserved_parallel_voltage)
+    else:
+        raise ValueError(f"Unsupported reserved parallel TEC mode: {mode}")
+
+    core.setup_reserved_parallel_tec_circuit(
+        mode_str=mode,
+        target_value=target_value,
+        I_guess=float(args.reserved_parallel_current),
+        multipliers={"Ring3_Open": int(core.tfe_multipliers.get("Ring3_Open", 0))},
+        load_curve=load_curve,
+    )
 
 
 def flatten_for_csv(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -453,11 +505,30 @@ def build_case(args: argparse.Namespace) -> Dict[str, Any]:
     else:
         migration = inject_v12_restart(build, args)
 
+    if bool(args.enable_radiation_shield):
+        active_until = None
+        if args.shield_active_until_s is not None:
+            active_until = float(system.global_time) + float(args.shield_active_until_s)
+        shield = attach_radiator_thermal_shield(
+            build,
+            active_until_s=active_until,
+            background_temperature_k=float(args.shield_background_temperature_k),
+            shield_view_factor=float(args.shield_view_factor),
+            inner_emissivity=float(args.shield_inner_emissivity),
+            outer_emissivity=float(args.shield_outer_emissivity),
+            conductivity_w_m_k=float(args.shield_conductivity_w_m_k),
+            thickness_m=float(args.shield_thickness_m),
+            solar_heat_flux_w_m2=float(args.shield_solar_heat_flux_w_m2),
+            relaxation=float(args.shield_relaxation),
+            model=args.shield_model,
+        )
+        shield.pre_step(0.0, float(system.global_time))
+
     core.point_reactor = None
     core.enable_tec_coupled = not bool(args.disable_tec_coupled)
     core.thermo_update_interval = float(args.thermo_update_interval)
     if core.enable_tec_coupled:
-        core.setup_tec_circuit("fixed_u", args.target_voltage, I_guess=150.0)
+        configure_core_tec_circuits(core, args)
     core.update_neutronic_power(
         p_total=float(args.total_power_w),
         p_fiss=float(args.total_power_w),
@@ -469,7 +540,7 @@ def build_case(args: argparse.Namespace) -> Dict[str, Any]:
     core.post_step(0.0, float(system.global_time))
     if core.enable_tec_coupled and core.thermo_calc is not None:
         apply_wire_resistance(core, scale=float(args.wire_resistance_scale))
-        core._last_thermo_update_time = float(system.global_time)
+        core.set_thermo_update_time(float(system.global_time))
     core.pre_step(0.0, float(system.global_time))
     build["fluid_solid_coupling_scheme"] = args.fluid_solid_coupling_scheme
     build["fluid_solid_coupler_count"] = apply_fluid_solid_coupling_scheme(system, args.fluid_solid_coupling_scheme)
@@ -483,6 +554,17 @@ def build_case(args: argparse.Namespace) -> Dict[str, Any]:
             for value in build["wire_resistance_ohm"]
         ]
     build["tec_coupled_enabled"] = bool(core.enable_tec_coupled)
+    build["tec_topology"] = str(getattr(core, "tec_topology", "series"))
+    build["tec_circuit_mode"] = str(getattr(core, "tec_circuit_mode", "fixed_u"))
+    build["reserved_parallel_tec_enabled"] = bool(getattr(core, "reserved_parallel_tec_enabled", False))
+    build["reserved_parallel_tec_mode"] = str(args.reserved_parallel_mode)
+    build["radiation_shield_enabled"] = bool(args.enable_radiation_shield)
+    build["radiation_shield_model"] = args.shield_model
+    build["radiation_shield_active_until_abs_s"] = (
+        None
+        if not bool(args.enable_radiation_shield) or args.shield_active_until_s is None
+        else float(system.global_time) + float(args.shield_active_until_s)
+    )
     build["migration_summary"] = migration
     return build
 
@@ -518,6 +600,13 @@ def write_latest_state(
         "wire_resistance_scale": float(args.wire_resistance_scale),
         "wire_resistance_ohm": build["wire_resistance_ohm"],
         "tec_coupled_enabled": build["tec_coupled_enabled"],
+        "tec_topology": build.get("tec_topology"),
+        "tec_circuit_mode": build.get("tec_circuit_mode"),
+        "reserved_parallel_tec_enabled": build.get("reserved_parallel_tec_enabled"),
+        "reserved_parallel_tec_mode": build.get("reserved_parallel_tec_mode"),
+        "radiation_shield_enabled": build.get("radiation_shield_enabled", False),
+        "radiation_shield_model": build.get("radiation_shield_model"),
+        "radiation_shield_active_until_abs_s": build.get("radiation_shield_active_until_abs_s"),
         "solid_ode_method": str(build["solid_ode_method"]),
         "fluid_solid_coupling_scheme": build["fluid_solid_coupling_scheme"],
         "latest_record": latest_record,
@@ -591,6 +680,13 @@ def main() -> None:
         **v13_basic_diagnostics(build),
         "fluid_solid_coupling_scheme": build["fluid_solid_coupling_scheme"],
         "wire_resistance_scale": build["wire_resistance_scale"],
+        "tec_topology": build.get("tec_topology"),
+        "tec_circuit_mode": build.get("tec_circuit_mode"),
+        "reserved_parallel_tec_enabled": build.get("reserved_parallel_tec_enabled"),
+        "reserved_parallel_tec_mode": build.get("reserved_parallel_tec_mode"),
+        "radiation_shield_enabled": build.get("radiation_shield_enabled", False),
+        "radiation_shield_model": build.get("radiation_shield_model"),
+        "radiation_shield_active_until_abs_s": build.get("radiation_shield_active_until_abs_s"),
     }
     system.save_global_state(str(latest_restart_path))
     write_latest_state(
@@ -647,9 +743,10 @@ def main() -> None:
             next_control_time = min(next_control_time + float(args.pump_control_interval), target_time)
 
         if float(system.global_time) >= next_record_time - 1.0e-10:
-            passive = passive_tec_source_totals(build)
-            if any(value != 0.0 for value in passive.values()):
-                raise RuntimeError(f"Ring3_Open TEC sources are not zero: {passive}")
+            if not bool(build.get("reserved_parallel_tec_enabled", False)):
+                passive = passive_tec_source_totals(build)
+                if any(value != 0.0 for value in passive.values()):
+                    raise RuntimeError(f"Ring3_Open TEC sources are not zero: {passive}")
             record = {
                 **v13_basic_diagnostics(build),
                 "relative_time_s": float(system.global_time) - start_time,
@@ -660,6 +757,13 @@ def main() -> None:
                 "wire_resistance_scale": build["wire_resistance_scale"],
                 "wire_resistance_ohm": build["wire_resistance_ohm"],
                 "tec_coupled_enabled": build["tec_coupled_enabled"],
+                "tec_topology": build.get("tec_topology"),
+                "tec_circuit_mode": build.get("tec_circuit_mode"),
+                "reserved_parallel_tec_enabled": build.get("reserved_parallel_tec_enabled"),
+                "reserved_parallel_tec_mode": build.get("reserved_parallel_tec_mode"),
+                "radiation_shield_enabled": build.get("radiation_shield_enabled", False),
+                "radiation_shield_model": build.get("radiation_shield_model"),
+                "radiation_shield_active_until_abs_s": build.get("radiation_shield_active_until_abs_s"),
                 "target_flow_kg_s": float(args.target_flow_kg_s),
                 "flow_error_kg_s": float(build["pump_a"].W + build["pump_b"].W) * 0.5 - float(args.target_flow_kg_s),
             }

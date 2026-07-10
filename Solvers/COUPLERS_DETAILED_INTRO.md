@@ -115,6 +115,10 @@ self.bc1 = self.bound1.add_resistance_condition(T_ext=300.0, R_ext=0.0, R_add=R_
 self.bc2 = self.bound2.add_resistance_condition(T_ext=300.0, R_ext=0.0, R_add=R_contact)
 ```
 
+这里的 `T_ext=300.0, R_ext=0.0` 只是构造期占位值，必须在边界被求解或读取热流前由 `sync()` 更新。若某个组件在 `SystemManager._run_couplers()` 常规同步之前主动读取耦合边界热流，应先显式同步自己的内部耦合器，否则零热阻占位会形成 `1/R = inf` 的非物理通量。
+
+典型例子包括 `ReactorCore.pre_step()` 读取内部等效 moderator 外流，以及 `TFEUnit._build_couplers()` 在构建冷却剂流固耦合前为获取套管热容而调用 `initialize_state()`。这些路径都发生在常规全局耦合器同步之前，应由组件自身先同步已创建的内部耦合器。
+
 ### 4.3 同步逻辑
 
 `sync()` 会交叉更新两侧边界：
@@ -489,6 +493,8 @@ obj2 看到:
 
 也就是说，间隙热阻与对方固体的内部热阻串联。
 
+与普通固固耦合相同，`GapCouple2D` 构造期继承来的零热阻 `ResistanceBC` 不能作为有效物理边界使用；真实热阻在第一次 `sync()` 后才进入边界条件。组件若在全局耦合器同步之前消费 `GapCouple2D` 两侧边界热流，必须先调用该耦合器的 `sync()`。
+
 ## 8. `ActiveGapCouple2D`
 
 `ActiveGapCouple2D` 继承自 `GapCouple2D`，在辐射和气体导热基础上增加一个分布式固定热流源。
@@ -766,5 +772,17 @@ Implementation notes:
 - Local implicit mode requires `solid_node_capacitance`; missing capacitance is a hard error only when this mode is selected.
 - The original Robin `ResistanceBC` object is retained for compatibility but is set to near-adiabatic in local implicit mode.
 - A dedicated `FluxBC` applies `q_to_solid` on the solid side, while `FluidChannel.add_coupling_source_distribution()` receives `q_to_fluid` as an explicit bounded source with zero implicit coefficient.
-- `get_max_stable_dt()` no longer constrains the global step by the explicit fluid-solid exchange time constant in local implicit mode. Fluid CFL, `max_dt`, growth limits, and convergence controls still apply.
+- `get_max_stable_dt()` still constrains the global step by the fluid-solid physical exchange time scale in local implicit mode: after the first `execute()`, it returns `safety_factor * min(C_eff / lambda)`. This is a resolution/accuracy limit for thin-wall coupling, not a claim that the local implicit update is explicitly unstable.
 - Existing cases and restart files remain compatible because the default scheme is still `current`.
+
+## 17. 2026-06-30 local implicit adaptive dt contract
+
+`FluidSolidCouple` no longer bypasses adaptive time-step control when `coupling_time_scheme="local_implicit"`. Once `_last_lambda` has been populated by `execute()`, `get_max_stable_dt()` computes the same heat-capacity time scale used by the current scheme:
+
+```text
+C_fluid = rho * flow_area * node_length * cp
+C_eff = C_solid * C_fluid / (C_solid + C_fluid)
+dt = safety_factor * min(C_eff / lambda)
+```
+
+Before the first `execute()` or without `solid_node_capacitance`, the method still returns `max_limit` for compatibility. Local implicit diagnostics include `coupling_tau_min_s`, `coupling_dt_limit_s`, and `dt_over_coupling_tau_max`; use these fields to verify whether V11/V13 time steps are resolving thin-wall fluid-solid exchange.

@@ -299,6 +299,14 @@ class FakeResistanceBC:
         self.R_ext = np.asarray(R_ext, dtype=float).reshape(shape).copy()
 
 
+class FakeFluxBC:
+    def __init__(self, q_flux, shape):
+        self.q_flux = np.asarray(q_flux, dtype=float).reshape(shape).copy()
+
+    def update_params(self, q_flux):
+        self.q_flux = np.asarray(q_flux, dtype=float).reshape(self.q_flux.shape).copy()
+
+
 class FakeFluidSolidBoundary:
     def __init__(self, wall_temperatures):
         self.shape = (1,)
@@ -310,6 +318,10 @@ class FakeFluidSolidBoundary:
     def add_resistance_condition(self, T_ext, R_ext):
         self.solid_bc = FakeResistanceBC(T_ext, R_ext, self.shape)
         return self.solid_bc
+
+    def add_flux_condition(self, q_flux):
+        self.flux_bc = FakeFluxBC(q_flux, self.shape)
+        return self.flux_bc
 
     def compute_net_flux_for_solver(self):
         index = min(self.flux_calls, len(self.wall_temperatures) - 1)
@@ -676,6 +688,35 @@ class SystemManagerLifecycleTests(unittest.TestCase):
 
         self.assertAlmostEqual(dt, 1.0e-6)
 
+    def test_compute_adaptive_dt_respects_local_implicit_coupler_time_scale(self):
+        fluid = FakeFluidSolidChannel()
+        boundary = FakeFluidSolidBoundary([400.0])
+        coupler = FluidSolidCouple(
+            name="local-implicit-wall",
+            fluid=fluid,
+            solid_boundary_region=boundary,
+            heated_perimeter=1.0,
+            correlation_func=SequenceCorrelation([100.0]),
+            solid_node_capacitance=np.array([5.0], dtype=float),
+            coupling_time_scheme="local_implicit",
+        )
+        coupler.execute(dt=0.1)
+        manager = make_manager(FakeFluid(stable_dt=1.0))
+        manager.add_coupler(coupler)
+
+        lambda_val = coupler._last_lambda[0]
+        C_fluid = coupler._fluid_node_capacitance(
+            fluid.temperature_vector,
+            fluid.pressure_vector,
+            fluid.density_vector,
+        )[0]
+        C_eff = 5.0 * C_fluid / (5.0 + C_fluid)
+        expected = 0.8 * C_eff / lambda_val
+
+        dt = manager.compute_adaptive_dt(min_dt=1.0e-4, max_dt=1.0, safety_factor=0.8)
+
+        self.assertLess(expected, 1.0)
+        self.assertAlmostEqual(dt, expected)
     def test_compute_adaptive_dt_shrinks_after_nonconverged_step_diagnostics(self):
         manager = make_manager(FakeFluid(stable_dt=1.0))
         manager.last_step_diagnostics = {
