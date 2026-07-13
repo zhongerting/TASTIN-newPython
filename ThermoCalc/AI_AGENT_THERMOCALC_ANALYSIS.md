@@ -19,7 +19,7 @@ Components/ReactorCore.py 或 Components/TECCircuitManager.py
     -> thermionicEmission
 ```
 
-2026-06-01 已闭合逐节点侧面积、`phiE/phiC/Vd` 结果读取和铯池温度运行时热更新，并使用 Python 3.12 重新构建 `te_solver.cp312-win_amd64.pyd`。串联公共模式仍为 `fixed_u/fixed_r`，包装层继续拒绝串联 `fixed_i`；2026-06-25 起新增每根虚拟 TEC 一支路的并联模式 `parallel_fixed_u`、`parallel_fixed_i` 和 `parallel_load_curve`。`ReactorCore` 负责上层分组：V11/V13 默认主串联 34 根 TEC，可选把 `Ring3_Open` 代表的 3 根 TEC 单独接入预留并联电路。
+2026-06-01 已闭合逐节点侧面积、`phiE/phiC/Vd` 结果读取和铯池温度运行时热更新，并使用 Python 3.12 重新构建 `te_solver.cp312-win_amd64.pyd`。串联公共模式支持 `fixed_u/fixed_r/fixed_i`；2026-06-25 起新增每根虚拟 TEC 一支路的并联模式 `parallel_fixed_u`、`parallel_fixed_i` 和 `parallel_load_curve`。`ReactorCore` 负责上层分组：V11/V13 默认主串联 34 根 TEC，可选把 `Ring3_Open` 代表的 3 根 TEC 单独接入预留并联电路。
 
 2026-06-23 新增热离子发射查表加速实验路径。该路径保持原解析 `thermionicEmission::calc()` 可用，查表仅在显式启用时作为 `calc()` 的优先分支；表缺失或关闭时继续走原解析法。2026-06-25 并联验证通过后，根目录生产 `ThermoCalc/te_solver.cp312-win_amd64.pyd` 已替换为当前 `build_cp312/Release` 产物，旧版备份为 `ThermoCalc/te_solver.cp312-win_amd64.before_parallel_20260625.pyd`。
 
@@ -41,7 +41,7 @@ Components/ReactorCore.py 或 Components/TECCircuitManager.py
 | [`ThermoCalcWrapper.py`](./ThermoCalcWrapper.py) | Python 公共包装层：准备输入、构建电路、调用计算、提取结果、提供更新方法 |
 | [`bindings.cpp`](./bindings.cpp) | pybind11 边界：定义 `CalculationMode`、`InputData`、工厂函数和 Python 可见属性 |
 | [`emissionLookup.h`](./emissionLookup.h)、[`emissionLookup.cpp`](./emissionLookup.cpp) | 可选热离子发射查表后端：管理分块表、四维插值、安全标志和全局启停 |
-| [`circuitTECs.h`](./circuitTECs.h)、[`circuitTECs.cpp`](./circuitTECs.cpp) | 多根 TFE 串联/并联电路：串联定电压/定电阻，并联定电压/定总电流/外部 U-I 负载曲线 |
+| [`circuitTECs.h`](./circuitTECs.h)、[`circuitTECs.cpp`](./circuitTECs.cpp) | 多根 TFE 串联/并联电路：串联定电压/定电阻/定电流，并联定电压/定总电流/外部 U-I 负载曲线 |
 | [`singleThermionicEnergyConversion.h`](./singleThermionicEnergyConversion.h)、[`singleThermionicEnergyConversion.cpp`](./singleThermionicEnergyConversion.cpp) | 单根 TFE：轴向节点、导线与电极电势、电流密度和电阻率 |
 | [`thermionicEmission.h`](./thermionicEmission.h)、[`thermionicEmission.cpp`](./thermionicEmission.cpp) | 单个轴向节点的热离子发射 J-V 模型：阻塞、过渡、饱和分支 |
 | [`NonLinerSolver.h`](./NonLinerSolver.h)、[`NonLinerSolver.cpp`](./NonLinerSolver.cpp) | C++ 辅助求解器；被构建并由头文件引用 |
@@ -82,15 +82,19 @@ Validated public modes:
 | --- | --- | --- |
 | `fixed_u` | series fixed voltage | Default main V11/V13 circuit |
 | `fixed_r` | series fixed resistance | Legacy series support |
+| `fixed_i` | series fixed current with open-circuit fallback | Prescribed-current generation |
 | `parallel_fixed_u` | each virtual TEC connected to a common bus voltage | Reserved Ring3_Open parallel circuit |
 | `parallel_fixed_i` | solve common bus voltage for target total current | Reserved Ring3_Open fixed-current circuit |
 | `parallel_load_curve` | solve common bus voltage against `U_load=f(I_total)` | Reserved Ring3_Open external load curve |
 
-Series `fixed_i` is still intentionally rejected by `ThermoCalcWrapper.py`; fixed total current is only exposed through the parallel mode. `ReactorCore` should not switch all V11/V13 TECs to global parallel. It creates one main series `ThermoCalcModel` for `Center/Ring1/Ring2/Ring3_TEC` and, only when requested, one separate reserved parallel `ThermoCalcModel` for `Ring3_Open`.
+Series `fixed_i` reuses `circuitCalc(Itarget)`. A finite positive generated voltage is accepted; otherwise the solver reinitializes and evaluates `circuitCalc(0)`, returns zero current and the open-circuit voltage, and reports `converged=false`. If both solves fail, it returns finite zero current/voltage and emits a warning. `ReactorCore` should not switch all V11/V13 TECs to global parallel. It creates one main series `ThermoCalcModel` for `Center/Ring1/Ring2/Ring3_TEC` and, only when requested, one separate reserved parallel `ThermoCalcModel` for `Ring3_Open`.
+
+2026-07-13 series fixed-current verification used an isolated extension under `ThermoCalc/build_series_fixed_i_test/Release`; the root production pyd was not replaced. The focused check is `testModule/test_thermocalc_series_fixed_current.py`, including single/multiple-TEC zero-current open circuit, a fixed-U cross-check operating point, a finite excessive-current fallback to positive open-circuit voltage, and the finite zero-output guard when both solves fail.
 
 Verification commands used for this change:
 
 ```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_series_fixed_current.py
 & "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_parallel.py
 & "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_interface.py
 & "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_lookup.py
@@ -152,7 +156,7 @@ calc_emission_point_production(...)
 |---|---|---|
 | `ThermoCalcModel(n_elements, n_nodes, lookup_db=None, enable_lookup=None, lookup_regions=None)` | 创建 `te_solver.InputData()` 并填默认值；可显式控制 emission lookup 加载 | 若 `enable_lookup=None`，沿用 `THERMOCALC_ENABLE_LOOKUP` / `THERMOCALC_LOOKUP_DB` 环境变量行为 |
 | `set_temperatures(T_em, T_co)` | 校验 `(N_elem, n_node)`，保存副本；电路已构建时写入每根 `SingleTEC` | 当前绑定暴露了 `Temitter`、`Tcollector` |
-| `setup_circuit_mode(mode_str, target_value, I_guess=150.0)` | 接受 `fixed_R`、`fixed_U`、`parallel_fixed_u`、`parallel_fixed_i`、`parallel_load_curve`；对串联 `fixed_I` 明确抛出 `ValueError` | `parallel_load_curve` 推荐配合 `set_load_curve()` 使用 |
+| `setup_circuit_mode(mode_str, target_value, I_guess=150.0)` | 接受 `fixed_R`、`fixed_U`、`fixed_I`、`parallel_fixed_u`、`parallel_fixed_i`、`parallel_load_curve`；`fixed_I` 要求有限非负目标电流 | `parallel_load_curve` 推荐配合 `set_load_curve()` 使用 |
 | `set_load_curve(current_a, voltage_v)` | 设置并联外部负载 `U_load=f(I_total)` 曲线 | 电流轴必须一维、有限且严格递增 |
 | `build()` | 把温度写入 `InputData`，调用 `te_solver.create_circuit()` | 绑定层在 `unchecked<>` 前执行完整形状校验 |
 | `calculate(verbose=False)` | 必要时自动 `build()`，再调用 `_circuit.calc()`；返回耗时 `[ms]` | 不是物理时间步长度 |
@@ -325,7 +329,7 @@ post_step()
 | 风险 | 当前源码证据 | 处理原则 |
 |---|---|---|
 | 默认解释器与扩展 ABI 不匹配 | 默认 `python --version` 仍为 `3.9.13`，主扩展为 `te_solver.cp312-win_amd64.pyd` | TEC 测试和运行使用 Python 3.12 |
-| 串联 `fixed_I` 公共模式未实现 | 包装层继续明确拒绝 `fixed_I`；并联定总电流模式为 `parallel_fixed_i` | 不要把串联定电流和并联定总电流混为一谈 |
+| 串联 `fixed_i` 不允许外加强迫耗电 | 目标电流求解仅接受有限正端电压；否则回退到零电流开路状态并标记未收敛 | 仍需区分串联 `fixed_i` 与并联定总电流 `parallel_fixed_i` |
 | 并联拓扑第一版较简单 | `parallel_*` 采用每根虚拟 TEC 一支路，暂不支持“支路内部多根串联再并联”的 branch groups | 复杂接线需要新增分组输入和上层映射，不能直接复用当前语义 |
 | 非均匀网格完整数学验证仍有限 | `dlE/dlC` 和侧面积已逐节点化，但 `VcalcFVM()` 的界面距离仍沿用现有离散公式 | 修改电势离散时补专项守恒验证 |
 | `set_rload()` 构建前行为不完整 | 包装层尝试写 `_input_data.Rload/R_load`，当前 `InputData` 未绑定这些字段 | 构建后可写 `CircuitTECs.Rload`；构建前优先使用 `setup_circuit_mode('fixed_R', ...)` |
@@ -570,6 +574,7 @@ The production `ThermoCalc/te_solver.cp312-win_amd64.pyd` was rebuilt from the c
 
 ```powershell
 & "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_interface.py
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_series_fixed_current.py
 & "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_parallel.py
 & "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" testModule\test_thermocalc_lookup.py
 ```

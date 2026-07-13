@@ -23,6 +23,7 @@ using namespace std;
 
 // 电路计算模式枚举
 enum class CalculationMode {
+    FixedCurrent,
     FixedVoltage, // 固定电压模式
     FixedResistance, // 固定电阻模式
     ParallelFixedVoltage,
@@ -223,6 +224,7 @@ std::unique_ptr<circuitTECs> create_circuit(const InputData& data) {
     circuit->nTECs = data.N_elements;
     circuit->Iout = data.I_total_init;
     circuit->isFixedU = false;
+    circuit->isFixedI = false;
     circuit->isFixedR = false;
     circuit->isParallelFixedU = false;
     circuit->isParallelFixedI = false;
@@ -231,7 +233,16 @@ std::unique_ptr<circuitTECs> create_circuit(const InputData& data) {
     circuit->Itarget = data.target_val;
     circuit->Rload = data.target_val;
 
-    if (data.mode == CalculationMode::FixedVoltage) {
+    if (data.mode == CalculationMode::FixedCurrent) {
+        circuit->isFixedI = true;
+        circuit->Itarget = data.target_val;
+        circuit->Iout = data.target_val;
+        circuit->Uout = 0.0;
+        for (int i = 0; i < data.N_elements; ++i) {
+            circuit->Uout += get_scalar(data.U_init, i);
+        }
+    }
+    else if (data.mode == CalculationMode::FixedVoltage) {
         circuit->isFixedU = true;
         circuit->Utarget = data.target_val;
     } 
@@ -545,6 +556,7 @@ PYBIND11_MODULE(te_solver, m) {
 
     // 1. 绑定枚举
     py::enum_<CalculationMode>(m, "CalculationMode")
+        .value("FixedCurrent", CalculationMode::FixedCurrent)
         .value("FixedVoltage", CalculationMode::FixedVoltage)
         .value("FixedResistance", CalculationMode::FixedResistance)
         .value("ParallelFixedVoltage", CalculationMode::ParallelFixedVoltage)
@@ -623,6 +635,7 @@ PYBIND11_MODULE(te_solver, m) {
         .def_readwrite("Uout", &circuitTECs::Uout)
         .def_readwrite("Itarget", &circuitTECs::Itarget)
         .def_readwrite("isFixedU", &circuitTECs::isFixedU)
+        .def_readwrite("isFixedI", &circuitTECs::isFixedI)
         .def_readwrite("isFixedR", &circuitTECs::isFixedR)
         .def_readwrite("isParallelFixedU", &circuitTECs::isParallelFixedU)
         .def_readwrite("isParallelFixedI", &circuitTECs::isParallelFixedI)

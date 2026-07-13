@@ -111,11 +111,11 @@ def test_input_shape_validation():
     )
 
 
-def test_fixed_current_is_explicitly_rejected():
+def test_fixed_current_rejects_invalid_target():
     model = ThermoCalcModel(n_elements=1, n_nodes=N_NODES)
     _expect_value_error(
-        lambda: model.setup_circuit_mode("fixed_i", 10.0),
-        "fixed_I unexpectedly reached an unbound C++ enum.",
+        lambda: model.setup_circuit_mode("fixed_i", -1.0),
+        "fixed_i accepted a negative target current.",
     )
 
 
@@ -190,7 +190,7 @@ def test_uniform_and_nonuniform_runtime_interfaces():
 
 if __name__ == "__main__":
     test_input_shape_validation()
-    test_fixed_current_is_explicitly_rejected()
+    test_fixed_current_rejects_invalid_target()
     test_low_temperature_fixed_voltage_auto_skips_zero_emission_case()
     test_low_temperature_fixed_voltage_cpp_iteration_returns_when_guard_disabled()
     test_uniform_and_nonuniform_runtime_interfaces()

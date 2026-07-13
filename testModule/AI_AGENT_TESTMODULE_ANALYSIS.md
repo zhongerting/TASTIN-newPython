@@ -2403,3 +2403,7 @@ required pump head = 27.880 kPa
 ```
 
 Interpretation: the result is close to the requested `754.45 K` inlet, `845.65 K` outlet, `206 A`, and `10.44 kW`, but remains slightly hot and slightly high in current/power. Treat it as a working continuation baseline. If tighter calibration is required, make small changes to radiator emissivity or wire-resistance scale and validate with at least a 1200 s window; 1 s electrical checks are not reliable final evidence for this case.
+
+## 2026-07-13 ThermoCalc 串联固定电流测试
+
+`test_thermocalc_series_fixed_current.py` 验证串联 `fixed_i` 的四类状态：单根/多根零电流开路、与 `fixed_u` 交叉验证的可实现工作点、有限的不可发电目标回退到正开路电压，以及双重失败时安全返回有限零输出。测试扩展必须从独立构建目录加载，不得覆盖生产 `.pyd`。

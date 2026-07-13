@@ -340,7 +340,11 @@ class ThermoCalcModel:
         elif mode_key == 'fixed_u':
             self._input_data.mode = te_solver.CalculationMode.FixedVoltage
         elif mode_key == 'fixed_i':
-            raise ValueError("fixed_I mode is not exposed by the ThermoCalc C++ binding.")
+            if not hasattr(te_solver.CalculationMode, "FixedCurrent"):
+                raise ValueError("fixed_i mode is not exposed by the ThermoCalc C++ binding.")
+            if not np.isfinite(target_value) or target_value < 0.0:
+                raise ValueError("fixed_i target current must be finite and non-negative.")
+            self._input_data.mode = te_solver.CalculationMode.FixedCurrent
         elif mode_key == 'parallel_fixed_u':
             if not hasattr(te_solver.CalculationMode, "ParallelFixedVoltage"):
                 raise ValueError("parallel_fixed_u mode is not exposed by the ThermoCalc C++ binding.")
@@ -423,6 +427,15 @@ class ThermoCalcModel:
             self._circuit.Utarget = self._input_data.target_val
             self._circuit.Uout = self._input_data.target_val
             self._circuit.Iout = self._input_data.I_total_init
+        elif hasattr(te_solver.CalculationMode, "FixedCurrent") and self._input_data.mode == te_solver.CalculationMode.FixedCurrent:
+            self._circuit.isFixedR = False
+            self._circuit.isFixedU = False
+            self._circuit.isFixedI = True
+            self._circuit.isParallelFixedU = False
+            self._circuit.isParallelFixedI = False
+            self._circuit.isParallelLoadCurve = False
+            self._circuit.Itarget = self._input_data.target_val
+            self._circuit.Iout = self._input_data.target_val
         elif hasattr(te_solver.CalculationMode, "ParallelFixedVoltage") and self._input_data.mode == te_solver.CalculationMode.ParallelFixedVoltage:
             self._circuit.isFixedR = False
             self._circuit.isFixedU = False
@@ -496,8 +509,9 @@ class ThermoCalcModel:
             self._circuit.Uout = float(self._input_data.target_val)
         else:
             self._circuit.Uout = 0.0
-        self._circuit.converged = True
-        self._circuit.iterationCount = 0
+        fixed_i_unavailable = getattr(self._circuit, "isFixedI", False) and float(self._input_data.target_val) > 0.0
+        self._circuit.converged = not fixed_i_unavailable
+        self._circuit.iterationCount = 1 if fixed_i_unavailable else 0
         if getattr(self._circuit, "isParallelFixedU", False):
             self._circuit.branchCurrents = np.zeros(self.N_elem, dtype=float)
             self._circuit.branchVoltages = np.full(self.N_elem, float(self._input_data.target_val), dtype=float)

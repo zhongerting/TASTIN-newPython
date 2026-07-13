@@ -4,11 +4,13 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <iostream>
 #include <stdexcept>
 
 namespace std {
 	circuitTECs::circuitTECs() {
 		isFixedU = false;
+		isFixedI = false;
 		isFixedR = false;
 		isParallelFixedU = false;
 		isParallelFixedI = false;
@@ -747,10 +749,47 @@ namespace std {
 		return 0.;
 	}
 
+	double circuitTECs::iFixedCircuitCalc() {
+		iterationCount = 1;
+		const double requestedCurrent = Itarget;
+		const double initialVoltage = isfinite(Uout) ? Uout : 0.0;
+		double requestedVoltage = numeric_limits<double>::quiet_NaN();
+		bool requestedConverged = false;
+
+		if (isfinite(requestedCurrent) && requestedCurrent >= 0.0) {
+			requestedVoltage = circuitCalc(requestedCurrent);
+			requestedConverged = converged;
+		}
+		if (requestedConverged && isfinite(requestedVoltage) && requestedVoltage > 0.0) {
+			Iout = requestedCurrent;
+			Uout = requestedVoltage;
+			converged = true;
+			iterationCount = 1;
+			return Iout;
+		}
+
+		Uout = initialVoltage;
+		isFirst = true;
+		const double openCircuitVoltage = circuitCalc(0.0);
+		const bool openCircuitValid = converged && isfinite(openCircuitVoltage) && openCircuitVoltage >= 0.0;
+		Iout = 0.0;
+		Uout = openCircuitValid ? openCircuitVoltage : 0.0;
+		converged = false;
+		iterationCount = 1;
+		if (!openCircuitValid) {
+			cerr << "[ThermoCalc] Series fixed-current solve and open-circuit fallback both failed; "
+				<< "returning zero current and voltage." << endl;
+		}
+		return Iout;
+	}
+
 	void circuitTECs::circuitTECsCalc() {
 		isFirst = true;
 		if (isFixedU) {
 			uFixedCircuitCalc();
+		}
+		if (isFixedI) {
+			iFixedCircuitCalc();
 		}
 		if (isFixedR) {
 			resistanceFixedCircuitCalc();
