@@ -1,10 +1,15 @@
 """Independent V14 heat-pipe radiator adapter for Full_Loop_Cases."""
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 
+from Components.ExternalHeatSources import (
+    W0_8P12_ORBIT_PERIOD_S,
+    load_csv_flux_table_library,
+)
 from Components.RingHP import RingHP
 from Materials.Solids.KHP import PotassiumHP
 from Materials.Solids.WallMaterial import SS316
@@ -27,6 +32,12 @@ SEGMENT_SPECS: Tuple[Tuple[str, str, str, Tuple[int, int, int]], ...] = (
     ("A4_O2_to_I3", "O2", "I3", (5, 5, 6)),
     ("A5_I3_to_O3", "I3", "O3", (5, 6, 6)),
     ("A6_O3_to_I1", "O3", "I1", (5, 6, 6)),
+)
+EXTERNAL_HEAT_CSV = (
+    Path(__file__).resolve().parents[2]
+    / "Components"
+    / "ExternalHeatSources"
+    / "is58p5_w0_8p12_N18_sum.csv"
 )
 
 
@@ -76,9 +87,16 @@ class V14HeatPipeRadiatorConfig:
     n_fin_height: int = 15
     hp_emissivity: float = 0.75
     fin_emissivity: float = 0.75
+    radiation_outer_up_view_factor: float = 1.0
+    radiation_outer_down_view_factor: float = 1.0
+    radiation_inner_up_view_factor: float = 0.0
+    radiation_inner_down_view_factor: float = 0.3
     hp_crossflow_c: float = 0.65
     hp_crossflow_k_cal: float = 1.0
     hp_crossflow_wake_factor: float = 1.0
+    external_heat_enabled: bool = False
+    external_heat_scale_factor: float = 1.0
+    external_heat_absorption_efficiency: float = 0.992
 
     inlet_mix_volume_factor: float = 0.10
     symmetric_ring_multiplier: int = 2
@@ -196,6 +214,7 @@ def _make_ring_hp(
     fluid_channel: Any,
     solid_header: HeatConduction2D,
     hp_multipliers: Sequence[int],
+    external_heat_config: Dict[str, Any] | None,
     config: V14HeatPipeRadiatorConfig,
 ) -> RingHP:
     wall = SS316(name=f"{name}_Wall")
@@ -238,13 +257,17 @@ def _make_ring_hp(
         fin_wrap_ratio=float(config.fin_wrap_ratio),
         emissivity=float(config.hp_emissivity),
         fin_emissivity=float(config.fin_emissivity),
-        up_view_factor=0.0,
-        down_view_factor=0.3,
+        up_view_factor=float(config.radiation_inner_up_view_factor),
+        down_view_factor=float(config.radiation_inner_down_view_factor),
+        radiation_outer_up_view_factor=float(config.radiation_outer_up_view_factor),
+        radiation_outer_down_view_factor=float(config.radiation_outer_down_view_factor),
+        radiation_inner_up_view_factor=float(config.radiation_inner_up_view_factor),
+        radiation_inner_down_view_factor=float(config.radiation_inner_down_view_factor),
         T_space=float(config.t_space_k),
         header_correlation_func=_lyon_martinelli,
         hp_crossflow_base_func=lambda *args: 10.0,
         C_D=1.0,
-        external_heat_config=None,
+        external_heat_config=external_heat_config,
         hp_crossflow_c=float(config.hp_crossflow_c),
         hp_crossflow_k_cal=float(config.hp_crossflow_k_cal),
         hp_crossflow_wake_factor=float(config.hp_crossflow_wake_factor),
@@ -261,6 +284,11 @@ def attach_v14_heatpipe_radiator(build: Dict[str, Any], config: V14HeatPipeRadia
     total_flow = float(build["total_flow_design_kg_s"])
     macro_branch_flow = total_flow / 3.0
     single_ring_branch_flow = macro_branch_flow / float(config.symmetric_ring_multiplier)
+    external_heat_library = None
+    if config.external_heat_enabled:
+        external_heat_library = load_csv_flux_table_library(str(EXTERNAL_HEAT_CSV), W0_8P12_ORBIT_PERIOD_S)
+        if external_heat_library.available_ids() != tuple(range(18)):
+            raise ValueError(f"V14 external heat CSV must contain 18 flux columns: {EXTERNAL_HEAT_CSV}")
 
     volumes: List[Any] = []
     junctions: List[Any] = []
@@ -345,7 +373,7 @@ def attach_v14_heatpipe_radiator(build: Dict[str, Any], config: V14HeatPipeRadia
     ring_hps = []
     segment_entry_links = []
     segment_exit_links = []
-    for sector_name, start_key, end_key, multipliers in SEGMENT_SPECS:
+    for sector_index, (sector_name, start_key, end_key, multipliers) in enumerate(SEGMENT_SPECS):
         channel = make_channel(
             name=f"{sector_name}_Channel",
             n_nodes=int(config.ring_sector_n_nodes),
@@ -359,11 +387,25 @@ def attach_v14_heatpipe_radiator(build: Dict[str, Any], config: V14HeatPipeRadia
         extend_channel_objects(volumes, junctions, channel)
         _set_channel_design_flow(channel, single_ring_branch_flow)
         solid = _make_ring_solid(f"{sector_name}_Solid", config)
+        external_heat_config = None
+        if external_heat_library is not None:
+            external_heat_config = {
+                "use_embedded_table": True,
+                "table_library": external_heat_library,
+                "table_ids_by_node": [3 * sector_index + i for i in range(3)],
+                "table_scale_factor": float(config.external_heat_scale_factor),
+                "external_heat_absorption_efficiency": float(config.external_heat_absorption_efficiency),
+                "table_periodic": True,
+                "wall_illumination_factor": 0.5,
+                "fin_illuminated_area_scale": 1.0,
+                "fin_loading_mode": "distributed_fin_absorption",
+            }
         ring_hp = _make_ring_hp(
             name=f"{sector_name}_RingHP",
             fluid_channel=channel,
             solid_header=solid,
             hp_multipliers=multipliers,
+            external_heat_config=external_heat_config,
             config=config,
         )
         components.append(ring_hp)
@@ -453,3 +495,5 @@ def attach_v14_heatpipe_radiator(build: Dict[str, Any], config: V14HeatPipeRadia
     build["manifold_to_outlet_header_junctions"] = manifold_to_header
     build["single_ring_branch_flow_design_kg_s"] = single_ring_branch_flow
     build["macro_hot_branch_flow_design_kg_s"] = macro_branch_flow
+    build["external_heat_enabled"] = bool(config.external_heat_enabled)
+    build["external_heat_csv"] = str(EXTERNAL_HEAT_CSV) if config.external_heat_enabled else None

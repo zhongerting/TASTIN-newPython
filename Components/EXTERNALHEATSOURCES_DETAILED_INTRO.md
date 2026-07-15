@@ -298,6 +298,19 @@ source.add_source(EarthIRHeatSource(shape=boundary.shape))
 
 推荐在需要区分“热管壁吸热”和“翅片直接受照”时使用第二种方式，并用 `configure_external_heat_accounting()` 做后处理核算。
 
+## 2026-07-15 V14 热管外热吸收口径
+
+V14 的 N18 外热表对应 18 个代表热管区，分别挂到六个 `RingHP` 的三个流体节点；表格本身仍只返回 `W/m2`，不包含面积和热管数量倍率。V14 启用 `distributed_fin_absorption` 时：
+
+- 管壁只通过外侧受照面积接收外热，默认 `wall_illumination_factor=0.5`；
+- 翅片只通过单侧投影/受照面积接收外热，内侧翅片面不接收外热；
+- 管壁有效吸收面积为 `A_outer_wall * illumination * 0.992 * epsilon_hp`；
+- 翅片有效吸收面积为 `A_fin_one_side * illumination * 0.992 * epsilon_fin`；
+- 同一个代表热管的源项只挂一次：管壁进入 `ExternalHeatFluxBC`，翅片进入 `HPwithFin` 准稳态翅片方程；
+- `hp_multipliers` 和 V14 的 `symmetric_ring_multiplier` 只在 RingHP/整机汇总层使用，不在单根热管吸收面积中重复使用。
+
+`0.992` 仅表示外热吸收效率，`alpha=epsilon` 仅用于入射外热；它不修改热管或翅片向空间辐射的有效发射率。外侧和内侧辐射角系数属于 `HPwithFin` 的辐射排热模型，不能拿来替代外热受照面积。
+
 ## 使用建议
 
 优先路线：
@@ -332,6 +345,7 @@ Packaged matrices are embedded in `Components/ExternalHeatSources/w0_8p12_sum_da
 | `matrix_key` | Columns |
 | --- | --- |
 | `is58p5_w0_8p12_N6_sum` | 6 |
+| `is58p5_w0_8p12_N18_sum` | 18 |
 | `is58p5_w0_8p12_N78_sum` | 78 |
 | `is58p5_w0_8p12_N200_sum` | 200 |
 
@@ -343,3 +357,28 @@ source = OrbitalMatrixHeatSource(
     matrix_key="is58p5_w0_8p12_N6_sum",
 )
 ```
+
+### CSV circumferential tables
+
+load_csv_flux_table_library(path, orbit_period_s=...) reads CSV files formatted as a sample index followed by theta columns and exposes each circumferential column as a scalar OrbitalTableHeatSource table. The file must contain at least two rows, finite values, and a strictly increasing sample column. When orbit_period_s is provided, the sample axis is scaled to that physical period. The w0=8.12 deg N6/N18/N78/N200 tables use 360 samples over 6552 s, so their physical sample times are 18.2, 36.4, ..., 6552 s. Values remain in W/m2. V14 uses this path for 18 representative heat-pipe zones and V15 for 78 radiator tubes.
+
+### External-heat loading and no-double-counting contract
+
+The runtime path is:
+
+```text
+sum table [W/m2]
+  -> OrbitalTableHeatSource / OrbitalMatrixHeatSource
+  -> ExternalHeatFluxBC multiplies each axial segment area once
+  -> BoundaryRegion adds the resulting segment powers [W] once
+```
+
+The `*_sum` tables are complete external-heat inputs. Do not add separate solar, albedo, or Earth-IR sources on top of them. `RingHP._build_external_heat_source()` treats matrix/table modes as exclusive and returns before the analytic component path.
+
+Repeating one circumferential table value over several axial nodes does not multiply total power by the node count. Each node receives the same heat-flux density but uses only its own segment area, so the boundary total remains `q_density * sum(segment_area)`.
+
+`ExternalHeatFluxBC.update_state()` overwrites `q_flux`; it does not increment it. `BoundaryRegion.compute_net_flux_for_solver()` clears and rebuilds `Q_sum_flux` on every call, so Picard iterations and ODE trial evaluations do not accumulate external heat across evaluations. `HPwithFin.configure_external_heat_accounting()` is diagnostic only and never adds another boundary source.
+
+For representative V14 heat pipes, `hp_multipliers` scale the heat exchanged with the collector-ring fluid and scaled diagnostics; they do not create additional external-heat boundary conditions. V15 maps one table column to one physical radiator tube. The topology tests require exactly one `ExternalHeatFluxBC` per V14 representative heat pipe and per V15 radiator tube.
+
+V15 的 RadiatorPipeWithFin 额外支持可选的 distributed_fin 模式。该模式仍只保留一个管壁 ExternalHeatFluxBC，但该边界只使用管壁外侧受照面积；翅片部分通过同一个热流源进入准稳态翅片方程。管壁与翅片的有效吸热面积分别为 `A_outer * illumination * 0.992 * epsilon_tube` 和 `fin_strip_width * fin_height * illumination * 0.992 * epsilon_fin`，即采用 `alpha=epsilon`。它们不乘仅用于双面辐射几何修正的 fin_area_scale、fin_view_factor 或内外面辐射角系数。总吸热诊断必须调用 get_external_heat_absorption_distribution()，不能只累计管壁边界的 q_flux。

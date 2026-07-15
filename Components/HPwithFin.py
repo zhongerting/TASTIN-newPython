@@ -33,7 +33,11 @@ class HPwithFin(BaseComponent):
                  down_view_factor: float = 1.0,
                  T_env: float = 3.0,
                  initial_temp: float = 298.15,
-                 fin_emissivity: float = None):
+                 fin_emissivity: float = None,
+                 radiation_outer_up_view_factor: float = 1.0,
+                 radiation_outer_down_view_factor: float = 1.0,
+                 radiation_inner_up_view_factor: float = None,
+                 radiation_inner_down_view_factor: float = None):
         super().__init__(name)
 
         # ===== 1. 保存翅片与环境参数 =====
@@ -49,30 +53,56 @@ class HPwithFin(BaseComponent):
         self.emissivity = emissivity
         self.fin_emissivity = emissivity if fin_emissivity is None else fin_emissivity
         self.T_space = T_env
+        self._default_radiation_background_k = float(T_env)
         self.k_fin_mat = wall_mat
         self.sigma = 5.670374419e-8
 
         # 上下视角因子折算到一个平均有效发射率。
-        self.up_view_factor = up_view_factor
-        self.down_view_factor = down_view_factor
-        self.inner_view_factor = self.up_view_factor + self.down_view_factor
-        if self.inner_view_factor > 1.0 + 1.0e-12:
-            raise ValueError(
-                "Invalid HPwithFin inner-side view factors: "
-                "up_view_factor + down_view_factor must be <= 1.0. "
-                f"Got up={self.up_view_factor}, down={self.down_view_factor}."
-            )
-        if self.inner_view_factor < -1.0e-12:
-            raise ValueError(
-                "Invalid HPwithFin inner-side view factors: "
-                "up_view_factor + down_view_factor must be >= 0.0. "
-                f"Got up={self.up_view_factor}, down={self.down_view_factor}."
-            )
-        # 外侧半周完全向太空辐射，内侧半周按 up/down 角系数之和折算。
-        self.F_avg = (1.0 + self.inner_view_factor) / 2.0
-        self.effective_emissivity = self.emissivity * self.F_avg
-        self.effective_fin_emissivity = self.fin_emissivity * self.F_avg
+        # Legacy up/down arguments describe the inner face.  Keep them as the
+        # compatibility source when explicit inner factors are omitted.
+        inner_up = self.up_view_factor = (
+            float(up_view_factor)
+            if radiation_inner_up_view_factor is None
+            else float(radiation_inner_up_view_factor)
+        )
+        inner_down = self.down_view_factor = (
+            float(down_view_factor)
+            if radiation_inner_down_view_factor is None
+            else float(radiation_inner_down_view_factor)
+        )
+        self.radiation_outer_up_view_factor = float(radiation_outer_up_view_factor)
+        self.radiation_outer_down_view_factor = float(radiation_outer_down_view_factor)
+        self.radiation_inner_up_view_factor = inner_up
+        self.radiation_inner_down_view_factor = inner_down
 
+        view_factors = (
+            self.radiation_outer_up_view_factor,
+            self.radiation_outer_down_view_factor,
+            self.radiation_inner_up_view_factor,
+            self.radiation_inner_down_view_factor,
+        )
+        if any(not np.isfinite(factor) or factor < 0.0 or factor > 1.0 for factor in view_factors):
+            raise ValueError('HPwithFin radiation face view factors must be within [0, 1]')
+        self.radiation_outer_view_factor = 0.5 * (
+            self.radiation_outer_up_view_factor
+            + self.radiation_outer_down_view_factor
+        )
+        self.radiation_inner_view_factor = (
+            self.radiation_inner_up_view_factor
+            + self.radiation_inner_down_view_factor
+        )
+        if self.radiation_inner_view_factor > 1.0 + 1.0e-12:
+            raise ValueError(
+                'HPwithFin inner up/down view factors must sum to at most 1.0'
+            )
+        self.inner_view_factor = self.radiation_inner_view_factor
+        self.radiation_face_average_factor = 0.5 * (
+            self.radiation_outer_view_factor
+            + self.radiation_inner_view_factor
+        )
+        self.F_avg = self.radiation_face_average_factor
+        self.effective_emissivity = self.emissivity * self.radiation_face_average_factor
+        self.effective_fin_emissivity = self.fin_emissivity * self.radiation_face_average_factor
         # ===== 2. 构造热管二维网格 =====
         # 轴向由蒸发段、绝热段、冷凝段拼接而成。
         faces_eva = np.linspace(0.0, L_eva, n_eva + 1)
@@ -172,6 +202,8 @@ class HPwithFin(BaseComponent):
         # 除以厚度得到等效宽度，确保后续一维导热方程的截面积和周长计算
         # 与真实三维几何保持热等效，而不是直接使用某个几何宽度。
         self.fin_width_array = area_fin_root / self.fin_thickness
+        self.tube_bare_area = np.array(area_con, dtype=float, copy=True)
+        self.fin_radiating_area = 2.0 * self.fin_width_array * self.fin_height
 
         # 这里定义的是“一侧受照的投影面积”，用于轨道外热流加载，
         # 对当前简化模型来说，比直接使用双面辐射面积更合适。
@@ -216,6 +248,23 @@ class HPwithFin(BaseComponent):
         # 这里在所有边界和外部条件挂接完成后，再做一次完整初始化，
         # 确保 outer_eva / outer_aba / outer_con 的初始温度和热阻状态可直接用于首个 pre_step()。
         self.hp.initialize_state()
+
+    def set_radiation_background_temperature(self, value):
+        """Set the equivalent shield radiation background for tube and fins."""
+        background = np.asarray(value, dtype=float)
+        if background.size == 0 or not np.all(np.isfinite(background)):
+            raise ValueError("radiation background must contain finite temperatures")
+        temperature = max(float(np.mean(background)), 1.0e-3)
+        self.T_space = temperature
+        self.bc_rad_aba.update_params(T_env=temperature)
+        self.bc_rad_con.update_params(T_env=temperature)
+        self.bc_fin_con.T_ext.fill(temperature)
+
+    def restore_default_radiation_background(self):
+        self.set_radiation_background_temperature(self._default_radiation_background_k)
+
+    def get_radiation_surface_temperature(self):
+        return np.asarray(self.hp.boundaries['outer_con'].T_surface, dtype=float)
 
     def set_fin_external_heat_source(self, heat_source, illuminated_area_scale: float = 1.0):
         """

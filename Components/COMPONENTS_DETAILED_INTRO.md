@@ -43,6 +43,7 @@ Components/
 | [`BASICCOMPONENTS_DETAILED_INTRO.md`](./BASICCOMPONENTS_DETAILED_INTRO.md) | `Fuel`、电极、`TECPair`、`HeatPipe2D`、`FinConduction` 的接口说明 | 修改基础热工元件或 TEC 细节时 |
 | [`EXTERNALHEATSOURCES_DETAILED_INTRO.md`](./EXTERNALHEATSOURCES_DETAILED_INTRO.md) | 轨道外热源、查表热流和边界封装 | 修改外热模型或辐射器外热加载时 |
 | [`RADIATORPIPEWITHFIN_DETAILED_INTRO.md`](./RADIATORPIPEWITHFIN_DETAILED_INTRO.md) | TOPAZ-II NaK 管翅式辐射器组件说明 | 修改辐射管、铜带降维翅片或相关诊断时 |
+| [`CIRCUMFERENTIAL_MAPPING_GUIDE.md`](./CIRCUMFERENTIAL_MAPPING_GUIDE.md) | 周期周向分区的守恒映射、强度量聚合和 V14 18→12 示例 | 修改辐射器/遮热罩周向分区映射时 |
 | [`BASICCOMPONENTS_ANALYSIS.md`](./BASICCOMPONENTS_ANALYSIS.md) | 基础元件物理实现和调用链分析 | 修改公式、求解方法或排查物理结果时 |
 
 外热源的补充资料位于 [`ExternalHeatSources/README.md`](./ExternalHeatSources/README.md) 和 [`ExternalHeatSources/PARAMETERS.md`](./ExternalHeatSources/PARAMETERS.md)。
@@ -470,6 +471,27 @@ NaK 直流辐射管与铜带降维翅片组件，面向 TOPAZ-II 原始管翅式
 - `get_heat_exchange_breakdown()`：返回裸壁、翅片辐射、外热吸收和净散热拆分。
 - `get_temperature_distribution()`：返回热管二维温度场。
 
+## 2026-07-15 V14 热管辐射器内外面辐射与外热吸收
+
+V14 的 `HPwithFin` 现在显式保存热管管壁和降维翅片的四个面角系数，同时保留旧的 `up_view_factor/down_view_factor` 参数作为内侧角系数的兼容入口。V14 默认值为：
+
+- 外侧上/下角系数：`1.0 / 1.0`，外侧完整向空间辐射；
+- 内侧上/下角系数：`0.0 / 0.3`，保持 V14 原有角系数；
+- `F_outer = (1.0 + 1.0) / 2 = 1.0`；`F_inner = 0.0 + 0.3 = 0.3`；
+- 双面一维等效因子 `F_face = (F_outer + F_inner) / 2 = 0.65`；
+- 管壁和翅片分别使用 `epsilon_surface * F_face` 作为向外辐射的有效发射率。
+
+外热吸收与向外辐射分开计算：外热只加载到外侧受照面，内侧不吸收外热流。V14 外热启用时，吸收面积按下式计算：
+
+```text
+A_wall_abs = A_outer_wall * wall_illumination_factor * 0.992 * epsilon_hp
+A_fin_abs  = A_fin_one_side * fin_illumination_scale * 0.992 * epsilon_fin
+```
+
+其中 `0.992` 是外热吸收效率，`alpha=epsilon` 来自 Kirchhoff 关系；它不乘到表面自发辐射项，也不乘内侧角系数。`distributed_fin_absorption` 模式将管壁有效面积挂到一个 `ExternalHeatFluxBC`，并把同一热流密度按翅片单侧面积直接送入准稳态翅片方程；`configure_external_heat_accounting()` 只用于统计，不会再添加边界热源。
+
+`RingHP` 的 `hp_multipliers` 只在代表热管总量统计和流固耦合放大处使用。外热面积属于单根代表热管，不能在 `HPwithFin` 或 `RingHP._attach_external_heat_to_hp()` 内重复乘 `hp_multipliers`；V14 的第二套对称集流环仍由上层 `symmetric_ring_multiplier` 统一处理。`HeatPipe2D` 本体只保留原有参数接口，本轮未修改其内部求解器。
+
 ## `RingHP.py`
 
 ### `SingleVolumeProxy`
@@ -874,7 +896,7 @@ component.save_step_state()
 | `earth_ir_flux` | `237.0` | 地球红外热流密度，单位 W/m2 |
 | `wall_illumination_factor` | `0.5` | 冷凝段裸壁受照面积系数 |
 | `fin_illuminated_area_scale` | `1.0` | 翅片受照面积缩放系数 |
-| `fin_loading_mode` | `"lumped_root_area"` | 翅片外热加载模式 |
+| `fin_loading_mode` | `"distributed_fin_absorption"` | 翅片外热加载模式 |
 | `node_configs` | 无 | 按代表热管节点覆盖统一配置，可用字典或与流体节点等长的列表 |
 | `*_by_node` | 无 | 对单个字段逐节点覆盖；支持下表字段 |
 
@@ -888,8 +910,8 @@ When `use_w0_8p12_matrix=True`, `RingHP` builds `OrbitalMatrixHeatSource` first 
 
 | 模式 | 行为 | 适用场景 |
 | --- | --- | --- |
-| `lumped_root_area` | 将壁面受照面积和翅片受照面积合并后挂到冷凝段根部边界 | 默认兼容模式 |
-| `distributed_fin_absorption` | 壁面外热仍挂在冷凝段边界；翅片外热进入降维翅片求解器 | 需要让翅片直接吸收外热时 |
+| `lumped_root_area` | 将壁面受照面积和翅片受照面积合并后挂到冷凝段根部边界 | 显式兼容模式 |
+| `distributed_fin_absorption` | 壁面外热仍挂在冷凝段边界；翅片外热进入降维翅片求解器 | 默认模式 |
 
 ### 查表热流和节点覆盖示例
 
@@ -1099,3 +1121,7 @@ terminal_point_uc2
 ```
 
 `ReactorCore._apply_tec_group_results()` fills these fields directly from `ThermoCalcModel.get_tec_results()` whenever TEC results are applied. Old restart files remain loadable because missing keys keep the zero-initialized defaults.
+
+## 2026-07-13 heat-pipe shield interface
+
+`HPwithFin` now exposes `get_radiation_surface_temperature()`, `set_radiation_background_temperature()`, and `restore_default_radiation_background()`. This lets the existing `RadiatorThermalShield` drive the heat-pipe bare condenser and reduced-order fin radiation background without adding a second shield solver. `RadiatorThermalShield` accepts either one external heat flux or one value per radiator unit; `radiation_area_multiplier` scales representative-unit area for diagnostics and shield energy balance.

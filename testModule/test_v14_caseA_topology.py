@@ -3,6 +3,9 @@ import math
 import unittest
 from pathlib import Path
 
+import numpy as np
+
+from Components.ExternalHeatSources import ExternalHeatFluxBC
 from Solvers.Hydrodynamics.Components import MacroFlowJunction
 
 from testModule.Full_Loop_Cases import (
@@ -77,6 +80,16 @@ class V14CaseATopologyTests(unittest.TestCase):
         self.assertEqual(len(build["ring_hps"]), 6)
         self.assertEqual(len(build["ring_solids"]), 6)
         self.assertEqual(len(build["manifolds"]), 3)
+        self.assertFalse(build["external_heat_enabled"])
+        self.assertTrue(all(not np.any(ring_hp._hp_external_heat_enabled) for ring_hp in build["ring_hps"]))
+        for ring_hp in build['ring_hps']:
+            for hp in ring_hp.hp_units:
+                external_bcs = [
+                    condition
+                    for condition in hp.hp.boundaries['outer_con'].conditions
+                    if isinstance(condition, ExternalHeatFluxBC)
+                ]
+                self.assertEqual(len(external_bcs), 0)
 
         self.assertEqual(len(build["hot_outlet_to_ring_junctions"]), 3)
         self.assertTrue(all(isinstance(j, MacroFlowJunction) for j in build["hot_outlet_to_ring_junctions"]))
@@ -90,6 +103,74 @@ class V14CaseATopologyTests(unittest.TestCase):
         self.assertAlmostEqual(diagnostics["single_ring_in_total_kg_s"], 0.65)
         self.assertAlmostEqual(diagnostics["single_ring_out_total_kg_s"], 0.65)
 
+    def test_v14_keeps_original_heat_pipe_view_factors_explicitly(self):
+        build = self.build_case()
+        hp = build["ring_hps"][0].hp_units[0]
+
+        self.assertAlmostEqual(hp.radiation_outer_up_view_factor, 1.0)
+        self.assertAlmostEqual(hp.radiation_outer_down_view_factor, 1.0)
+        self.assertAlmostEqual(hp.radiation_inner_up_view_factor, 0.0)
+        self.assertAlmostEqual(hp.radiation_inner_down_view_factor, 0.3)
+        self.assertAlmostEqual(hp.radiation_outer_view_factor, 1.0)
+        self.assertAlmostEqual(hp.radiation_inner_view_factor, 0.3)
+        self.assertAlmostEqual(hp.radiation_face_average_factor, 0.65)
+        self.assertAlmostEqual(hp.effective_emissivity, 0.75 * 0.65)
+        self.assertAlmostEqual(hp.effective_fin_emissivity, 0.75 * 0.65)
+
+    def test_v14_external_heat_uses_one_sided_absorption_and_ring_multipliers_once(self):
+        config = V14HeatPipeRadiatorConfig(
+            external_heat_enabled=True,
+            hot_branch_n_nodes=1,
+            manifold_node_counts=(1, 1, 1),
+            hp_n_con=2,
+            n_fin_height=3,
+        )
+        build = build_v14_case_a_system(
+            core_config=FullLoopCoreConfig(main_tec_enabled=False),
+            flow_config=FullLoopFlowConfig(total_flow_kg_s=1.3),
+            pump_config=FullLoopPumpConfig(pump_total_head_pa=6466.56),
+            radiator_config=config,
+        )
+        ring_hp = build["ring_hps"][0]
+        hp = ring_hp.hp_units[0]
+        absorption_factor = config.external_heat_absorption_efficiency * config.hp_emissivity
+        expected_wall_area = hp.tube_bare_area * 0.5 * absorption_factor
+        expected_fin_area = hp.fin_illuminated_area_array * absorption_factor
+
+        np.testing.assert_allclose(hp.wall_external_absorption_area, expected_wall_area)
+        np.testing.assert_allclose(hp.fin_external_absorption_area, expected_fin_area)
+        external_bcs = [
+            condition
+            for condition in hp.hp.boundaries['outer_con'].conditions
+            if isinstance(condition, ExternalHeatFluxBC)
+        ]
+        self.assertEqual(len(external_bcs), 1)
+        np.testing.assert_allclose(external_bcs[0].area_array, expected_wall_area)
+        self.assertAlmostEqual(hp.fin_external_area_scale, absorption_factor)
+
+        wall_abs, fin_abs, total_abs = hp.get_external_heat_absorption_distribution(0.0)
+        raw_q = hp.external_heat_accounting_source.get_heat_flux(0.0)
+        np.testing.assert_allclose(wall_abs, raw_q * expected_wall_area)
+        np.testing.assert_allclose(fin_abs, raw_q * expected_fin_area)
+        np.testing.assert_allclose(total_abs, wall_abs + fin_abs)
+        hp.pre_step(dt=0.01, current_time=0.0)
+        np.testing.assert_allclose(
+            hp.last_fin_absorption_distribution,
+            raw_q * expected_fin_area,
+        )
+
+        local_total = ring_hp.get_total_external_heat_absorption(0.0)
+        scaled_total = ring_hp.get_total_external_heat_absorption_scaled(0.0)
+        expected_scaled = 0.0
+        hp_position = 0
+        for node_index, present in enumerate(ring_hp._hp_presence_mask):
+            if present:
+                expected_scaled += ring_hp._hp_multipliers[node_index] * float(
+                    np.sum(ring_hp.hp_units[hp_position].get_external_heat_absorption_distribution(0.0)[2])
+                )
+                hp_position += 1
+        self.assertGreater(local_total, 0.0)
+        self.assertAlmostEqual(scaled_total, expected_scaled)
     def test_full_loop_cases_do_not_import_legacy_case_builders(self):
         root = Path(__file__).resolve().parent / "Full_Loop_Cases"
         violations = []

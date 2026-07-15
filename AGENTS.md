@@ -190,6 +190,7 @@ V11 CaseA 位于 `testModule/test_core_assemble_v11_caseA.py`，运行入口为 
 4. `Materials/Fluids/NaK78.py` 仅部分实现；主用液态 NaK78 类是 `SodiumPotassium78`。不要仅按文件名推断模型使用的冷却剂。
 5. `Components/basicComponents/Electord.py` 的文件名拼写已被现有导入路径依赖，不要直接重命名。
 6. `ExternalHeatSources` 返回 `W/m2`，`ExternalHeatFluxBC` 负责乘面积。调用方不得重复乘面积。
+   V14 的 `HPwithFin/RingHP` 外热吸收还要乘 `0.992 * epsilon_surface`，只作用于外侧受照面积；内侧只参与角系数等效辐射，不吸收外热，`hp_multipliers` 只能在汇总层使用。详见 `Components/EXTERNALHEATSOURCES_DETAILED_INTRO.md`。
 7. `HPwithFin` 使用内部降维准稳态翅片模型；`basicComponents/FinConduction.py` 是独立二维翅片求解器，两者不要混用。
 8. `CoolantLoop` 的历史测试、旧 bug report、CSV、PNG、日志和 profiler 报告不代表当前生产模型默认工况。
 
@@ -268,3 +269,10 @@ V9 复用该导线电阻和 NaK78 冷却剂约定。冷态直接启动 TEC 可�
 `ThermoCalcModel.calculate()` 在进入 C++ 电路迭代前会进行低温零发射快速判定：当所有发射极温度低于默认 `THERMOCALC_ZERO_EMISSION_TE_MAX_K=1000 K` 时，直接返回开路零电流、零 TEC 热源结果，并在 `get_global_results()` 中标记 `zero_emission_skipped=True`。这不是禁用 TEC，而是避免启动低温下无发电能力的 fixed-voltage 电路迭代卡死；详细说明见 [`ThermoCalc/AI_AGENT_THERMOCALC_ANALYSIS.md`](./ThermoCalc/AI_AGENT_THERMOCALC_ANALYSIS.md)。
 
 补充：2026-06-28 起，除了 Python 层低温零发射预判，`ThermoCalc` C++ 电路层也加入了退化迭代快速跳出；因此启动/过渡工况可以默认保持 TEC 开启，无法形成有效电解的状态会返回有限的零电流或未收敛诊断，而不是长期卡在 `ThermoCalcModel.calculate()`。详细见 ThermoCalc 手册。
+
+
+## 15. 2026-07-14 当前生产默认值
+
+通用固体导热默认 `implicit_euler`，流固时间耦合默认 `local_implicit`，`SystemManager.step()` 默认外部耦合迭代次数为 `1`。标准生产运行应通过 `compute_adaptive_dt()` 选步长；显式固定步长的 benchmark、能量审计和历史复现脚本继续按其参数运行。点堆默认 `Radau`。
+
+TEC 默认串联 `series`、定电压 `fixed_u`，发射计算优先自动发现本地 dense runtime v2 查表库，查询 miss 或本地无库时使用解析法。外热源默认关闭；显式启用时，翅片默认按单侧几何投影面积将外热加入各轴向段的准稳态翅片方程。遮热罩、TFE/堆芯间隙保持原配置，泵默认固定压头。

@@ -146,7 +146,11 @@ class RingHP(BaseComponent):
                  fin_emissivity: Optional[float] = None,
                  hp_crossflow_c: float = 0.65,
                  hp_crossflow_k_cal: float = 1.0,
-                 hp_crossflow_wake_factor: float = 1.0):
+                 hp_crossflow_wake_factor: float = 1.0,
+                 radiation_outer_up_view_factor: float = 1.0,
+                 radiation_outer_down_view_factor: float = 1.0,
+                 radiation_inner_up_view_factor: Optional[float] = None,
+                 radiation_inner_down_view_factor: Optional[float] = None):
         super().__init__(name)
 
         n_nodes = fluid_channel.n_nodes
@@ -237,7 +241,11 @@ class RingHP(BaseComponent):
                     up_view_factor=up_view_factor,
                     down_view_factor=down_view_factor,
                     T_env=T_space,
-                    initial_temp=HP_initial_temp
+                    initial_temp=HP_initial_temp,
+                    radiation_outer_up_view_factor=radiation_outer_up_view_factor,
+                    radiation_outer_down_view_factor=radiation_outer_down_view_factor,
+                    radiation_inner_up_view_factor=radiation_inner_up_view_factor,
+                    radiation_inner_down_view_factor=radiation_inner_down_view_factor
                 )
                 hp.hp.initialize_state()
 
@@ -338,15 +346,17 @@ class RingHP(BaseComponent):
             return composite_source
 
         if external_heat_config.get('use_embedded_table', False):
-            composite_source.add_source(
-                OrbitalTableHeatSource(
-                    shape=shape,
-                    table_ids=external_heat_config.get('table_ids', 1),
-                    scale_factor=external_heat_config.get('table_scale_factor', 1.0),
-                    offset=external_heat_config.get('table_offset', 0.0),
-                    periodic=external_heat_config.get('table_periodic', True)
-                )
-            )
+            table_kwargs = {}
+            if 'table_library' in external_heat_config:
+                table_kwargs['table_library'] = external_heat_config['table_library']
+            composite_source.add_source(OrbitalTableHeatSource(
+                shape=shape,
+                table_ids=external_heat_config.get('table_ids', 1),
+                scale_factor=external_heat_config.get('table_scale_factor', 1.0),
+                offset=external_heat_config.get('table_offset', 0.0),
+                periodic=external_heat_config.get('table_periodic', True),
+                **table_kwargs,
+            ))
             return composite_source
 
         if external_heat_config.get('add_solar', False):
@@ -420,6 +430,7 @@ class RingHP(BaseComponent):
             'wall_illumination_factor',
             'fin_illuminated_area_scale',
             'fin_loading_mode',
+            'external_heat_absorption_efficiency',
             'table_scale_factor',
             'table_offset',
             'table_periodic',
@@ -459,13 +470,35 @@ class RingHP(BaseComponent):
 
         composite_source = self._build_external_heat_source(shape, external_heat_config)
 
-        wall_illumination_factor = external_heat_config.get('wall_illumination_factor', 0.5)
-        fin_illuminated_area_scale = external_heat_config.get('fin_illuminated_area_scale', 1.0)
-        fin_loading_mode = external_heat_config.get('fin_loading_mode', 'lumped_root_area')
+        wall_illumination_factor = float(external_heat_config.get('wall_illumination_factor', 0.5))
+        fin_illuminated_area_scale = float(external_heat_config.get('fin_illuminated_area_scale', 1.0))
+        absorption_efficiency = float(
+            external_heat_config.get('external_heat_absorption_efficiency', 1.0)
+        )
+        fin_loading_mode = external_heat_config.get('fin_loading_mode', 'distributed_fin_absorption')
 
-        wall_absorption_area = area_con * wall_illumination_factor
-        fin_absorption_area = hp.get_fin_illuminated_area_array(fin_illuminated_area_scale)
+        if not 0.0 <= wall_illumination_factor <= 1.0:
+            raise ValueError(f'[{self.name}] wall_illumination_factor must be within [0, 1]')
+        if fin_illuminated_area_scale < 0.0:
+            raise ValueError(f'[{self.name}] fin_illuminated_area_scale must be non-negative')
+        if not 0.0 <= absorption_efficiency <= 1.0:
+            raise ValueError(
+                f'[{self.name}] external_heat_absorption_efficiency must be within [0, 1]'
+            )
 
+        # External heating acts on the exposed/illuminated face only.  It is
+        # independent of the radiation view-factor average used for rejection.
+        wall_absorption_area = (
+            area_con
+            * wall_illumination_factor
+            * absorption_efficiency
+            * hp.emissivity
+        )
+        fin_absorption_area = hp.get_fin_illuminated_area_array(
+            fin_illuminated_area_scale
+            * absorption_efficiency
+            * hp.fin_emissivity
+        )
         if fin_loading_mode == 'lumped_root_area':
             effective_boundary_area = wall_absorption_area + fin_absorption_area
             external_bc = ExternalHeatFluxBC(
@@ -481,7 +514,11 @@ class RingHP(BaseComponent):
             outer_con_boundary.conditions.append(external_bc)
             hp.set_fin_external_heat_source(
                 composite_source,
-                illuminated_area_scale=fin_illuminated_area_scale
+                illuminated_area_scale=(
+                    fin_illuminated_area_scale
+                    * absorption_efficiency
+                    * hp.fin_emissivity
+                )
             )
         else:
             raise ValueError(
