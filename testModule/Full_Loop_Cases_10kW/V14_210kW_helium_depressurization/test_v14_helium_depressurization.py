@@ -50,22 +50,31 @@ class Solid:
 
 
 class CoreForLimits:
-    def __init__(self):
+    def __init__(self, violation='collector'):
         self.tfes = {
             name: type('TFEForLimit', (), {'solids': {
                 'inner_clad': Solid([900.0, 1000.0]),
                 'outer_clad': Solid([890.0, 910.0]),
                 'pellet': Solid([2600.0, 2690.0]),
-                'collector': Solid(
-                    [1000.0, 1024.0]
-                    if name == 'Ring3' else [1000.0, 1010.0]
-                ),
+                'collector': Solid([1000.0, 1010.0]),
                 'moderator': Solid([800.0, 850.0]),
             }})()
             for name in runner.REPRESENTATIVE_NAMES
         }
         self.mod_rings = [Solid([870.0, 900.0])]
         self.reflector = Solid([900.0, 950.0])
+        if violation == 'collector':
+            self.tfes['Ring3'].solids['collector'].T[1] = 1024.0
+        elif violation == 'channel_wall':
+            self.tfes['Center'].solids['inner_clad'].T[1] = 1059.0
+        elif violation == 'pellet':
+            self.tfes['Center'].solids['pellet'].T[1] = 2701.0
+        elif violation == 'moderator':
+            self.mod_rings[0].T[1] = 931.0
+        elif violation == 'reflector':
+            self.reflector.T[1] = 1001.0
+        elif violation is not None:
+            raise ValueError(violation)
 
 
 class HeliumGapTests(unittest.TestCase):
@@ -122,6 +131,17 @@ class HeliumGapTests(unittest.TestCase):
         self.assertEqual(trip['source_component'], 'collector')
         self.assertEqual(trip['representative'], 'Center')
 
+    def test_each_temperature_limit_class_trips(self):
+        for component in (
+                'channel_wall', 'pellet', 'collector',
+                'moderator', 'reflector'):
+            with self.subTest(component=component):
+                core = CoreForLimits(violation=component)
+                trip = runner.find_limit_trip(
+                    runner.collect_temperature_peaks(core)
+                )
+                self.assertEqual(trip['component'], component)
+
     def test_helium_metrics_scale_representative_gap_heat(self):
         build = self.make_build()
         gaps = runner.collect_helium_gaps(build)
@@ -153,10 +173,59 @@ class HeliumGapTests(unittest.TestCase):
 
     def test_accident_tec_update_interval_is_applied_to_core(self):
         core = type('Core', (), {'thermo_update_interval': 0.8})()
-        runner.set_tec_update_interval(core, 0.05)
-        self.assertEqual(core.thermo_update_interval, 0.05)
+        scheduler_threshold = runner.set_tec_update_interval(core, 0.05)
+        elapsed_at_real_timestamp = 13864.25 - 13864.20
+        self.assertLess(scheduler_threshold, 0.05)
+        self.assertEqual(core.thermo_update_interval, scheduler_threshold)
+        self.assertGreaterEqual(
+            elapsed_at_real_timestamp,
+            core.thermo_update_interval,
+        )
         with self.assertRaises(ValueError):
             runner.set_tec_update_interval(core, 0.0)
+
+    def test_nonfinite_trip_scans_all_numeric_diagnostics(self):
+        row = {
+            'core_total_power_W': 210000.0,
+            'fission_power_W': 197000.0,
+            'decay_power_W': 13000.0,
+            'effective_temperature_feedback': 0.0,
+            'total_reactivity': 0.0,
+            'min_fluid_T_K': np.nan,
+        }
+        trip = runner._nonfinite_metric_trip(row)
+        self.assertEqual(trip['component'], 'nonfinite_metric')
+        self.assertEqual(trip['field'], 'min_fluid_T_K')
+
+    def test_state_trip_fails_closed_on_solver_nonconvergence(self):
+        config = runner.HeliumAccidentRunConfig(restart_in=Path('steady.npz'))
+        row = {
+            'core_total_power_W': 210000.0,
+            'min_fluid_T_K': 700.0,
+            'fluid_converged': False,
+            'tec_main_converged': True,
+        }
+        reason, trip = runner.evaluate_state_trip(
+            row,
+            peaks=[],
+            config=config,
+            baseline_power_w=210000.0,
+            require_tec_convergence=True,
+        )
+        self.assertEqual(reason, 'hydraulic_nonconvergence')
+        self.assertEqual(trip['component'], 'fluid_solver')
+
+        row['fluid_converged'] = True
+        row['tec_main_converged'] = False
+        reason, trip = runner.evaluate_state_trip(
+            row,
+            peaks=[],
+            config=config,
+            baseline_power_w=210000.0,
+            require_tec_convergence=True,
+        )
+        self.assertEqual(reason, 'tec_nonconvergence')
+        self.assertEqual(trip['component'], 'tec_main')
 
     def test_accident_restart_is_reapplied_without_retrigger(self):
         gaps = runner.collect_helium_gaps(self.make_build())

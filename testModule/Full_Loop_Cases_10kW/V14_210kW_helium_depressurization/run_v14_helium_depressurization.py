@@ -83,13 +83,16 @@ class HeliumAccidentRunConfig:
     reflector_limit_k: float = 1000.0
 
 
-def set_tec_update_interval(core: Any, interval_s: float) -> None:
+def set_tec_update_interval(core: Any, interval_s: float) -> float:
     interval = float(interval_s)
     if not math.isfinite(interval) or interval <= 0.0:
         raise ValueError('TEC update interval must be finite and positive')
     if not hasattr(core, 'thermo_update_interval'):
         raise ValueError('core does not expose thermo_update_interval')
-    core.thermo_update_interval = interval
+    tolerance = min(0.5 * interval, max(1.0e-12, interval * 1.0e-9))
+    scheduler_threshold = interval - tolerance
+    core.thermo_update_interval = scheduler_threshold
+    return scheduler_threshold
 
 
 def collect_helium_gaps(build: Dict[str, Any]) -> Dict[str, tuple[Any, int]]:
@@ -402,10 +405,16 @@ def _print_progress(row: Dict[str, Any]) -> None:
 
 
 def _nonfinite_metric_trip(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    for field in (
-            'core_total_power_W', 'fission_power_W', 'decay_power_W',
-            'effective_temperature_feedback', 'total_reactivity'):
-        value = float(row[field])
+    for field, raw_value in row.items():
+        if (
+                raw_value is None
+                or isinstance(raw_value, (str, bool, np.bool_))
+                or not np.isscalar(raw_value)):
+            continue
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            continue
         if not math.isfinite(value):
             return {
                 'component': 'nonfinite_metric',
@@ -413,6 +422,54 @@ def _nonfinite_metric_trip(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 'actual': value,
             }
     return None
+
+
+def evaluate_state_trip(
+        row: Dict[str, Any],
+        *,
+        peaks: Sequence[Dict[str, Any]],
+        config: HeliumAccidentRunConfig,
+        baseline_power_w: float,
+        require_tec_convergence: bool,
+) -> tuple[str, Optional[Dict[str, Any]]]:
+    trip = _nonfinite_metric_trip(row)
+    if trip is not None:
+        return 'nonfinite_metric', trip
+    if not bool(row.get('fluid_converged', False)):
+        return 'hydraulic_nonconvergence', {
+            'component': 'fluid_solver',
+            'actual': row.get('fluid_converged'),
+            'required': True,
+        }
+    if (
+            require_tec_convergence
+            and not bool(row.get('tec_main_converged', False))):
+        return 'tec_nonconvergence', {
+            'component': 'tec_main',
+            'actual': row.get('tec_main_converged'),
+            'required': True,
+        }
+    trip = find_limit_trip(peaks)
+    if trip is not None:
+        return 'temperature_limit', trip
+    power_limit_w = baseline_power_w * float(config.max_power_factor)
+    if float(row['core_total_power_W']) > power_limit_w:
+        return 'maximum_power_factor', {
+            'component': 'core_total_power',
+            'actual_w': float(row['core_total_power_W']),
+            'limit_w': power_limit_w,
+        }
+    if (
+            config.min_fluid_temperature_stop_k is not None
+            and float(config.min_fluid_temperature_stop_k) > 0.0
+            and float(row['min_fluid_T_K'])
+            < float(config.min_fluid_temperature_stop_k)):
+        return 'low_fluid_temperature', {
+            'component': 'minimum_fluid_temperature',
+            'actual_k': float(row['min_fluid_T_K']),
+            'limit_k': float(config.min_fluid_temperature_stop_k),
+        }
+    return 'completed', None
 
 
 def _validate_accident_config(config: HeliumAccidentRunConfig) -> None:
@@ -460,7 +517,8 @@ def run_helium_accident(config: HeliumAccidentRunConfig) -> Dict[str, Any]:
     build = build_debug_case(debug, apply_fixed_power=False)
     system = build['system']
     core = build['core']
-    set_tec_update_interval(core, config.tec_update_interval_s)
+    tec_scheduler_threshold_s = set_tec_update_interval(
+        core, config.tec_update_interval_s)
     handoff_type = prepare_reactivity_control(
         core,
         source_point_kinetics_enabled=bool(source_config['point_kinetics_enabled']),
@@ -486,13 +544,18 @@ def run_helium_accident(config: HeliumAccidentRunConfig) -> Dict[str, Any]:
             dt_s=0.0,
             limits_k=limits_k,
         )
-        initial_trip = find_limit_trip(initial_peaks)
-        if initial_trip is None:
-            initial_trip = _nonfinite_metric_trip(latest)
-        if initial_trip is not None:
+        initial_reason, initial_trip = evaluate_state_trip(
+            latest,
+            peaks=initial_peaks,
+            config=config,
+            baseline_power_w=baseline_power_w,
+            require_tec_convergence=False,
+        )
+        if initial_reason != 'completed':
             _write_json(out_dir / 'limit_trip.json', {
                 **initial_trip,
                 'phase': 'initial_preflight',
+                'stop_reason': initial_reason,
                 'time_s': start_time,
             })
             raise RuntimeError(f'initial state violates limit: {initial_trip}')
@@ -514,6 +577,7 @@ def run_helium_accident(config: HeliumAccidentRunConfig) -> Dict[str, Any]:
         'stage_durations_s': [float(config.duration_s)],
         'dt_s': float(config.dt_s),
         'tec_update_interval_s': float(config.tec_update_interval_s),
+        'tec_scheduler_threshold_s': float(tec_scheduler_threshold_s),
         'record_interval_s': float(config.record_interval_s),
         'checkpoint_interval_s': float(config.checkpoint_interval_s),
         'min_fluid_temperature_stop_k': config.min_fluid_temperature_stop_k,
@@ -535,8 +599,13 @@ def run_helium_accident(config: HeliumAccidentRunConfig) -> Dict[str, Any]:
     })
     _write_json(out_dir / 'run_config.json', run_config)
 
+    last_record_time = start_time
+    last_checkpoint_time = start_time
+    stop_reason = 'completed'
+    trip_payload = None
+
     if source_active:
-        latest, _ = collect_all_metrics(
+        latest, restart_peaks = collect_all_metrics(
             build,
             gaps,
             handoff_type=handoff_type,
@@ -548,13 +617,28 @@ def run_helium_accident(config: HeliumAccidentRunConfig) -> Dict[str, Any]:
         )
         _append_history(history_path, latest)
         _print_progress(latest)
+        stop_reason, trip_payload = evaluate_state_trip(
+            latest,
+            peaks=restart_peaks,
+            config=config,
+            baseline_power_w=baseline_power_w,
+            require_tec_convergence=False,
+        )
+        if stop_reason != 'completed':
+            emergency_path = out_dir / 'emergency_restart.npz'
+            system.save_global_state(str(emergency_path))
+            _write_json(out_dir / 'limit_trip.json', {
+                **trip_payload,
+                'phase': 'restart_preflight',
+                'stop_reason': stop_reason,
+                'time_s': float(system.global_time),
+                'accident_elapsed_s': (
+                    float(system.global_time)
+                    - float(event['accident_time_absolute_s'])
+                ),
+            })
 
-    last_record_time = start_time
-    last_checkpoint_time = start_time
-    stop_reason = 'completed'
-    trip_payload = None
-
-    while True:
+    while stop_reason == 'completed':
         dt = _next_step_dt(
             current_time=float(system.global_time),
             end_time=end_time,
@@ -580,32 +664,13 @@ def run_helium_accident(config: HeliumAccidentRunConfig) -> Dict[str, Any]:
             limits_k=limits_k,
         )
 
-        trip_payload = _nonfinite_metric_trip(latest)
-        if trip_payload is not None:
-            stop_reason = 'nonfinite_metric'
-        else:
-            trip_payload = find_limit_trip(peaks)
-            if trip_payload is not None:
-                stop_reason = 'temperature_limit'
-            elif float(latest['core_total_power_W']) > (
-                    baseline_power_w * float(config.max_power_factor)):
-                stop_reason = 'maximum_power_factor'
-                trip_payload = {
-                    'component': 'core_total_power',
-                    'actual_w': float(latest['core_total_power_W']),
-                    'limit_w': baseline_power_w * float(config.max_power_factor),
-                }
-            elif (
-                    config.min_fluid_temperature_stop_k is not None
-                    and float(config.min_fluid_temperature_stop_k) > 0.0
-                    and float(latest['min_fluid_T_K'])
-                    < float(config.min_fluid_temperature_stop_k)):
-                stop_reason = 'low_fluid_temperature'
-                trip_payload = {
-                    'component': 'minimum_fluid_temperature',
-                    'actual_k': float(latest['min_fluid_T_K']),
-                    'limit_k': float(config.min_fluid_temperature_stop_k),
-                }
+        stop_reason, trip_payload = evaluate_state_trip(
+            latest,
+            peaks=peaks,
+            config=config,
+            baseline_power_w=baseline_power_w,
+            require_tec_convergence=True,
+        )
 
         should_record = (
             float(system.global_time) - last_record_time
