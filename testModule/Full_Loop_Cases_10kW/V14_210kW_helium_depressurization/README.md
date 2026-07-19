@@ -1,0 +1,228 @@
+# V14 210 kW 全堆氦气瞬时完全失压事故算例设计
+
+## 1. 目的与范围
+
+本目录用于建立 V14 210 kW 稳态基础上的全堆氦气失压事故算例。
+
+事故作用于 5 个代表性 TFE（`Center`、`Ring1`、`Ring2`、`Ring3`、`Ring4`），按
+`1、6、9、18、24` 的倍率代表全部 58 根实际 TFE。所有 TFE 的接收极与内套管之间的
+氦气隙同时失压。
+
+本算例只研究氦气隙失压引起的热工和反应性反馈响应，不叠加外界反应性，不启用控制鼓，
+不改变主回路流量，也不启用轨道外热流。
+
+## 2. 初始状态
+
+初始状态采用正常材料热容长期计算后的 210 kW 稳态：
+
+```text
+testModule/Full_Loop_Cases_10kW/
+  V14_210kW_fast_steady_temp/runs/
+  physical_cp_plus2000s_from13164/checkpoint_t013864s.npz
+```
+
+该状态的绝对时间约为 `13864.2 s`。它是在早期 debug 状态基础上，恢复正常材料热容后
+继续计算约 4700 s 得到的当前最终状态，不是热容缩放状态。
+
+实施时将在本目录的 `initial_state/` 中保存该 restart 和对应 `run_config.json` 的独立副本，
+避免原运行目录移动或清理后无法复现。
+
+加载初始 restart 后：
+
+1. 不再施加固定 210 kW 功率源；
+2. 初始化点堆动力学，或在加载事故续算 restart 时恢复已保存的点堆状态；
+3. 将当前温度反馈校准为零增量；
+4. 记录一行相对时间 `t = 0` 的事故前状态；
+5. 在第一个推进步之前触发氦气失压。
+
+## 3. 事故模型
+
+### 3.1 当前氦气隙
+
+氦气位于每根 TFE 的接收极外表面和内套管内表面之间：
+
+```text
+Collector -> helium gap -> InnerClad -> NaK78 coolant channel
+```
+
+几何间隙为：
+
+```text
+r_collector_outer = 11.85 mm
+r_inner_clad_inner = 11.90 mm
+gap width = 0.05 mm
+```
+
+当前简化模型采用固定氦气等效换热系数：
+
+```text
+h_He,initial = 5678 W/(m2*K)
+```
+
+间隙总传热由氦气导热和表面对表面辐射并联组成。
+
+### 3.2 失压定义
+
+本算例采用保守的“瞬时完全失去气体导热”模型：
+
+```text
+h_He: 5678 -> 0 W/(m2*K)
+```
+
+全部 5 个代表性 TFE 在相对时间 `t = 0` 同时发生上述变化。间隙宽度、接收极和内套管
+发射率以及表面对表面辐射传热保持不变。
+
+当前代码没有氦气压力状态，也没有经过验证的压力—导热关系。因此本事故是“氦气导热
+瞬时完全丧失”的保守代理模型，不声称能够解析真实泄压速率、稀薄气体传热或残余压力。
+
+## 4. 实现边界
+
+采用算例局部实现，不修改公共 `GapCouple2D`、`TFEUnit` 或现有反应性控制算例。
+
+新 runner 在重建并加载系统后找到每个代表性 TFE 的 `collector_iclad_gap`，记录初始参数，
+然后将耦合器的气体导热参数设为零。公共求解器继续负责间隙辐射、固体导热、流固换热、
+水力、TEC 和点堆推进。
+
+预期目录结构为：
+
+```text
+V14_210kW_helium_depressurization/
+  README.md
+  __init__.py
+  run_v14_helium_depressurization.py
+  test_v14_helium_depressurization.py
+  initial_state/
+    steady_restart_t013864s.npz
+    run_config.json
+  runs/
+```
+
+## 5. 反应性与功率模型
+
+本算例保持：
+
+```text
+external reactivity = 0
+control drum reactivity = 0
+fixed power source = disabled
+```
+
+点堆使用当前 ReactorCore 温度反馈：
+
+```text
+rho_temperature
+  = rho_fuel
+  + rho_emitter
+  + rho_collector
+  + rho_moderator
+  + rho_reflector
+```
+
+实际进入点堆的反应性为当前温度反馈相对于初始稳态参考值的增量。氦气失压改变接收极、
+套管、冷却剂和堆芯温度后，反应性和裂变功率将由现有耦合链自动更新。衰变功率继续由
+4 组衰变热状态根据裂变功率历史演化。
+
+## 6. 首轮计算设置
+
+```text
+duration                  = 100 s
+global time step          = 0.05 s
+record interval           = 0.1 s
+checkpoint interval       = 10 s
+solid conduction method   = implicit_euler
+fluid-solid coupling      = existing implicit coupling
+total target flow         = 2.46 kg/s
+external heat             = disabled
+external reactivity       = 0
+control drum              = disabled
+```
+
+首轮先运行 0.1 s smoke。只有 smoke 的状态连续性、反馈方向、有限值和求解收敛均通过后，
+才执行 100 s 事故计算。
+
+## 7. 温度与功率限值
+
+每个已接受时间步后检查以下限值：
+
+| 监视对象 | 限值 |
+| --- | ---: |
+| 冷却剂通道最高壁温 | 1058 K |
+| 燃料芯块最高温度 | 2700 K |
+| 接收极最高温度 | 1023 K |
+| 慢化剂最高温度 | 930 K |
+| 反射层最高温度 | 1000 K |
+
+冷却剂通道最高壁温定义为全部代表性 TFE、全部轴向节点中内套管和外套管温度的最大值：
+
+```text
+T_wall,max = max(T_inner_clad, T_outer_clad)
+```
+
+慢化剂检查全部局部及全局慢化剂固体；反射层检查全局反射层。还应检查总功率不超过初始
+功率的 2 倍，并拒绝任何非有限温度、功率或反应性。
+
+若初始状态已经违反任一限值，事故计算不得启动。若推进后首次越限，立即停止后续推进并
+保存紧急 restart。固定步长为 0.05 s，因此限值穿越时刻的分辨率为 0.05 s；第一版不增加
+事件回溯或求根。
+
+## 8. 参数记录
+
+`history.csv` 在现有反应性控制诊断基础上至少记录：
+
+- 绝对时间、事故相对时间、步长和事故激活状态；
+- 氦气等效换热系数及剩余比例；
+- 5 个代表性 TFE 的接收极平均温度和最高温度；
+- 5 个代表性 TFE 的内套管平均温度和最高温度；
+- 各代表性氦气隙的径向传热功率；
+- 按 `1、6、9、18、24` 倍率汇总的全堆氦气隙传热功率；
+- 气隙总热阻最小值和最大值；
+- 通道最高壁温、芯块最高温度、慢化剂最高温度和反射层最高温度；
+- 裂变功率、衰变功率和总功率；
+- 各温度反馈分量、有效温度反馈和总反应性；
+- 主回路流量、TEC 电参数和系统散热量。
+
+输出目录包含：
+
+```text
+history.csv
+accident_event.json
+run_config.json
+latest_state.json
+run_summary.json
+checkpoint_t*.npz
+stage_01_restart.npz
+```
+
+越限时额外写入：
+
+```text
+emergency_restart.npz
+limit_trip.json
+```
+
+`limit_trip.json` 记录触发对象、代表环或全局结构、轴向位置、限值、实际值和触发时间。
+
+## 9. Restart 续算规则
+
+气隙耦合器的气体导热参数当前不属于 `.npz` 状态。因此 runner 必须根据输入 restart 同目录
+的 `run_config.json` 恢复事故状态：
+
+- 初始稳态配置标记 `helium_accident_active = false`：先记录正常状态，再触发事故；
+- 事故输出配置标记 `helium_accident_active = true`：加载后立即恢复零气体导热，不重复触发；
+- 事故续算保留已保存的点堆状态和温度反馈参考值，不重新初始化或校准。
+
+runner 必须拒绝缺少事故状态标记、点堆状态与配置不一致，或气隙数量和名称不符合预期的
+restart，避免静默恢复到错误的氦气导热状态。
+
+## 10. 验证顺序与接受条件
+
+1. 单元检查找到且只找到 5 个目标气隙，名称和倍率正确；
+2. 检查事故前 `h_He = 5678 W/(m2*K)`，事故后 5 个气隙均为零；
+3. 检查气体导热清零后间隙辐射通道仍保持有限；
+4. 检查事故 restart 重新加载后自动恢复失压状态；
+5. 使用真实稳态 restart 完成 0.1 s smoke；
+6. smoke 通过后完成或按限值安全终止 100 s 计算；
+7. 评估功率、反应性反馈、关键温度、氦气隙传热和数值收敛情况。
+
+100 s 运行的接受条件不是必须算满 100 s，而是：计算过程有限且可复现；若没有越限则正常
+结束并保存 restart；若越限则在首次检测到越限后停止，并完整保存触发证据和可恢复状态。
