@@ -17,6 +17,7 @@ build/
 *.7z
 *.zip
 .vscode/
+.worktrees/
 
 # Simulation result artifacts
 *.npz
