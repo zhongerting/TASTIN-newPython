@@ -2421,7 +2421,8 @@ testModule/Full_Loop_Cases_10kW/V14_210kW_helium_depressurization/
 瞬时完全丧失气体导热的保守代理模型，不是显式氦气压力或泄漏流动模型。固定功率源关闭，
 外界反应性为零，控制鼓关闭，点堆使用 ReactorCore 的相对温度反馈自动推进。
 
-默认首轮为 `100 s`、固定步长 `0.05 s`、每 `0.1 s` 记录、每 `10 s` 保存 checkpoint，
+默认首轮为 `100 s`、固定步长 `0.05 s`、TEC 每 `0.05 s` 刷新、每 `0.1 s` 记录、
+每 `10 s` 保存 checkpoint，
 固体使用 `implicit_euler`，流固耦合沿用 `local_implicit`，目标总流量 `2.46 kg/s`，
 外热关闭。每步检查壁温、芯块、接收极、慢化剂和反射层限值；触发后保存
 `emergency_restart.npz` 和 `limit_trip.json`。
@@ -2430,9 +2431,12 @@ testModule/Full_Loop_Cases_10kW/V14_210kW_helium_depressurization/
 时 runner 根据 `helium_accident_active=true` 重新施加零气体导热，并保留原事故绝对时刻和
 已保存点堆状态，不能只复制 `.npz` 后脱离配置运行。
 
-2026-07-19 的 0.1 s 真实 smoke 与 0.05 s restart 续算均通过。smoke 末端总功率约
-`209.894 kW`，接收极最高温度约 `900.860 K`，通道最高壁温约 `866.310 K`，
-有效温度反馈约 `-8.64665e-6`，尚未触发用户给定限值。
+2026-07-19 的 0.1 s 真实 smoke 与 0.05 s restart 续算均通过。正式计算使用与全局步长
+一致的 `0.05 s` TEC 刷新周期，在事故后 `1.75 s` 因 Ring1 接收极在
+`z=0.29874 m` 达到 `1024.466 K`、超过 `1023 K` 限值而安全终止。`dt=0.025 s` 的
+独立敏感性计算在 `1.725 s` 的同一位置触发，结论和触发位置一致。推荐结果目录为
+`runs/accident_100s_tec_dt/`；`runs/accident_100s/` 使用公共默认 `0.8 s` TEC 刷新，
+只保留作对照，不应作为正式事故结果。
 
 ## 2026-07-13 ThermoCalc 串联固定电流测试
 

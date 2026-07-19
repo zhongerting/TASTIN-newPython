@@ -71,6 +71,7 @@ class HeliumAccidentRunConfig:
     output_dir: Path = DEFAULT_OUTPUT_DIR
     duration_s: float = 100.0
     dt_s: float = 0.05
+    tec_update_interval_s: float = 0.05
     record_interval_s: float = 0.1
     checkpoint_interval_s: float = 10.0
     min_fluid_temperature_stop_k: Optional[float] = 500.0
@@ -80,6 +81,15 @@ class HeliumAccidentRunConfig:
     collector_limit_k: float = 1023.0
     moderator_limit_k: float = 930.0
     reflector_limit_k: float = 1000.0
+
+
+def set_tec_update_interval(core: Any, interval_s: float) -> None:
+    interval = float(interval_s)
+    if not math.isfinite(interval) or interval <= 0.0:
+        raise ValueError('TEC update interval must be finite and positive')
+    if not hasattr(core, 'thermo_update_interval'):
+        raise ValueError('core does not expose thermo_update_interval')
+    core.thermo_update_interval = interval
 
 
 def collect_helium_gaps(build: Dict[str, Any]) -> Dict[str, tuple[Any, int]]:
@@ -417,6 +427,10 @@ def _validate_accident_config(config: HeliumAccidentRunConfig) -> None:
         max_power_factor=config.max_power_factor,
     )
     _validate_runtime(runtime)
+    if (
+            not math.isfinite(float(config.tec_update_interval_s))
+            or float(config.tec_update_interval_s) <= 0.0):
+        raise ValueError('TEC update interval must be finite and positive')
     for name, value in _limits_from_config(config).items():
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError(f'{name} temperature limit must be positive')
@@ -446,6 +460,7 @@ def run_helium_accident(config: HeliumAccidentRunConfig) -> Dict[str, Any]:
     build = build_debug_case(debug, apply_fixed_power=False)
     system = build['system']
     core = build['core']
+    set_tec_update_interval(core, config.tec_update_interval_s)
     handoff_type = prepare_reactivity_control(
         core,
         source_point_kinetics_enabled=bool(source_config['point_kinetics_enabled']),
@@ -498,6 +513,7 @@ def run_helium_accident(config: HeliumAccidentRunConfig) -> Dict[str, Any]:
         'duration_s': float(config.duration_s),
         'stage_durations_s': [float(config.duration_s)],
         'dt_s': float(config.dt_s),
+        'tec_update_interval_s': float(config.tec_update_interval_s),
         'record_interval_s': float(config.record_interval_s),
         'checkpoint_interval_s': float(config.checkpoint_interval_s),
         'min_fluid_temperature_stop_k': config.min_fluid_temperature_stop_k,
@@ -661,6 +677,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--output-dir', type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument('--duration', type=float, default=100.0)
     parser.add_argument('--dt', type=float, default=0.05)
+    parser.add_argument('--tec-update-interval', type=float, default=0.05)
     parser.add_argument('--record-interval', type=float, default=0.1)
     parser.add_argument('--checkpoint-interval', type=float, default=10.0)
     parser.add_argument('--min-fluid-temperature-stop', type=float, default=500.0)
@@ -685,6 +702,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         output_dir=args.output_dir,
         duration_s=float(args.duration),
         dt_s=float(args.dt),
+        tec_update_interval_s=float(args.tec_update_interval),
         record_interval_s=float(args.record_interval),
         checkpoint_interval_s=float(args.checkpoint_interval),
         min_fluid_temperature_stop_k=min_fluid,

@@ -130,6 +130,7 @@ rho_temperature
 ```text
 duration                  = 100 s
 global time step          = 0.05 s
+TEC update interval       = 0.05 s
 record interval           = 0.1 s
 checkpoint interval       = 10 s
 solid conduction method   = implicit_euler
@@ -238,13 +239,14 @@ restart，避免静默恢复到错误的氦气导热状态。
 & "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -u `
   testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\run_v14_helium_depressurization.py `
   --restart-in testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\initial_state\steady_restart_t013864s.npz `
-  --output-dir testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\runs\accident_100s `
-  --duration 100 --dt 0.05 --record-interval 0.1 --checkpoint-interval 10
+  --output-dir testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\runs\accident_100s_tec_dt `
+  --duration 100 --dt 0.05 --tec-update-interval 0.05 `
+  --record-interval 0.1 --checkpoint-interval 10
 ```
 
 2026-07-19 已完成以下验证：
 
-1. 8 项事故开关、诊断、限值和 restart 规则单元测试全部通过；
+1. 9 项事故开关、TEC 刷新、诊断、限值和 restart 规则单元测试全部通过；
 2. 现有反应性控制算例 6 项回归测试全部通过；
 3. 从独立初态完成 0.1 s 真实 smoke；
 4. 从事故态 restart 完成 0.05 s 续算，事故绝对时刻保持不变且没有重复触发。
@@ -254,8 +256,43 @@ restart，避免静默恢复到错误的氦气导热状态。
 | 事故相对时间 | 总功率 | 接收极最高温度 | 通道最高壁温 | 芯块最高温度 | 有效温度反馈 |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 0 s（事故前） | 210.000 kW | 894.192 K | 871.596 K | 2372.136 K | 0 |
-| 0.1 s | 209.894 kW | 900.860 K | 866.310 K | 2372.135 K | -8.64665e-6 |
+| 0.1 s | 209.894 kW | 901.087 K | 866.310 K | 2372.135 K | -8.03410e-6 |
 
 事故前按 58 根 TFE 倍率汇总的氦气隙传热约为 `198.498 kW`；完全失去气体导热后，
-0.1 s 时仅由辐射承担的间隙传热约为 `4.063 kW`。该传热量按接收极流向内套管为正，
+0.1 s 时仅由辐射承担的间隙传热约为 `4.088 kW`。该传热量按接收极流向内套管为正，
 由两侧表面温差除以 `GapCouple2D.R_gap_total` 计算。
+
+## 12. 首轮正式计算结果
+
+正式结果目录为：
+
+```text
+runs/accident_100s_tec_dt/
+```
+
+计算没有推进满 100 s，而是在事故后 `1.75 s` 按预设限值安全终止。首次触发项是
+`Ring1` 代表 TFE 的接收极，轴向位置 `z = 0.29874 m`，温度为 `1024.466 K`，
+超过 `1023 K` 限值。上一个记录点 `1.70 s` 的接收极最高温度为 `1020.879 K`。
+终止时的主要状态为：
+
+| 参数 | 数值 |
+| --- | ---: |
+| 总功率 | 206.733 kW |
+| 裂变功率 | 194.065 kW |
+| 衰变功率 | 12.668 kW |
+| 有效温度反馈/总反应性 | -1.17460e-4 |
+| 通道最高壁温 | 832.466 K |
+| 芯块最高温度 | 2371.852 K |
+| 慢化剂最高温度 | 846.557 K |
+| 反射层最高温度 | 794.368 K |
+| 总流量 | 2.46 kg/s |
+
+全部已记录步的流体求解均收敛；除事故前尚未执行新一次 TEC 电路计算的初始记录外，
+推进后的 TEC 记录均为收敛。输出已包含 `emergency_restart.npz`、`stage_01_restart.npz`
+和 `limit_trip.json`，两个终止 restart 的 SHA256 相同，说明它们对应同一已接受状态。
+
+`runs/accident_100s/` 是发现公共 TEC 默认刷新周期为 0.8 s 后保留的对照计算，不作为
+推荐正式结果。对照计算在 1.85 s 触发同一接收极限值。随后使用 `dt = 0.025 s`、
+`TEC update interval = 0.025 s` 的独立敏感性计算 `runs/sensitivity_dt0p025/`，
+在 1.725 s、同一代表元件和同一轴向位置触发限值。两组收紧计算把越限时刻夹在
+`1.725–1.75 s`，支持“瞬时完全失去氦气导热会很快触发接收极温限”的结论。

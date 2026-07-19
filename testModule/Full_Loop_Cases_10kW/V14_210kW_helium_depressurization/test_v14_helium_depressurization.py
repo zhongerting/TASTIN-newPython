@@ -142,6 +142,7 @@ class HeliumGapTests(unittest.TestCase):
         config = runner.HeliumAccidentRunConfig(restart_in=Path('steady.npz'))
         self.assertEqual(config.duration_s, 100.0)
         self.assertEqual(config.dt_s, 0.05)
+        self.assertEqual(config.tec_update_interval_s, 0.05)
         self.assertEqual(config.record_interval_s, 0.1)
         self.assertEqual(config.checkpoint_interval_s, 10.0)
         self.assertEqual(config.wall_limit_k, 1058.0)
@@ -149,6 +150,13 @@ class HeliumGapTests(unittest.TestCase):
         self.assertEqual(config.collector_limit_k, 1023.0)
         self.assertEqual(config.moderator_limit_k, 930.0)
         self.assertEqual(config.reflector_limit_k, 1000.0)
+
+    def test_accident_tec_update_interval_is_applied_to_core(self):
+        core = type('Core', (), {'thermo_update_interval': 0.8})()
+        runner.set_tec_update_interval(core, 0.05)
+        self.assertEqual(core.thermo_update_interval, 0.05)
+        with self.assertRaises(ValueError):
+            runner.set_tec_update_interval(core, 0.0)
 
     def test_accident_restart_is_reapplied_without_retrigger(self):
         gaps = runner.collect_helium_gaps(self.make_build())
