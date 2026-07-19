@@ -63,6 +63,8 @@ class FastSteadyRunConfig:
     heat_capacity_scale: float = 0.01
     steady_window_s: float = 10.0
     steady_tolerance_k: float = 0.05
+    inner_iter: Optional[int] = None
+    interface_relaxation: float = 1.0
 
 
 def scale_system_solids(system: Any, scale: float) -> list[str]:
@@ -99,6 +101,11 @@ def _validate(config: FastSteadyRunConfig) -> None:
             raise ValueError(f"{name} must be finite and positive")
     if not math.isfinite(float(config.checkpoint_interval_s)):
         raise ValueError("checkpoint_interval_s must be finite")
+    if config.inner_iter is not None and int(config.inner_iter) < 1:
+        raise ValueError("inner_iter must be positive")
+    relaxation = float(config.interface_relaxation)
+    if not math.isfinite(relaxation) or not 0.0 < relaxation <= 1.0:
+        raise ValueError("interface_relaxation must be in (0, 1]")
 
 
 def _temperatures(system: Any) -> Dict[str, np.ndarray]:
@@ -176,6 +183,11 @@ def run_fast_steady(config: FastSteadyRunConfig) -> Dict[str, Any]:
 
     build = build_debug_case(debug, apply_fixed_power=True)
     system = build["system"]
+    inner_iter = (
+        int(debug.inner_iter)
+        if config.inner_iter is None
+        else int(config.inner_iter)
+    )
     scaled_names = scale_system_solids(system, config.heat_capacity_scale)
     if scaled_names:
         system._prepare_fluid_sources_for_coupling()
@@ -200,6 +212,8 @@ def run_fast_steady(config: FastSteadyRunConfig) -> Dict[str, Any]:
         "scaled_solid_names": scaled_names,
         "steady_window_s": float(config.steady_window_s),
         "steady_tolerance_k": float(config.steady_tolerance_k),
+        "inner_iter": inner_iter,
+        "interface_relaxation": float(config.interface_relaxation),
         "external_heat_enabled": False,
         "point_kinetics_enabled": False,
     })
@@ -231,9 +245,10 @@ def run_fast_steady(config: FastSteadyRunConfig) -> Dict[str, Any]:
         dt = min(float(config.dt_s), end_time - current_time)
         _apply_fixed_core_power(build, debug.power_w)
         system.step(
-            dt, inner_iter=int(debug.inner_iter),
+            dt, inner_iter=inner_iter,
             fail_on_fluid_nonconvergence=False,
             fluid_max_iter=int(debug.fluid_max_iter),
+            interface_relaxation=float(config.interface_relaxation),
         )
         _apply_fixed_core_power(build, debug.power_w)
 
@@ -329,6 +344,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heat-capacity-scale", type=float, default=0.01)
     parser.add_argument("--steady-window", type=float, default=10.0)
     parser.add_argument("--steady-tolerance", type=float, default=0.05)
+    parser.add_argument("--inner-iter", type=int, default=None)
+    parser.add_argument("--interface-relaxation", type=float, default=1.0)
     parser.add_argument("--min-fluid-temperature-stop", type=float, default=500.0)
     return parser
 
@@ -348,6 +365,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         heat_capacity_scale=float(args.heat_capacity_scale),
         steady_window_s=float(args.steady_window),
         steady_tolerance_k=float(args.steady_tolerance),
+        inner_iter=args.inner_iter,
+        interface_relaxation=float(args.interface_relaxation),
     ))
     print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False))
     return 0
