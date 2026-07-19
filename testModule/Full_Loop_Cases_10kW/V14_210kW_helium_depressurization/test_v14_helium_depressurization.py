@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 import numpy as np
 
@@ -14,8 +15,15 @@ class Gap:
         self.eps1 = 0.60
         self.eps2 = 0.80
         self.R_gap_total = np.array([1.0, 2.0])
-        self.bc1 = type('Boundary', (), {
-            'current_flux': np.array([-1.0, -2.0]),
+        self.bound1 = type('Boundary', (), {
+            'get_coupling_surface_snapshot': lambda self: (
+                np.array([1001.0, 1004.0]), np.ones(2)
+            ),
+        })()
+        self.bound2 = type('Boundary', (), {
+            'get_coupling_surface_snapshot': lambda self: (
+                np.array([1000.0, 1000.0]), np.ones(2)
+            ),
         })()
 
 
@@ -129,6 +137,32 @@ class HeliumGapTests(unittest.TestCase):
         self.assertEqual(row['helium_gap_heat_out_scaled_W'], 174.0)
         self.assertEqual(row['helium_gap_R_total_min_K_W'], 1.0)
         self.assertEqual(row['helium_gap_R_total_max_K_W'], 2.0)
+
+    def test_default_run_config_matches_approved_case(self):
+        config = runner.HeliumAccidentRunConfig(restart_in=Path('steady.npz'))
+        self.assertEqual(config.duration_s, 100.0)
+        self.assertEqual(config.dt_s, 0.05)
+        self.assertEqual(config.record_interval_s, 0.1)
+        self.assertEqual(config.checkpoint_interval_s, 10.0)
+        self.assertEqual(config.wall_limit_k, 1058.0)
+        self.assertEqual(config.pellet_limit_k, 2700.0)
+        self.assertEqual(config.collector_limit_k, 1023.0)
+        self.assertEqual(config.moderator_limit_k, 930.0)
+        self.assertEqual(config.reflector_limit_k, 1000.0)
+
+    def test_accident_restart_is_reapplied_without_retrigger(self):
+        gaps = runner.collect_helium_gaps(self.make_build())
+        event = runner.restore_or_trigger_accident(
+            gaps,
+            source_config={
+                'helium_accident_active': True,
+                'helium_accident_time_absolute_s': 13864.2,
+            },
+            current_time_s=13874.2,
+        )
+        self.assertFalse(event['triggered_now'])
+        self.assertEqual(event['accident_time_absolute_s'], 13864.2)
+        self.assertTrue(all(gap.k_gas == 0.0 for gap, _ in gaps.values()))
 
 
 if __name__ == '__main__':
