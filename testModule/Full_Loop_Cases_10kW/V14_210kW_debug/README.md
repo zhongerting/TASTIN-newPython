@@ -13,6 +13,10 @@ This folder contains the staged debug runner for the V14_10kW heat-pipe radiator
 - Space background temperature is `4 K`.
 - External orbital heat flux is disabled in the V14 heat-pipe radiator builder.
 
+When a restart is loaded, the saved positive last-step `dt` is supplied to the
+initial `local_implicit` fluid-solid coupling refresh before normal system
+initialization.
+
 Default run:
 
 ```powershell

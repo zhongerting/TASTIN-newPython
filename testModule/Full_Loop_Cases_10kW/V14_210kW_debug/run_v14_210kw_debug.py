@@ -298,7 +298,34 @@ def _format_progress(row: Dict[str, Any]) -> str:
     )
 
 
-def build_debug_case(config: DebugRunConfig) -> Dict[str, Any]:
+def _load_restart_with_coupling_dt(
+        system: Any,
+        restart_path: Any,
+        *,
+        fallback_dt: float) -> None:
+    had_instance_override = '_run_couplers' in vars(system)
+    previous_instance_override = vars(system).get('_run_couplers')
+    original_run_couplers = system._run_couplers
+
+    def run_couplers_with_dt(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get('dt') is None:
+            sync_dt = float(getattr(system, '_last_dt', fallback_dt))
+            if not math.isfinite(sync_dt) or sync_dt <= 0.0:
+                sync_dt = float(fallback_dt)
+            kwargs['dt'] = sync_dt
+        return original_run_couplers(*args, **kwargs)
+
+    system._run_couplers = run_couplers_with_dt
+    try:
+        system.load_global_state(str(restart_path))
+    finally:
+        if had_instance_override:
+            system._run_couplers = previous_instance_override
+        else:
+            del system._run_couplers
+
+
+def build_debug_case(config: DebugRunConfig, *, apply_fixed_power: bool = True) -> Dict[str, Any]:
     build = build_v14_case_a_system(
         core_config=FullLoopCoreConfig(
             inlet_temperature_k=float(config.initial_temperature_k),
@@ -328,7 +355,11 @@ def build_debug_case(config: DebugRunConfig) -> Dict[str, Any]:
     system = build["system"]
     _set_implicit_euler(system)
     if config.restart_in is not None:
-        system.load_global_state(str(config.restart_in))
+        _load_restart_with_coupling_dt(
+            system,
+            config.restart_in,
+            fallback_dt=float(config.init_dt_s),
+        )
     else:
         _sync_fluid_temperature(system.fluid_solver, config.initial_temperature_k)
         _sync_solid_temperature(system, config.initial_temperature_k)
@@ -346,13 +377,15 @@ def build_debug_case(config: DebugRunConfig) -> Dict[str, Any]:
     else:
         build["wire_resistance_ohm"] = [float(value) * float(config.wire_resistance_scale) for value in WIRE_RESISTANCE_OHM]
     build["wire_resistance_scale"] = float(config.wire_resistance_scale)
-    _apply_fixed_core_power(build, config.power_w)
+    if apply_fixed_power:
+        _apply_fixed_core_power(build, config.power_w)
     system.initialize_system(
         dt_init=float(config.init_dt_s),
         tol=float(config.init_tol_kg_s),
         max_iter=int(config.init_max_iter),
     )
-    _apply_fixed_core_power(build, config.power_w)
+    if apply_fixed_power:
+        _apply_fixed_core_power(build, config.power_w)
     return build
 
 

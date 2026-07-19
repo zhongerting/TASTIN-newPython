@@ -151,12 +151,26 @@ required pump head = 27.880 kPa
 
 It is close to, but not exactly at, the present targets of `754.45 K`, `845.65 K`, `206 A`, and `10.44 kW`.
 
+## V14 210 kW Reactivity-Control Baseline
+
+`V14_210kW_reactivity_control/` provides the handoff from the fixed-power
+steady restart to point kinetics. Its first baseline mode deliberately fixes
+external reactivity at zero, requires the control drum to remain disabled, and
+uses only temperature-feedback changes relative to the loaded 210 kW steady
+state. A restart and its sibling `run_config.json` are mandatory.
+
+The existing `V14_210kW_debug/` behavior remains fixed-power by default. The
+new runner calls its builder with fixed-power application disabled, initializes
+and calibrates point kinetics only for the first handoff, and preserves the
+saved point-reactor and feedback-reference state on continuation.
+
 ## Contents
 
 - Common layer: `common_config.py`, `common_core_builder.py`, `common_flow_builder.py`, `common_builder.py`, `common_diagnostics.py`
 - V14 case: `v14_case.py`, `v14_heatpipe_radiator.py`
 - V14 hydraulic smoke case: `V14_run_cases/`
 - V14 powered debug/tuning case: `V14_210kW_debug/`
+- V14 zero-input temperature-feedback baseline: `V14_210kW_reactivity_control/`
 - Package entry: `__init__.py`
 
 ## Verification

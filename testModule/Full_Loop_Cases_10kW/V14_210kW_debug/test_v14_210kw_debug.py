@@ -3,17 +3,48 @@
 from __future__ import annotations
 
 import json
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
 
 from testModule.Full_Loop_Cases_10kW.V14_210kW_debug.run_v14_210kw_debug import (
+    _load_restart_with_coupling_dt,
     DebugRunConfig,
+    build_debug_case,
     run_debug_case,
 )
 
 
 class V14DebugRunnerSmokeTest(unittest.TestCase):
+    def test_build_debug_case_can_skip_fixed_power_handoff(self):
+        parameters = inspect.signature(build_debug_case).parameters
+        self.assertIn('apply_fixed_power', parameters)
+        parameter = parameters['apply_fixed_power']
+        self.assertTrue(parameter.default)
+
+    def test_restart_sync_receives_saved_positive_dt(self):
+        class System:
+            def __init__(self):
+                self.received_dt = None
+
+            def _run_couplers(self, dt=None):
+                self.received_dt = dt
+
+            def load_global_state(self, unused_path):
+                self._last_dt = 0.05
+                self._run_couplers()
+
+        system = System()
+        _load_restart_with_coupling_dt(
+            system,
+            'restart.npz',
+            fallback_dt=0.01,
+        )
+
+        self.assertEqual(system.received_dt, 0.05)
+        self.assertNotIn('_run_couplers', system.__dict__)
+
     def test_runner_writes_restart_and_key_metrics(self):
         with tempfile.TemporaryDirectory(dir=r"E:\tmp") as tmp:
             out_dir = Path(tmp) / "v14_debug_smoke"
