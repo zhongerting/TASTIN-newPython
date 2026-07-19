@@ -27,6 +27,9 @@ testModule/Full_Loop_Cases_10kW/
 实施时将在本目录的 `initial_state/` 中保存该 restart 和对应 `run_config.json` 的独立副本，
 避免原运行目录移动或清理后无法复现。
 
+`initial_state/steady_restart_t013864s.npz` 的 SHA256 为
+`B2576E69499234CE84DCA9ED22C2838C3FA8598CC79B426AB5ACDDAC0EA9C887`。
+
 加载初始 restart 后：
 
 1. 不再施加固定 210 kW 功率源；
