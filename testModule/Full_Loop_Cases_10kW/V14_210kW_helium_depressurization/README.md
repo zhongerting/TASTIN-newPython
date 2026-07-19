@@ -1,4 +1,4 @@
-# V14 210 kW 全堆氦气瞬时完全失压事故算例设计
+# V14 210 kW 全堆氦气瞬时完全失压事故算例说明
 
 ## 1. 目的与范围
 
@@ -24,7 +24,7 @@ testModule/Full_Loop_Cases_10kW/
 该状态的绝对时间约为 `13864.2 s`。它是在早期 debug 状态基础上，恢复正常材料热容后
 继续计算约 4700 s 得到的当前最终状态，不是热容缩放状态。
 
-实施时将在本目录的 `initial_state/` 中保存该 restart 和对应 `run_config.json` 的独立副本，
+本目录的 `initial_state/` 中已保存该 restart 和对应 `run_config.json` 的独立副本，
 避免原运行目录移动或清理后无法复现。
 
 `initial_state/steady_restart_t013864s.npz` 的 SHA256 为
@@ -86,7 +86,7 @@ h_He: 5678 -> 0 W/(m2*K)
 然后将耦合器的气体导热参数设为零。公共求解器继续负责间隙辐射、固体导热、流固换热、
 水力、TEC 和点堆推进。
 
-预期目录结构为：
+目录结构为：
 
 ```text
 V14_210kW_helium_depressurization/
@@ -133,7 +133,7 @@ global time step          = 0.05 s
 record interval           = 0.1 s
 checkpoint interval       = 10 s
 solid conduction method   = implicit_euler
-fluid-solid coupling      = existing implicit coupling
+fluid-solid coupling      = local_implicit
 total target flow         = 2.46 kg/s
 external heat             = disabled
 external reactivity       = 0
@@ -229,3 +229,33 @@ restart，避免静默恢复到错误的氦气导热状态。
 
 100 s 运行的接受条件不是必须算满 100 s，而是：计算过程有限且可复现；若没有越限则正常
 结束并保存 restart；若越限则在首次检测到越限后停止，并完整保存触发证据和可恢复状态。
+
+## 11. 运行命令与已完成验证
+
+必须使用项目指定的 Python 3.12 Conda 环境。正式 100 s 计算命令为：
+
+```powershell
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -u `
+  testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\run_v14_helium_depressurization.py `
+  --restart-in testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\initial_state\steady_restart_t013864s.npz `
+  --output-dir testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\runs\accident_100s `
+  --duration 100 --dt 0.05 --record-interval 0.1 --checkpoint-interval 10
+```
+
+2026-07-19 已完成以下验证：
+
+1. 8 项事故开关、诊断、限值和 restart 规则单元测试全部通过；
+2. 现有反应性控制算例 6 项回归测试全部通过；
+3. 从独立初态完成 0.1 s 真实 smoke；
+4. 从事故态 restart 完成 0.05 s 续算，事故绝对时刻保持不变且没有重复触发。
+
+0.1 s smoke 的关键记录为：
+
+| 事故相对时间 | 总功率 | 接收极最高温度 | 通道最高壁温 | 芯块最高温度 | 有效温度反馈 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 s（事故前） | 210.000 kW | 894.192 K | 871.596 K | 2372.136 K | 0 |
+| 0.1 s | 209.894 kW | 900.860 K | 866.310 K | 2372.135 K | -8.64665e-6 |
+
+事故前按 58 根 TFE 倍率汇总的氦气隙传热约为 `198.498 kW`；完全失去气体导热后，
+0.1 s 时仅由辐射承担的间隙传热约为 `4.063 kW`。该传热量按接收极流向内套管为正，
+由两侧表面温差除以 `GapCouple2D.R_gap_total` 计算。

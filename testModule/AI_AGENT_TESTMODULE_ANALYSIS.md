@@ -2404,6 +2404,36 @@ required pump head = 27.880 kPa
 
 Interpretation: the result is close to the requested `754.45 K` inlet, `845.65 K` outlet, `206 A`, and `10.44 kW`, but remains slightly hot and slightly high in current/power. Treat it as a working continuation baseline. If tighter calibration is required, make small changes to radiator emissivity or wire-resistance scale and validate with at least a 1200 s window; 1 s electrical checks are not reliable final evidence for this case.
 
+### 2026-07-19 V14 210 kW 全堆氦气瞬时完全失压事故
+
+事故算例位于：
+
+```text
+testModule/Full_Loop_Cases_10kW/V14_210kW_helium_depressurization/
+```
+
+首读 `README.md`，运行入口为 `run_v14_helium_depressurization.py`。独立初态是正常材料热容
+长期计算后的约 `13864.2 s` restart，保存在该目录 `initial_state/`；不要从早期缩热容状态
+或 0.1 s smoke 输出启动正式事故。
+
+事故模型仅在算例层把 5 个代表性 TFE（倍率合计 58）的 `collector_iclad_gap.k_gas`
+同步清零，即 `h_He: 5678 -> 0 W/(m2*K)`。间隙辐射、几何和发射率保持不变；这是一种
+瞬时完全丧失气体导热的保守代理模型，不是显式氦气压力或泄漏流动模型。固定功率源关闭，
+外界反应性为零，控制鼓关闭，点堆使用 ReactorCore 的相对温度反馈自动推进。
+
+默认首轮为 `100 s`、固定步长 `0.05 s`、每 `0.1 s` 记录、每 `10 s` 保存 checkpoint，
+固体使用 `implicit_euler`，流固耦合沿用 `local_implicit`，目标总流量 `2.46 kg/s`，
+外热关闭。每步检查壁温、芯块、接收极、慢化剂和反射层限值；触发后保存
+`emergency_restart.npz` 和 `limit_trip.json`。
+
+事故状态不保存在 `.npz` 的气隙参数中，必须与同目录 `run_config.json` 配套使用。事故续算
+时 runner 根据 `helium_accident_active=true` 重新施加零气体导热，并保留原事故绝对时刻和
+已保存点堆状态，不能只复制 `.npz` 后脱离配置运行。
+
+2026-07-19 的 0.1 s 真实 smoke 与 0.05 s restart 续算均通过。smoke 末端总功率约
+`209.894 kW`，接收极最高温度约 `900.860 K`，通道最高壁温约 `866.310 K`，
+有效温度反馈约 `-8.64665e-6`，尚未触发用户给定限值。
+
 ## 2026-07-13 ThermoCalc 串联固定电流测试
 
 `test_thermocalc_series_fixed_current.py` 验证串联 `fixed_i` 的四类状态：单根/多根零电流开路、与 `fixed_u` 交叉验证的可实现工作点、有限的不可发电目标回退到正开路电压，以及双重失败时安全返回有限零输出。测试扩展必须从独立构建目录加载，不得覆盖生产 `.pyd`。
