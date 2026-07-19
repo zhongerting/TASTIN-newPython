@@ -2435,14 +2435,17 @@ testModule/Full_Loop_Cases_10kW/V14_210kW_helium_depressurization/
 周期施加小量浮点调度容差，避免约 `13864.2 s` 绝对时间下 `0.05 s` 差值被表示为略小于
 阈值而漏更；`run_config.json` 同时记录名义周期和内部调度阈值。正式计算在事故后
 `1.75 s` 因 Ring1 接收极在 `z=0.29874 m` 达到 `1024.851 K`、超过 `1023 K` 限值而
-安全终止。`dt=0.025 s` 的独立严格敏感性计算在 `1.725 s` 的同一位置以 `1023.120 K`
+安全终止。`dt=0.025 s` 的独立最终敏感性计算在 `1.725 s` 的同一位置以 `1023.120 K`
 触发。两者 restart 中末次 TEC 更新时间分别只落后全局时间 `0.05 s` 和 `0.025 s`。
-推荐结果目录为 `runs/accident_100s_strict/`，敏感性目录为
-`runs/sensitivity_dt0p025_strict/`；其他同名前缀目录只保留作修正前对照。
+推荐结果目录为 `runs/accident_100s_final/`，敏感性目录为
+`runs/sensitivity_dt0p025_final/`；其他同名前缀目录只保留作修正前对照。
 
 事故态 restart 在推进前执行完整温限和数值预检；若已越限则以
 `phase=restart_preflight` 原时刻停止。推进后若水力或 TEC 不收敛，或任一数值诊断出现
 NaN/Inf，也会 fail-closed 保存紧急 restart 和 `limit_trip.json`。
+检查同时直接覆盖水力 `T/P/h/rho/W` 原始数组及全部注册固体温度数组，避免汇总层
+`nanmin/nanmax` 掩盖局部非有限值。事故 restart 预检前会先按当前温度显式刷新 TEC，
+再要求 TEC 收敛。
 
 ## 2026-07-13 ThermoCalc 串联固定电流测试
 

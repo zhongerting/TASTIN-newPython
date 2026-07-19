@@ -95,6 +95,21 @@ def set_tec_update_interval(core: Any, interval_s: float) -> float:
     return scheduler_threshold
 
 
+def refresh_tec_now(core: Any, current_time_s: float) -> None:
+    if not bool(getattr(core, 'enable_tec_coupled', False)):
+        return
+    current_time = float(current_time_s)
+    for group in core.iter_tec_circuit_groups():
+        if group.thermo_calc is None:
+            continue
+        core._sync_tec_group_temperatures(group)
+        group.thermo_calc.calculate(verbose=False)
+        core._apply_tec_group_results(group)
+        group.last_update_time = current_time
+        if group.name == 'main':
+            core._last_thermo_update_time = current_time
+
+
 def collect_helium_gaps(build: Dict[str, Any]) -> Dict[str, tuple[Any, int]]:
     tfes = build['tfes']
     multipliers = build['ring_multipliers']
@@ -274,6 +289,31 @@ def find_limit_trip(peaks: list[Dict[str, Any]]) -> Dict[str, Any] | None:
         violations,
         key=lambda item: float(item['actual_k']) / float(item['limit_k']),
     )
+
+
+def find_nonfinite_model_state(
+        build: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    system = build['system']
+    fluid = system.fluid_solver
+    state_arrays = []
+    for field in ('T_vec', 'P_vec', 'h_vec', 'rho_vec', 'W_vec'):
+        if hasattr(fluid, field):
+            state_arrays.append((f'fluid.{field}', getattr(fluid, field)))
+    for name, solid in system.solid_components.items():
+        if hasattr(solid, 'T'):
+            state_arrays.append((f'solid:{name}.T', solid.T))
+    for field, raw_values in state_arrays:
+        values = np.asarray(raw_values, dtype=float).ravel()
+        nonfinite = np.flatnonzero(~np.isfinite(values))
+        if nonfinite.size:
+            index = int(nonfinite[0])
+            return {
+                'component': 'nonfinite_model_state',
+                'field': field,
+                'flat_index': index,
+                'actual': float(values[index]),
+            }
+    return None
 
 
 def collect_helium_metrics(
@@ -530,6 +570,7 @@ def run_helium_accident(config: HeliumAccidentRunConfig) -> Dict[str, Any]:
     start_time = float(system.global_time)
     end_time = start_time + float(config.duration_s)
     source_active = read_source_accident_state(source_config)
+    refresh_tec_now(core, start_time)
     _refresh_gap_diagnostics(build, gaps)
 
     latest: Dict[str, Any]
@@ -544,13 +585,17 @@ def run_helium_accident(config: HeliumAccidentRunConfig) -> Dict[str, Any]:
             dt_s=0.0,
             limits_k=limits_k,
         )
-        initial_reason, initial_trip = evaluate_state_trip(
-            latest,
-            peaks=initial_peaks,
-            config=config,
-            baseline_power_w=baseline_power_w,
-            require_tec_convergence=False,
-        )
+        initial_trip = find_nonfinite_model_state(build)
+        if initial_trip is not None:
+            initial_reason = 'nonfinite_model_state'
+        else:
+            initial_reason, initial_trip = evaluate_state_trip(
+                latest,
+                peaks=initial_peaks,
+                config=config,
+                baseline_power_w=baseline_power_w,
+                require_tec_convergence=bool(core.enable_tec_coupled),
+            )
         if initial_reason != 'completed':
             _write_json(out_dir / 'limit_trip.json', {
                 **initial_trip,
@@ -617,13 +662,17 @@ def run_helium_accident(config: HeliumAccidentRunConfig) -> Dict[str, Any]:
         )
         _append_history(history_path, latest)
         _print_progress(latest)
-        stop_reason, trip_payload = evaluate_state_trip(
-            latest,
-            peaks=restart_peaks,
-            config=config,
-            baseline_power_w=baseline_power_w,
-            require_tec_convergence=False,
-        )
+        trip_payload = find_nonfinite_model_state(build)
+        if trip_payload is not None:
+            stop_reason = 'nonfinite_model_state'
+        else:
+            stop_reason, trip_payload = evaluate_state_trip(
+                latest,
+                peaks=restart_peaks,
+                config=config,
+                baseline_power_w=baseline_power_w,
+                require_tec_convergence=bool(core.enable_tec_coupled),
+            )
         if stop_reason != 'completed':
             emergency_path = out_dir / 'emergency_restart.npz'
             system.save_global_state(str(emergency_path))
@@ -664,13 +713,17 @@ def run_helium_accident(config: HeliumAccidentRunConfig) -> Dict[str, Any]:
             limits_k=limits_k,
         )
 
-        stop_reason, trip_payload = evaluate_state_trip(
-            latest,
-            peaks=peaks,
-            config=config,
-            baseline_power_w=baseline_power_w,
-            require_tec_convergence=True,
-        )
+        trip_payload = find_nonfinite_model_state(build)
+        if trip_payload is not None:
+            stop_reason = 'nonfinite_model_state'
+        else:
+            stop_reason, trip_payload = evaluate_state_trip(
+                latest,
+                peaks=peaks,
+                config=config,
+                baseline_power_w=baseline_power_w,
+                require_tec_convergence=bool(core.enable_tec_coupled),
+            )
 
         should_record = (
             float(system.global_time) - last_record_time

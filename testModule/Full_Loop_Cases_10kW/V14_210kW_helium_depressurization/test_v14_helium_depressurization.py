@@ -227,6 +227,59 @@ class HeliumGapTests(unittest.TestCase):
         self.assertEqual(reason, 'tec_nonconvergence')
         self.assertEqual(trip['component'], 'tec_main')
 
+    def test_raw_state_scanner_catches_partial_nan(self):
+        fluid = type('Fluid', (), {
+            'T_vec': np.array([700.0, 710.0]),
+            'P_vec': np.array([1.0e5, 1.0e5]),
+            'h_vec': np.array([1.0, 2.0]),
+            'rho_vec': np.array([800.0, 800.0]),
+            'W_vec': np.array([2.46, 2.46]),
+        })()
+        bad_solid = Solid([900.0, np.nan])
+        system = type('System', (), {
+            'fluid_solver': fluid,
+            'solid_components': {'bad_solid': bad_solid},
+        })()
+        trip = runner.find_nonfinite_model_state({'system': system})
+        self.assertEqual(trip['component'], 'nonfinite_model_state')
+        self.assertEqual(trip['field'], 'solid:bad_solid.T')
+        self.assertEqual(trip['flat_index'], 1)
+
+        bad_solid.T[:] = 900.0
+        fluid.W_vec[1] = np.inf
+        trip = runner.find_nonfinite_model_state({'system': system})
+        self.assertEqual(trip['field'], 'fluid.W_vec')
+        self.assertEqual(trip['flat_index'], 1)
+
+    def test_refresh_tec_now_updates_and_applies_main_group(self):
+        calc = type('Calc', (), {
+            'calculate': lambda self, verbose=False: setattr(
+                self, 'calculate_called', True
+            ),
+        })()
+        group = type('Group', (), {
+            'name': 'main',
+            'thermo_calc': calc,
+            'last_update_time': -999.0,
+        })()
+        core = type('Core', (), {
+            'enable_tec_coupled': True,
+            '_last_thermo_update_time': -999.0,
+            'iter_tec_circuit_groups': lambda self: [group],
+            '_sync_tec_group_temperatures': lambda self, item: setattr(
+                self, 'synced_group', item
+            ),
+            '_apply_tec_group_results': lambda self, item: setattr(
+                self, 'applied_group', item
+            ),
+        })()
+        runner.refresh_tec_now(core, 13864.2)
+        self.assertTrue(calc.calculate_called)
+        self.assertIs(core.synced_group, group)
+        self.assertIs(core.applied_group, group)
+        self.assertEqual(group.last_update_time, 13864.2)
+        self.assertEqual(core._last_thermo_update_time, 13864.2)
+
     def test_accident_restart_is_reapplied_without_retrigger(self):
         gaps = runner.collect_helium_gaps(self.make_build())
         event = runner.restore_or_trigger_accident(

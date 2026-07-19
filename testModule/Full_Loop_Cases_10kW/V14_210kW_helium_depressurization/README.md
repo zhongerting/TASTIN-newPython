@@ -223,8 +223,8 @@ restart，避免静默恢复到错误的氦气导热状态。
 ```powershell
 & "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -u `
   testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\run_v14_helium_depressurization.py `
-  --restart-in testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\runs\smoke_0p1s_strict\stage_01_restart.npz `
-  --output-dir testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\runs\restart_smoke_strict `
+  --restart-in testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\runs\smoke_0p1s_final\stage_01_restart.npz `
+  --output-dir testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\runs\restart_smoke_final `
   --duration 0.05 --dt 0.05 --tec-update-interval 0.05 `
   --record-interval 0.05 --checkpoint-interval 0.05
 ```
@@ -253,14 +253,14 @@ restart，避免静默恢复到错误的氦气导热状态。
 & "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -u `
   testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\run_v14_helium_depressurization.py `
   --restart-in testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\initial_state\steady_restart_t013864s.npz `
-  --output-dir testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\runs\accident_100s_strict `
+  --output-dir testModule\Full_Loop_Cases_10kW\V14_210kW_helium_depressurization\runs\accident_100s_final `
   --duration 100 --dt 0.05 --tec-update-interval 0.05 `
   --record-interval 0.1 --checkpoint-interval 10
 ```
 
 2026-07-19 已完成以下验证：
 
-1. 12 项事故开关、TEC 刷新、诊断、五类温限和 restart 规则单元测试全部通过；
+1. 14 项事故开关、TEC 刷新、原始状态扫描、诊断、五类温限和 restart 规则单元测试全部通过；
 2. 现有反应性控制算例 6 项回归测试全部通过；
 3. 从独立初态完成 0.1 s 真实 smoke；
 4. 从事故态 restart 完成 0.05 s 续算，事故绝对时刻保持不变且没有重复触发。
@@ -270,7 +270,7 @@ restart，避免静默恢复到错误的氦气导热状态。
 | 事故相对时间 | 总功率 | 接收极最高温度 | 通道最高壁温 | 芯块最高温度 | 有效温度反馈 |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 0 s（事故前） | 210.000 kW | 894.192 K | 871.596 K | 2372.136 K | 0 |
-| 0.1 s | 209.909 kW | 901.420 K | 866.310 K | 2372.135 K | -7.19919e-6 |
+| 0.1 s | 209.909 kW | 901.421 K | 866.310 K | 2372.135 K | -7.19863e-6 |
 
 事故前按 58 根 TFE 倍率汇总的氦气隙传热约为 `198.498 kW`；完全失去气体导热后，
 0.1 s 时仅由辐射承担的间隙传热约为 `4.126 kW`。该传热量按接收极流向内套管为正，
@@ -281,12 +281,12 @@ restart，避免静默恢复到错误的氦气导热状态。
 正式结果目录为：
 
 ```text
-runs/accident_100s_strict/
+runs/accident_100s_final/
 ```
 
 计算没有推进满 100 s，而是在事故后 `1.75 s` 按预设限值安全终止。首次触发项是
 `Ring1` 代表 TFE 的接收极，轴向位置 `z = 0.29874 m`，温度为 `1024.851 K`，
-超过 `1023 K` 限值。上一个记录点 `1.70 s` 的接收极最高温度为 `1020.879 K`。
+超过 `1023 K` 限值。上一个记录点 `1.70 s` 的接收极最高温度为 `1021.276 K`。
 终止时的主要状态为：
 
 | 参数 | 数值 |
@@ -309,9 +309,15 @@ runner 对 TEC 调度阈值加入小于名义周期的浮点容差，并在 `run
 名义 `tec_update_interval_s` 和实际 `tec_scheduler_threshold_s`。正式 restart 中
 末次 TEC 更新时间仅落后全局时间 0.05 s，符合每个时间步开始时刷新一次的执行顺序。
 
-`runs/accident_100s/` 和 `runs/accident_100s_tec_dt/` 是修正 TEC 浮点调度前保留的
-对照计算，不作为推荐正式结果。修正后使用 `dt = 0.025 s`、`TEC update interval = 0.025 s`
-的独立敏感性计算位于 `runs/sensitivity_dt0p025_strict/`，在 1.725 s、同一代表元件和
+`runs/accident_100s/`、`runs/accident_100s_tec_dt/` 和 `runs/accident_100s_strict/`
+是逐轮诊断时保留的对照计算，不作为推荐正式结果。最终使用 `dt = 0.025 s`、
+`TEC update interval = 0.025 s` 的独立敏感性计算位于
+`runs/sensitivity_dt0p025_final/`，在 1.725 s、同一代表元件和
 同一轴向位置以 `1023.120 K` 触发限值。其末次 TEC 更新时间仅落后全局时间 0.025 s。
 两组严格计算把越限时刻夹在
 `1.725–1.75 s`，支持“瞬时完全失去氦气导热会很快触发接收极温限”的结论。
+
+最终 runner 在预检和每个已接受时间步后直接扫描水力网络的 `T/P/h/rho/W` 原始数组及
+所有注册固体的温度数组；这避免 `nanmin/nanmax` 汇总掩盖局部 NaN/Inf。事故 restart
+预检前还会按当前温度显式刷新一次 TEC 电路，因此 `tec_main_converged` 表示一次真实的
+当前状态求解，而不是刚重建 ThermoCalc 对象时的默认标志。
