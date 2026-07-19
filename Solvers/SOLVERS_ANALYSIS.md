@@ -875,7 +875,7 @@ SystemManager.step(dt, inner_iter, convergence_tol, reactivity_control,
   │     ├── fluid_solver.step_Picard(dt)  → 水力网络压力+焓求解
   │     │
   │     ├── for solid in solid_components:
-  │     │     └── solid.step(dt)  → 按 solid.ode_method 推进固体温度场，默认 BDF
+  │     │     └── solid.step(dt)  → 按 solid.ode_method 推进固体温度场，默认 `implicit_euler`
   │     │
   │     ├── [收敛检查] if inner_iter > 1:
   │     │     ├── err_f = max|T_f_new - T_f_old|

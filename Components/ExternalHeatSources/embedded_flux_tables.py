@@ -10,11 +10,15 @@ depends on external input-card files.
 """
 
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Dict, Tuple
 
 import numpy as np
 
 from .w0_8p12_sum_data import load_w0_8p12_sum_matrices
+
+W0_8P12_ORBIT_PERIOD_S = 6552.0
 
 
 def _parse_numeric_row(text: str) -> np.ndarray:
@@ -133,6 +137,41 @@ class EmbeddedFluxTableLibrary:
         return int(table_id) in self._tables
 
 
+def _scale_sample_time_to_period(sample_time: np.ndarray, orbit_period_s: float = None) -> np.ndarray:
+    time = np.asarray(sample_time, dtype=float)
+    if orbit_period_s is None:
+        return time.copy()
+    period = float(orbit_period_s)
+    if not np.isfinite(period) or period <= 0.0:
+        raise ValueError("orbit_period_s must be finite and positive")
+    return time * (period / float(time[-1]))
+
+
+@lru_cache(maxsize=None)
+def load_csv_flux_table_library(
+    path: str,
+    orbit_period_s: float = None,
+) -> EmbeddedFluxTableLibrary:
+    """Load sample-indexed theta heat-flux columns as scalar lookup tables."""
+    csv_path = Path(path).resolve()
+    data = np.loadtxt(csv_path, delimiter=",", skiprows=1, dtype=float)
+    if data.ndim != 2 or data.shape[0] < 2 or data.shape[1] < 2:
+        raise ValueError(f"External heat CSV '{csv_path}' must contain time plus flux columns")
+    if not np.all(np.isfinite(data)) or not np.all(np.diff(data[:, 0]) > 0.0):
+        raise ValueError(f"External heat CSV '{csv_path}' must contain finite values and increasing time")
+    sample_time = _scale_sample_time_to_period(data[:, 0], orbit_period_s)
+    return EmbeddedFluxTableLibrary({
+        index: EmbeddedFluxTable(
+            table_id=index,
+            name=f"{csv_path.stem}_theta_{index:03d}",
+            time=sample_time.copy(),
+            values=data[:, index + 1].copy(),
+            periodic=True,
+        )
+        for index in range(data.shape[1] - 1)
+    })
+
+
 def _build_fortran_orbital_heat_tables() -> Dict[int, EmbeddedFluxTable]:
     tables: Dict[int, EmbeddedFluxTable] = {}
 
@@ -195,11 +234,20 @@ def _build_w0_8p12_orbital_heat_matrices() -> Dict[str, EmbeddedFluxMatrix]:
             raise ValueError(f"Embedded flux matrix '{key}' must contain time plus flux columns")
         matrices[key] = EmbeddedFluxMatrix(
             key=key,
-            time=data[:, 0].astype(float),
+            time=_scale_sample_time_to_period(data[:, 0], W0_8P12_ORBIT_PERIOD_S),
             values=data[:, 1:].astype(float),
             source="Components.ExternalHeatSources.w0_8p12_sum_data",
             periodic=True,
         )
+    n18_path = Path(__file__).with_name("is58p5_w0_8p12_N18_sum.csv")
+    n18_data = np.loadtxt(n18_path, delimiter=",", skiprows=1, dtype=float)
+    matrices["is58p5_w0_8p12_N18_sum"] = EmbeddedFluxMatrix(
+        key="is58p5_w0_8p12_N18_sum",
+        time=_scale_sample_time_to_period(n18_data[:, 0], W0_8P12_ORBIT_PERIOD_S),
+        values=n18_data[:, 1:].copy(),
+        source=str(n18_path),
+        periodic=True,
+    )
     return matrices
 
 

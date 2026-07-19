@@ -154,7 +154,7 @@ calc_emission_point_production(...)
 
 | 入口 | 行为 | 当前注意事项 |
 |---|---|---|
-| `ThermoCalcModel(n_elements, n_nodes, lookup_db=None, enable_lookup=None, lookup_regions=None)` | 创建 `te_solver.InputData()` 并填默认值；可显式控制 emission lookup 加载 | 若 `enable_lookup=None`，沿用 `THERMOCALC_ENABLE_LOOKUP` / `THERMOCALC_LOOKUP_DB` 环境变量行为 |
+| `ThermoCalcModel(n_elements, n_nodes, lookup_db=None, enable_lookup=None, lookup_regions=None)` | 创建输入并可显式控制 lookup | 默认优先发现本地 `emission_runtime_db_v2/pcs_0p02_5torr`；miss 或无库时使用解析法 |
 | `set_temperatures(T_em, T_co)` | 校验 `(N_elem, n_node)`，保存副本；电路已构建时写入每根 `SingleTEC` | 当前绑定暴露了 `Temitter`、`Tcollector` |
 | `setup_circuit_mode(mode_str, target_value, I_guess=150.0)` | 接受 `fixed_R`、`fixed_U`、`fixed_I`、`parallel_fixed_u`、`parallel_fixed_i`、`parallel_load_curve`；`fixed_I` 要求有限非负目标电流 | `parallel_load_curve` 推荐配合 `set_load_curve()` 使用 |
 | `set_load_curve(current_a, voltage_v)` | 设置并联外部负载 `U_load=f(I_total)` 曲线 | 电流轴必须一维、有限且严格递增 |
@@ -178,7 +178,7 @@ $env:THERMOCALC_ENABLE_LOOKUP = "1"
 $env:THERMOCALC_LOOKUP_DB = "E:\项目任务\五院-电源\source_code\TASTIN-python\ThermoCalc\emission_database"
 ```
 
-`THERMOCALC_PYD_DIR` 会被插入到 `sys.path` 的最高优先级，用于在不覆盖根目录 `.pyd` 的情况下测试新扩展。`ThermoCalcModel.__init__()` 现在优先使用显式参数：`enable_lookup=True/False` 可覆盖环境变量，`lookup_db` 可覆盖 `THERMOCALC_LOOKUP_DB`，`lookup_regions` 可覆盖 `THERMOCALC_LOOKUP_REGIONS`。当 `enable_lookup=None` 时，才沿用旧的环境变量自动加载路径。
+`THERMOCALC_PYD_DIR` 会被插入到 `sys.path` 的最高优先级。查表控制优先级为显式参数、环境变量、本地推荐库；`enable_lookup=False` 或 `THERMOCALC_ENABLE_LOOKUP=0` 可强制解析法。
 
 | 字段 | 绑定层期望维度 | 单位 | 包装层默认值 |
 |---|---|---|---|
@@ -334,7 +334,7 @@ post_step()
 | 非均匀网格完整数学验证仍有限 | `dlE/dlC` 和侧面积已逐节点化，但 `VcalcFVM()` 的界面距离仍沿用现有离散公式 | 修改电势离散时补专项守恒验证 |
 | `set_rload()` 构建前行为不完整 | 包装层尝试写 `_input_data.Rload/R_load`，当前 `InputData` 未绑定这些字段 | 构建后可写 `CircuitTECs.Rload`；构建前优先使用 `setup_circuit_mode('fixed_R', ...)` |
 | 原始指针生命周期风险 | `create_circuit()` 为每根 TFE `new` 对象；相关析构函数当前为空 | 若处理长时运行内存问题，专项检查所有权与释放逻辑 |
-| 查表需要显式启用和数据库覆盖 | 根目录生产 pyd 已包含当前查表接口；数据库可由 `ThermoCalcModel` 显式参数或环境变量加载 | 算例层优先使用显式 `tec_lookup_*` 配置；旧 runner 仍可设置 `THERMOCALC_ENABLE_LOOKUP=1` 和 `THERMOCALC_LOOKUP_DB` |
+| 查表默认优先、miss 回退解析法 | 根目录生产 pyd 已包含当前查表接口；数据库可由 `ThermoCalcModel` 显式参数或环境变量加载 | 算例层优先使用显式 `tec_lookup_*` 配置；旧 runner 仍可设置 `THERMOCALC_ENABLE_LOOKUP=1` 和 `THERMOCALC_LOOKUP_DB` |
 | 查表表外点会回退解析 | `thermionicEmission::calc()` 查表 miss 后继续原解析法 | 若希望完全避免解析失败输出，应扩大/修正表覆盖或改电路层策略 |
 | setup 阶段首次 TEC 仍可能慢且打印失败 | V13 `apply_wire_resistance()` 会重建电路并立即 `calculate()`；30 s 查表计时中 setup 首算约 `7.81 s` 且打印失败信息 | 正式推进 warm-start 后 TEC 单次约 `1.8 s`；setup 首算需单独优化 |
 
@@ -492,8 +492,8 @@ testModule/test_thermocalc_lookup.py
 
 - `ThermoCalc/emission_database/pcs_0p02_5torr/` 是当前 `0.02-5.0 torr` 原始/审计库，保留诊断字段和 `.optimized.npz` sidecar，不提交 git。
 - `ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr/` 是当前推荐运行库，只保留 `J/Vd/delta_V/phiE/phiC/lookup_safe/zero_mask` 和轴，并提供 `.tedb` 给 C++ 直接加载，不提交 git。
-- 自动加载仍可通过 `THERMOCALC_ENABLE_LOOKUP=1` 和 `THERMOCALC_LOOKUP_DB`；新算例层也可以用 `tec_lookup_enabled/tec_lookup_db/tec_lookup_regions` 直接传入。默认只加载 `core`，更广覆盖由显式 regions 或 `THERMOCALC_LOOKUP_REGIONS` 控制。
-- 2026-06-25 起根目录生产 `.pyd` 已包含当前查表和并联接口；查表需通过 `ThermoCalcModel` 显式参数或 `THERMOCALC_ENABLE_LOOKUP`、`THERMOCALC_LOOKUP_DB`、可选 `THERMOCALC_LOOKUP_REGIONS` 启用。
+- 默认优先自动发现 `ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr/`；也可通过环境变量或算例层 `tec_lookup_*` 覆盖。默认只加载 `core`，其他 region miss 时回退解析法。
+- 根目录生产 `.pyd` 已包含查表和并联接口；查表命中时直接返回，miss 时沿用 C++ 解析计算。
 
 ## 17. 2026-06-23 dense runtime v2 补充
 

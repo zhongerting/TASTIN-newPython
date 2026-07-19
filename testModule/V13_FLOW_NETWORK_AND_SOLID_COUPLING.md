@@ -202,7 +202,7 @@ Default total pump head is `7900 Pa`. Each pump receives half of the total head.
 | `TECCouple2D` | 5 | emitter-collector TEC gap for each representative TFE |
 | `SolidSolidCouple2D` | 3 | global moderator ring-to-ring radial conduction |
 
-The V13 builder creates radiator `FluidSolidCouple`s with `local_implicit` and TFE coolant `FluidSolidCouple`s with the class default `current`. The V13 closed-loop runner default is `--fluid-solid-coupling-scheme local_implicit`, and it applies that scheme to all `FluidSolidCouple`s with available solid capacitance.
+The V13 builder creates radiator `FluidSolidCouple`s with `local_implicit` and TFE coolant `FluidSolidCouple`s with the class default `local_implicit`. The V13 closed-loop runner default is `--fluid-solid-coupling-scheme local_implicit`, and it applies that scheme to all `FluidSolidCouple`s with available solid capacitance.
 
 ### 4.2 TFE Radial Solid Stack
 

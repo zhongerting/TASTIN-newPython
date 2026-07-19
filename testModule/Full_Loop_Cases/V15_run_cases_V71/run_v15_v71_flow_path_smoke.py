@@ -12,6 +12,8 @@ from testModule.Full_Loop_Cases import (
     FullLoopCoreConfig,
     FullLoopFlowConfig,
     FullLoopPumpConfig,
+    V15_V71_PUMP_TOTAL_HEAD_PA,
+    V15_V71_RADIATOR_TUBE_K_LOSS,
     V15PipeFinRadiatorConfig,
     build_v15_v71_case_a_system,
 )
@@ -86,10 +88,12 @@ def run_smoke_case(
     build = build_v15_v71_case_a_system(
         core_config=FullLoopCoreConfig(main_tec_enabled=False),
         flow_config=FullLoopFlowConfig(total_flow_kg_s=1.3),
-        pump_config=FullLoopPumpConfig(pump_total_head_pa=6466.56),
+        pump_config=FullLoopPumpConfig(pump_total_head_pa=V15_V71_PUMP_TOTAL_HEAD_PA),
         radiator_config=V15PipeFinRadiatorConfig(
             tube_emissivity=0.0,
             fin_emissivity=0.0,
+            radiator_tube_inlet_k_loss=V15_V71_RADIATOR_TUBE_K_LOSS,
+            radiator_tube_outlet_k_loss=V15_V71_RADIATOR_TUBE_K_LOSS,
         ),
     )
     net = build["system"].fluid_solver

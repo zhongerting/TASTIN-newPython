@@ -1,15 +1,30 @@
 """Independent V15 pipe-fin radiator adapter for Full_Loop_Cases."""
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
+from Components.ExternalHeatSources import (
+    ExternalHeatFluxBC,
+    OrbitalTableHeatSource,
+    W0_8P12_ORBIT_PERIOD_S,
+    load_csv_flux_table_library,
+)
 from Components.RadiatorPipeWithFin import RadiatorPipeWithFin
 from Materials.Solids.WallMaterial import SS316
 from Solvers.Hydrodynamics.Components import FlowJunction, IncompressibleFluidVolume
 
 from .common_flow_builder import extend_channel_objects, make_channel
+
+
+EXTERNAL_HEAT_CSV = (
+    Path(__file__).resolve().parents[2]
+    / "Components"
+    / "ExternalHeatSources"
+    / "is58p5_w0_8p12_N78_sum.csv"
+)
 
 
 def nak_internal_nu(reynolds: Any, prandtl: Any, _p_d_ratio: float = 1.1) -> np.ndarray:
@@ -37,11 +52,21 @@ class V15PipeFinRadiatorConfig:
     tube_emissivity: float = 0.80
     fin_emissivity: float = 0.80
     tube_area_scale: float = 1.0
-    fin_area_scale: float = 0.35
+    fin_area_scale: float = 1.0
     t_space_k: float = 3.0
     fin_conductivity_w_m_k: float = 348.9
     fin_view_factor: float = 1.0
+    radiation_outer_up_view_factor: float = 1.0
+    radiation_outer_down_view_factor: float = 1.0
+    radiation_inner_up_view_factor: float = 0.0
+    radiation_inner_down_view_factor: float = 0.17
     fin_contact_resistance_m2k_w: float = 0.0
+    external_heat_enabled: bool = False
+    external_heat_scale_factor: float = 1.0
+    external_heat_tube_illumination_factor: float = 0.5
+    external_heat_fin_illumination_factor: float = 1.0
+    external_heat_absorption_efficiency: float = 0.992
+    external_heat_fin_loading_mode: str = 'distributed_fin'
     radiator_header_k_loss: float = 1.0
     radiator_tube_inlet_k_loss: float = 100.0
     radiator_tube_outlet_k_loss: float = 100.0
@@ -50,8 +75,8 @@ class V15PipeFinRadiatorConfig:
     cold_return_branch_area_m2: float = float(np.pi * 0.0138**2)
     cold_return_branch_dh_m: float = 0.0276
     cold_return_branch_n_nodes: int = 1
-    fluid_solid_coupling_scheme: str = "current"
-    solid_ode_method: str = "RK45"
+    fluid_solid_coupling_scheme: str = "local_implicit"
+    solid_ode_method: str = "implicit_euler"
 
     @property
     def tube_flow_area_m2(self) -> float:
@@ -71,6 +96,8 @@ class V15PipeFinRadiatorConfig:
 
 
 def _validate_config(config: V15PipeFinRadiatorConfig) -> None:
+    if config.external_heat_fin_loading_mode not in ('lumped_root_area', 'distributed_fin'):
+        raise ValueError('external_heat_fin_loading_mode must be lumped_root_area or distributed_fin.')
     if int(config.n_tubes) != 78:
         raise ValueError("V15 requires n_tubes=78 for the first full-loop pipe-fin model.")
     if int(config.n_axial) <= 0:
@@ -157,6 +184,10 @@ def _make_radiator_unit(
         initial_temp=float(initial_t),
         fin_conductivity=float(config.fin_conductivity_w_m_k),
         fin_view_factor=float(config.fin_view_factor),
+        radiation_outer_up_view_factor=float(config.radiation_outer_up_view_factor),
+        radiation_outer_down_view_factor=float(config.radiation_outer_down_view_factor),
+        radiation_inner_up_view_factor=float(config.radiation_inner_up_view_factor),
+        radiation_inner_down_view_factor=float(config.radiation_inner_down_view_factor),
         contact_resistance_m2k_w=float(config.fin_contact_resistance_m2k_w),
         coupling_time_scheme=str(config.fluid_solid_coupling_scheme),
         solid_ode_method=str(config.solid_ode_method),
@@ -174,6 +205,11 @@ def attach_v15_pipefin_radiator(build: Dict[str, Any], config: V15PipeFinRadiato
     half_flow = 0.5 * total_flow
     tube_flow = total_flow / float(config.n_tubes)
     cold_branch_flow = total_flow / 3.0
+    external_heat_library = None
+    if config.external_heat_enabled:
+        external_heat_library = load_csv_flux_table_library(str(EXTERNAL_HEAT_CSV), W0_8P12_ORBIT_PERIOD_S)
+        if external_heat_library.available_ids() != tuple(range(int(config.n_tubes))):
+            raise ValueError(f"V15 external heat CSV must contain {config.n_tubes} flux columns: {EXTERNAL_HEAT_CSV}")
 
     _rename_channel(build["radiator_outlet_header"], "RadiatorOuterHeader")
 
@@ -295,6 +331,58 @@ def attach_v15_pipefin_radiator(build: Dict[str, Any], config: V15PipeFinRadiato
             initial_t=initial_t,
             config=config,
         )
+        if external_heat_library is not None:
+            source = OrbitalTableHeatSource(
+                shape=unit.wall.boundaries["right"].shape,
+                table_ids=idx - 1,
+                table_library=external_heat_library,
+                scale_factor=float(config.external_heat_scale_factor),
+                periodic=True,
+            )
+            absorption_efficiency = float(config.external_heat_absorption_efficiency)
+            if not 0.0 <= absorption_efficiency <= 1.0:
+                raise ValueError('external_heat_absorption_efficiency must be within [0, 1]')
+            tube_absorption_area = (
+                unit.tube_bare_area
+                * float(config.external_heat_tube_illumination_factor)
+                * absorption_efficiency
+                * float(config.tube_emissivity)
+            )
+            fin_absorption_area = (
+                unit.fin_strip_width
+                * unit.fin_height
+                * float(config.external_heat_fin_illumination_factor)
+                * absorption_efficiency
+                * float(config.fin_emissivity)
+            )
+            legacy_fin_absorption_area = (
+                fin_absorption_area
+                * unit.fin_area_scale
+                * unit.fin_view_factor
+            )
+            if config.external_heat_fin_loading_mode == 'distributed_fin':
+                absorption_area = tube_absorption_area
+                unit.set_fin_external_heat_source(
+                    source,
+                    illuminated_area_scale=(
+                        float(config.external_heat_fin_illumination_factor)
+                        * absorption_efficiency
+                        * float(config.fin_emissivity)
+                    ),
+                )
+                accounting_fin_area = fin_absorption_area
+            else:
+                absorption_area = tube_absorption_area + legacy_fin_absorption_area
+                accounting_fin_area = legacy_fin_absorption_area
+            external_bc = ExternalHeatFluxBC(source, absorption_area)
+            unit.configure_external_heat_accounting(
+                source,
+                tube_absorption_area,
+                accounting_fin_area,
+            )
+            unit.wall.boundaries["right"].conditions.append(external_bc)
+            unit.external_heat_source = source
+            unit.external_heat_bc = external_bc
         components.append(unit)
         upper_headers.append(upper)
         lower_headers.append(lower)
@@ -419,3 +507,5 @@ def attach_v15_pipefin_radiator(build: Dict[str, Any], config: V15PipeFinRadiato
     build["cold_return_branches"] = cold_return_branches
     build["single_radiator_tube_flow_design_kg_s"] = tube_flow
     build["cold_return_branch_flow_design_kg_s"] = cold_branch_flow
+    build["external_heat_enabled"] = bool(config.external_heat_enabled)
+    build["external_heat_csv"] = str(EXTERNAL_HEAT_CSV) if config.external_heat_enabled else None

@@ -43,8 +43,12 @@ class RadiatorPipeWithFin(BaseComponent):
         fin_conductivity: float = 348.9,
         fin_view_factor: float = 1.0,
         contact_resistance_m2k_w: float = 0.0,
-        coupling_time_scheme: str = "current",
-        solid_ode_method: str = "BDF",
+        coupling_time_scheme: str = "local_implicit",
+        solid_ode_method: str = "implicit_euler",
+        radiation_outer_up_view_factor: float = 1.0,
+        radiation_outer_down_view_factor: float = 1.0,
+        radiation_inner_up_view_factor: float = 0.5,
+        radiation_inner_down_view_factor: float = 0.5,
     ):
         super().__init__(name)
 
@@ -67,7 +71,41 @@ class RadiatorPipeWithFin(BaseComponent):
         self.radiation_background_temperature = np.full(self.n_axial, float(T_space), dtype=float)
         self.fin_conductivity = float(fin_conductivity)
         self.fin_view_factor = float(fin_view_factor)
+        self.radiation_outer_up_view_factor = float(radiation_outer_up_view_factor)
+        self.radiation_outer_down_view_factor = float(radiation_outer_down_view_factor)
+        self.radiation_inner_up_view_factor = float(radiation_inner_up_view_factor)
+        self.radiation_inner_down_view_factor = float(radiation_inner_down_view_factor)
         self.contact_resistance_m2k_w = float(contact_resistance_m2k_w)
+
+        view_factors = (
+            self.radiation_outer_up_view_factor,
+            self.radiation_outer_down_view_factor,
+            self.radiation_inner_up_view_factor,
+            self.radiation_inner_down_view_factor,
+        )
+        if any(factor < 0.0 or factor > 1.0 for factor in view_factors):
+            raise ValueError('radiation face view factors must be within [0, 1]')
+        if self.radiation_inner_up_view_factor + self.radiation_inner_down_view_factor > 1.0:
+            raise ValueError('inner up/down view factors must sum to at most 1')
+        # Outer up/down describe the same exposed face; inner terms are disjoint visible regions.
+        self.radiation_outer_view_factor = 0.5 * (
+            self.radiation_outer_up_view_factor
+            + self.radiation_outer_down_view_factor
+        )
+        self.radiation_inner_view_factor = (
+            self.radiation_inner_up_view_factor
+            + self.radiation_inner_down_view_factor
+        )
+        self.radiation_face_average_factor = 0.5 * (
+            self.radiation_outer_view_factor
+            + self.radiation_inner_view_factor
+        )
+        self.effective_tube_emissivity = (
+            self.tube_emissivity * self.radiation_face_average_factor
+        )
+        self.effective_fin_emissivity = (
+            self.fin_emissivity * self.radiation_face_average_factor
+        )
 
         if self.n_axial <= 0:
             raise ValueError("n_axial must be positive")
@@ -123,7 +161,7 @@ class RadiatorPipeWithFin(BaseComponent):
         self.contact_resistance = np.nan_to_num(self.contact_resistance, nan=0.0, posinf=0.0, neginf=0.0)
 
         self.bc_tube_radiation = self.wall.boundaries["right"].add_dynamic_radiation_condition(
-            emissivity=self.tube_emissivity,
+            emissivity=self.effective_tube_emissivity,
             bare_area_array=self.tube_bare_area,
             T_env=self.T_space,
         )
@@ -144,6 +182,7 @@ class RadiatorPipeWithFin(BaseComponent):
 
         self.last_fin_temperature = np.zeros((self.n_axial, self.n_fin_width), dtype=float)
         self.last_fin_radiation_distribution = np.zeros(self.n_axial, dtype=float)
+        self.last_fin_absorption_distribution = np.zeros(self.n_axial, dtype=float)
         self.last_fin_net_from_root_distribution = np.zeros(self.n_axial, dtype=float)
         self.last_fin_conductance_distribution = np.full(self.n_axial, 1.0e-15, dtype=float)
         self.last_fin_effective_temperature_distribution = np.full(self.n_axial, self.T_space, dtype=float)
@@ -155,6 +194,11 @@ class RadiatorPipeWithFin(BaseComponent):
         self._has_valid_fin_temperature = False
         self._fin_scratch_shape = None
         self._fin_scratch = {}
+        self.fin_external_heat_source = None
+        self.fin_external_area_scale = 1.0
+        self.external_heat_accounting_source = None
+        self.wall_external_absorption_area = np.zeros(self.n_axial, dtype=float)
+        self.fin_external_absorption_area = np.zeros(self.n_axial, dtype=float)
 
         self.wall.initialize_state()
 
@@ -180,6 +224,51 @@ class RadiatorPipeWithFin(BaseComponent):
 
     def restore_default_radiation_background(self):
         self.set_radiation_background_temperature(self._default_radiation_background_k)
+
+    def set_fin_external_heat_source(self, heat_source, illuminated_area_scale: float = 1.0):
+        if heat_source is None:
+            self.fin_external_heat_source = None
+            self.fin_external_area_scale = 1.0
+            self.last_fin_absorption_distribution.fill(0.0)
+            return
+        if heat_source.shape != self.wall.boundaries['right'].shape:
+            raise ValueError('Fin external heat source shape does not match wall boundary.')
+        self.fin_external_heat_source = heat_source
+        self.fin_external_area_scale = float(illuminated_area_scale)
+
+    def configure_external_heat_accounting(
+        self, heat_source, wall_area_array, fin_area_array=None
+    ):
+        self.external_heat_accounting_source = heat_source
+        if heat_source is None:
+            self.wall_external_absorption_area.fill(0.0)
+            self.fin_external_absorption_area.fill(0.0)
+            return
+        shape = self.wall.boundaries['right'].shape
+        if heat_source.shape != shape:
+            raise ValueError('Accounting heat source shape does not match wall boundary.')
+        self.wall_external_absorption_area[:] = np.broadcast_to(
+            np.asarray(wall_area_array, dtype=float), shape
+        )
+        fin_area = 0.0 if fin_area_array is None else fin_area_array
+        self.fin_external_absorption_area[:] = np.broadcast_to(
+            np.asarray(fin_area, dtype=float), shape
+        )
+
+    def get_external_heat_absorption_distribution(self, current_time: float):
+        if self.external_heat_accounting_source is None:
+            zero = np.zeros(self.n_axial, dtype=float)
+            return zero.copy(), zero.copy(), zero.copy()
+        q_flux = np.broadcast_to(
+            np.asarray(
+                self.external_heat_accounting_source.get_heat_flux(current_time),
+                dtype=float,
+            ),
+            (self.n_axial,),
+        )
+        wall = q_flux * self.wall_external_absorption_area
+        fin = q_flux * self.fin_external_absorption_area
+        return wall, fin, wall + fin
 
     def get_radiation_surface_temperature(self):
         return np.asarray(self.wall.boundaries["right"].T_surface, dtype=float).copy()
@@ -242,11 +331,15 @@ class RadiatorPipeWithFin(BaseComponent):
             & (self.fin_radiating_area > 0.0)
         )
 
-    def _solve_fin_quasi_steady(self, T_root: np.ndarray):
+    def _solve_fin_quasi_steady(
+        self, T_root: np.ndarray, q_fin_abs_density: np.ndarray
+    ):
         T_root = np.asarray(T_root, dtype=float)
         na = len(T_root)
         nw = self.n_fin_width
+        # 将根节点温度复制为初始猜测值，形状为 (轴向节点数, 翅片宽度分段数)
         root_initial = np.repeat(T_root[:, np.newaxis], nw, axis=1)
+        # 检查是否可以使用上一步的温度场作为热启动（warm start）
         warm_start_valid = (
             self._has_valid_fin_temperature
             and getattr(self, "last_fin_temperature", None) is not None
@@ -261,12 +354,22 @@ class RadiatorPipeWithFin(BaseComponent):
         else:
             T = root_initial
         Q_fin = np.zeros_like(T_root)
+        # 计算每个翅片的吸收热流
+        # self.fin_strip_width = 2.0 * self.node_length: 翅片宽度（沿管道轴向方向）控制体长度 * 2 （因为考虑管道左右两边都有翅片）
+        # self.fin_height: 翅片高度
+        # self.fin_external_area_scale: 翅片外部面积缩放因子 = 1
+        Q_abs = (
+            np.asarray(q_fin_abs_density, dtype=float)
+            * self.fin_strip_width
+            * self.fin_height
+            * self.fin_external_area_scale
+        )
         active = self._active_fin_mask(T_root)
         if not np.any(active):
             self.last_fin_iteration_count = 0
             self.last_fin_max_delta = 0.0
             self.last_fin_used_warm_start = bool(warm_start_valid)
-            return T, Q_fin
+            return T, Q_fin, Q_abs, Q_fin - Q_abs
 
         T_active = T[active].copy()
         T_root_active = T_root[active]
@@ -278,6 +381,15 @@ class RadiatorPipeWithFin(BaseComponent):
         P_rad = 2.0 * width_active * area_scale_active
         G = self.fin_conductivity * Ac / np.maximum(dx, 1.0e-30)
         G_base = 2.0 * G
+        # 计算轴向节点上的吸收热流
+        # width_active: 翅片宽度（沿管道轴向方向）控制体长度 *2 （因为考虑管道左右两边都有翅片）
+        # dx: 翅片高度方向单个计算节点的长度
+        q_abs_segment = (
+            np.asarray(q_fin_abs_density, dtype=float)[active]
+            * width_active
+            * dx
+            * self.fin_external_area_scale
+        )
 
         scratch = self._get_fin_scratch(len(T_root_active), nw)
         a = scratch["a"]
@@ -295,7 +407,7 @@ class RadiatorPipeWithFin(BaseComponent):
         max_delta = 0.0
         for iteration in range(max_iter):
             background_active = self.radiation_background_temperature[active]
-            rad_term[:, :] = self.fin_emissivity * self.sigma * (
+            rad_term[:, :] = self.effective_fin_emissivity * self.sigma * (
                 T_active ** 2 + background_active[:, np.newaxis] ** 2
             ) * (T_active + background_active[:, np.newaxis])
             rad_term *= P_rad[:, np.newaxis] * dx[:, np.newaxis]
@@ -307,17 +419,26 @@ class RadiatorPipeWithFin(BaseComponent):
 
             b[:, 0] = G_base + G + rad_term[:, 0]
             c[:, 0] = -G
-            d[:, 0] = G_base * T_root_active + rad_term[:, 0] * background_active
+            d[:, 0] = (
+                G_base * T_root_active
+                + rad_term[:, 0] * background_active
+                + q_abs_segment
+            )
 
             if nw > 1:
                 a[:, 1:-1] = -G[:, np.newaxis]
                 b[:, 1:-1] = 2.0 * G[:, np.newaxis] + rad_term[:, 1:-1]
                 c[:, 1:-1] = -G[:, np.newaxis]
-                d[:, 1:-1] = rad_term[:, 1:-1] * background_active[:, np.newaxis]
+                d[:, 1:-1] = (
+                    rad_term[:, 1:-1] * background_active[:, np.newaxis]
+                    + q_abs_segment[:, np.newaxis]
+                )
 
                 a[:, -1] = -G
                 b[:, -1] = G + rad_term[:, -1]
-                d[:, -1] = rad_term[:, -1] * background_active
+                d[:, -1] = (
+                    rad_term[:, -1] * background_active + q_abs_segment
+                )
 
             self._solve_tridiagonal_inplace(a, b, c, d, c_prime, d_prime, T_new)
             err = float(np.max(np.abs(T_new - T_active)))
@@ -329,7 +450,7 @@ class RadiatorPipeWithFin(BaseComponent):
 
         T[active] = T_active
         Q_fin[active] = np.sum(
-            self.fin_emissivity
+            self.effective_fin_emissivity
             * self.sigma
             * P_rad[:, np.newaxis]
             * dx[:, np.newaxis]
@@ -340,7 +461,7 @@ class RadiatorPipeWithFin(BaseComponent):
         self.last_fin_max_delta = float(max_delta)
         self.last_fin_used_warm_start = bool(warm_start_valid)
         self._has_valid_fin_temperature = True
-        return T, Q_fin
+        return T, Q_fin, Q_abs, Q_fin - Q_abs
 
     def _compute_fin_tangent_conductance(self, T_root: np.ndarray, T_fin: np.ndarray, active_mask: np.ndarray):
         T_root = np.asarray(T_root, dtype=float)
@@ -379,7 +500,7 @@ class RadiatorPipeWithFin(BaseComponent):
         d.fill(0.0)
         rad_deriv[:, :] = (
             4.0
-            * self.fin_emissivity
+            * self.effective_fin_emissivity
             * self.sigma
             * P_rad[:, np.newaxis]
             * dx[:, np.newaxis]
@@ -404,7 +525,18 @@ class RadiatorPipeWithFin(BaseComponent):
     def pre_step(self, dt: float, current_time: float):
         T_root, _ = self.wall.boundaries["right"].get_coupling_surface_snapshot()
         T_root = np.asarray(T_root, dtype=float)
-        T_fin, Q_fin = self._solve_fin_quasi_steady(T_root)
+        q_fin_abs_density = np.zeros_like(T_root)
+        if self.fin_external_heat_source is not None:
+            q_fin_abs_density = np.broadcast_to(
+                np.asarray(
+                    self.fin_external_heat_source.get_heat_flux(current_time),
+                    dtype=float,
+                ),
+                T_root.shape,
+            )
+        T_fin, Q_fin, Q_fin_abs, Q_fin_net = self._solve_fin_quasi_steady(
+            T_root, q_fin_abs_density
+        )
         active = self._active_fin_mask(T_root)
         lambda_raw = self._compute_fin_tangent_conductance(T_root, T_fin, active)
 
@@ -417,7 +549,7 @@ class RadiatorPipeWithFin(BaseComponent):
         P_rad = 2.0 * self.fin_strip_width * self.fin_area_scale * self.fin_view_factor
         A_seg = P_rad[:, np.newaxis] * dx_arr[:, np.newaxis]
         lambda_fallback = np.sum(
-            self.fin_emissivity
+            self.effective_fin_emissivity
             * self.sigma
             * A_seg
             * (T_seg_safe + T_space_safe[:, np.newaxis])
@@ -435,18 +567,19 @@ class RadiatorPipeWithFin(BaseComponent):
 
         R_fin = self.contact_resistance + 1.0 / lambda_fin
         R_fin = np.nan_to_num(R_fin, nan=1.0e15, posinf=1.0e15, neginf=1.0e15)
-        T_fin_eff = T_root - Q_fin * R_fin
+        T_fin_eff = T_root - Q_fin_net * R_fin
         T_fin_eff = np.nan_to_num(T_fin_eff, nan=float(np.mean(T_space_safe)), posinf=1.0e12, neginf=-1.0e12)
         self.bc_fin.update_params(T_ext=T_fin_eff, R_ext=R_fin)
 
         self.last_fin_temperature = np.array(T_fin, copy=True)
         self.last_fin_radiation_distribution = np.array(Q_fin, copy=True)
-        self.last_fin_net_from_root_distribution = np.array(Q_fin, copy=True)
+        self.last_fin_absorption_distribution = np.array(Q_fin_abs, copy=True)
+        self.last_fin_net_from_root_distribution = np.array(Q_fin_net, copy=True)
         self.last_fin_conductance_distribution = np.array(lambda_fin, copy=True)
         self.last_fin_effective_temperature_distribution = np.array(T_fin_eff, copy=True)
         self.last_fin_equivalent_resistance_distribution = np.array(R_fin, copy=True)
         self.last_tube_radiation_distribution = (
-            self.tube_emissivity
+            self.effective_tube_emissivity
             * self.sigma
             * self.tube_bare_area
             * (
@@ -464,7 +597,7 @@ class RadiatorPipeWithFin(BaseComponent):
     def get_heat_exchange_breakdown(self) -> dict:
         T_wall = np.asarray(self.wall.boundaries["right"].T_surface, dtype=float)
         tube_radiation = (
-            self.tube_emissivity
+            self.effective_tube_emissivity
             * self.sigma
             * self.tube_bare_area
             * (T_wall ** 4 - self.radiation_background_temperature ** 4)
@@ -472,6 +605,7 @@ class RadiatorPipeWithFin(BaseComponent):
         return {
             "bare_radiation": tube_radiation,
             "fin_radiation": np.array(self.last_fin_radiation_distribution, copy=True),
+            "fin_absorption": np.array(self.last_fin_absorption_distribution, copy=True),
             "fin_net_from_root": np.array(self.last_fin_net_from_root_distribution, copy=True),
             "fin_conductance": np.array(self.last_fin_conductance_distribution, copy=True),
             "fin_effective_temperature": np.array(self.last_fin_effective_temperature_distribution, copy=True),

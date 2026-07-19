@@ -75,6 +75,13 @@ class HeatConductionImplicitEulerTests(unittest.TestCase):
                 return False
         return True
 
+    def test_generic_solid_defaults_to_implicit_euler(self):
+        solid = HeatConduction1D(
+            mesh=Mesh1D(total_dim=0.1, n_volumes=2),
+            material=ConstantSolid(),
+        )
+        self.assertEqual(solid.ode_method, "implicit_euler")
+
     def test_set_ode_method_accepts_implicit_and_keeps_existing(self):
         solid = _build_test_solid()
         for method in ("RK45", "RK23", "DOP853", "Radau", "BDF", "LSODA"):

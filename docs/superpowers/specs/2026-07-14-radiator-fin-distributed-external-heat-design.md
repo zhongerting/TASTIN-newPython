@@ -25,9 +25,9 @@ Q_fin_absorption = 0
 
 One `ExternalHeatFluxBC` applies the combined absorbed power to the tube-wall outer boundary.
 
-### `distributed_fin_absorption`
+### `distributed_fin`
 
-Split the same total illuminated area:
+Use separate physical application paths:
 
 ```text
 Q_wall_boundary = q_external * A_tube_projected
@@ -47,6 +47,8 @@ A_fin_projected = fin_strip_width * fin_height
 Q_fin_absorption = q_external * A_fin_projected
 ```
 
+fin_area_scale and fin_view_factor remain radiation-area corrections and do not reduce the geometric illuminated area in this mode. The legacy mode is intentionally unchanged, so the two modes are not required to prescribe equal total power.
+
 For one fin-height cell:
 
 ```text
@@ -60,7 +62,7 @@ Q_abs_cell = q_external * fin_strip_width * dx
 Q_fin_net_from_root = Q_fin_radiation - Q_fin_absorption
 ```
 
-This matches the physical and numerical treatment already used by `HPwithFin.distributed_fin_absorption`.
+This matches the physical and numerical treatment already used by the HPwithFin direct fin-absorption path.
 
 ## API
 
@@ -99,7 +101,7 @@ Repeated source evaluation is allowed, but only the wall BC and fin equation app
    - fin absorption equals `q_external * single-sided projected fin area`;
    - axial repetition does not multiply total power beyond summed segment area;
    - `Q_fin_net_from_root = Q_fin_radiation - Q_fin_absorption`.
-4. Build two reduced V15 systems, one per mode, and verify equal prescribed total external power at the same table time.
+4. Verify the legacy mode retains its previous area and the distributed mode uses the geometric single-sided fin area.
 5. Run a short temporary V15 smoke in distributed mode and require finite temperatures and finite heat diagnostics.
 
 ## Documentation

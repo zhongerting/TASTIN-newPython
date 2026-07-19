@@ -140,7 +140,7 @@ class SystemManager:
 
         logger.info("  >> [Step 2] Synchronizing Couplers...")
         self._prepare_fluid_sources_for_coupling()
-        self._run_couplers()
+        self._run_couplers(dt=dt_init)
 
         logger.info("System Initialization Completed Successfully.\n")
 
@@ -556,9 +556,13 @@ class SystemManager:
         max_dt: float = 0.5,
         safety_factor: float = 0.8,
         use_last_step_diagnostics: bool = True,
+        respect_fluid_cfl: bool = True,
     ) -> float:
-        raw_dt_fluid = self.fluid_solver.get_max_stable_dt(max_limit=max_dt)
-        dt_fluid = raw_dt_fluid * safety_factor
+        if respect_fluid_cfl:
+            raw_dt_fluid = self.fluid_solver.get_max_stable_dt(max_limit=max_dt)
+            dt_fluid = raw_dt_fluid * safety_factor
+        else:
+            dt_fluid = max_dt
 
         dt_coupler = max_dt
         for coupler in self.couplers:

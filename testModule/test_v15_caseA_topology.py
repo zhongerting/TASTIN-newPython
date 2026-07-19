@@ -2,6 +2,9 @@ import ast
 import unittest
 from pathlib import Path
 
+import numpy as np
+
+from Components.ExternalHeatSources import ExternalHeatFluxBC
 from testModule.Full_Loop_Cases import (
     FullLoopCoreConfig,
     FullLoopFlowConfig,
@@ -55,6 +58,15 @@ class V15CaseATopologyTests(unittest.TestCase):
         self.assertEqual(len(build["radiator_tube_channels"]), 78)
         self.assertEqual(len(build["radiator_units"]), 78)
         self.assertEqual(len(build["cold_return_branches"]), 3)
+        self.assertFalse(build["external_heat_enabled"])
+
+        for unit in build['radiator_units']:
+            external_bcs = [
+                condition
+                for condition in unit.wall.boundaries['right'].conditions
+                if isinstance(condition, ExternalHeatFluxBC)
+            ]
+            self.assertEqual(len(external_bcs), 0)
 
         for idx in (1, 40, 78):
             self.assertIn(f"RadiatorUpperHeader_{idx:02d}_Vol_01", volume_names)
@@ -104,6 +116,92 @@ class V15CaseATopologyTests(unittest.TestCase):
         self.assertEqual(diagnostics["radiator_tube_count"], 78)
         self.assertEqual(diagnostics["cold_return_branch_count"], 3)
         self.assertAlmostEqual(diagnostics["pump_total_head_pa"], 6466.56)
+
+    def test_external_heat_loading_defaults_to_distributed_single_sided_area(self):
+        config = V15PipeFinRadiatorConfig()
+        self.assertFalse(config.external_heat_enabled)
+        self.assertEqual(config.external_heat_fin_loading_mode, 'distributed_fin')
+        self.assertEqual(config.fin_area_scale, 1.0)
+        self.assertEqual(config.radiation_outer_up_view_factor, 1.0)
+        self.assertEqual(config.radiation_outer_down_view_factor, 1.0)
+        self.assertEqual(config.radiation_inner_up_view_factor, 0.0)
+        self.assertEqual(config.radiation_inner_down_view_factor, 0.17)
+        self.assertEqual(config.external_heat_absorption_efficiency, 0.992)
+
+    def test_distributed_fin_mode_uses_single_sided_projected_area(self):
+        config = V15PipeFinRadiatorConfig(
+            external_heat_enabled=True,
+            external_heat_fin_loading_mode='distributed_fin'
+        )
+        build = build_v15_case_a_system(
+            core_config=FullLoopCoreConfig(main_tec_enabled=False),
+            flow_config=FullLoopFlowConfig(total_flow_kg_s=1.3),
+            pump_config=FullLoopPumpConfig(pump_total_head_pa=6466.56),
+            radiator_config=config,
+        )
+        unit = build['radiator_units'][0]
+        self.assertAlmostEqual(unit.radiation_outer_view_factor, 1.0)
+        self.assertAlmostEqual(unit.radiation_inner_view_factor, 0.17)
+        self.assertAlmostEqual(unit.radiation_face_average_factor, 0.585)
+        self.assertAlmostEqual(unit.effective_tube_emissivity, 0.468)
+        self.assertAlmostEqual(unit.effective_fin_emissivity, 0.468)
+        tube_area = (
+            unit.tube_bare_area
+            * config.external_heat_tube_illumination_factor
+            * config.external_heat_absorption_efficiency
+            * config.tube_emissivity
+        )
+        fin_area = (
+            unit.fin_strip_width * unit.fin_height
+            * config.external_heat_fin_illumination_factor
+            * config.external_heat_absorption_efficiency
+            * config.fin_emissivity
+        )
+        np.testing.assert_allclose(unit.external_heat_bc.area_array, tube_area)
+        wall, fin, total = unit.get_external_heat_absorption_distribution(1.0)
+        q_flux = np.asarray(unit.external_heat_source.get_heat_flux(1.0))
+        np.testing.assert_allclose(wall, q_flux * tube_area)
+        np.testing.assert_allclose(fin, q_flux * fin_area)
+        np.testing.assert_allclose(total, wall + fin)
+        unit.pre_step(0.1, 1.0)
+        first_absorption = unit.last_fin_absorption_distribution.copy()
+        np.testing.assert_allclose(first_absorption, q_flux * fin_area)
+        np.testing.assert_allclose(
+            unit.last_fin_net_from_root_distribution,
+            unit.last_fin_radiation_distribution - first_absorption,
+        )
+        breakdown = unit.get_heat_exchange_breakdown()
+        np.testing.assert_allclose(
+            breakdown['gross_rejection'],
+            breakdown['bare_radiation'] + breakdown['fin_radiation'],
+        )
+        np.testing.assert_allclose(
+            breakdown['gross_rejection'] - total,
+            breakdown['bare_radiation'] - wall
+            + breakdown['fin_radiation'] - fin,
+        )
+        dx = unit.fin_height / unit.n_fin_width
+        root_conductance = (
+            2.0
+            * unit.fin_conductivity
+            * unit.fin_strip_width
+            * unit.fin_thickness
+            / dx
+        )
+        root_flow = root_conductance * (
+            np.asarray(unit.wall.boundaries['right'].T_surface)
+            - unit.last_fin_temperature[:, 0]
+        )
+        np.testing.assert_allclose(
+            root_flow,
+            unit.last_fin_net_from_root_distribution,
+            atol=2.0e-6,
+        )
+        unit.pre_step(0.1, 1.0)
+        np.testing.assert_allclose(
+            unit.last_fin_absorption_distribution,
+            first_absorption,
+        )
 
     def test_full_loop_cases_do_not_import_legacy_case_builders(self):
         root = Path(__file__).resolve().parent / "Full_Loop_Cases"

@@ -66,7 +66,10 @@ class RadiatorThermalShield(BaseComponent):
         self.outer_emissivity = max(float(outer_emissivity), 1.0e-12)
         self.conductivity_w_m_k = max(float(conductivity_w_m_k), 1.0e-12)
         self.thickness_m = max(float(thickness_m), 1.0e-12)
-        self.solar_heat_flux_w_m2 = float(solar_heat_flux_w_m2)
+        solar_flux = np.asarray(solar_heat_flux_w_m2, dtype=float)
+        if solar_flux.ndim > 1 or (solar_flux.ndim == 1 and solar_flux.size not in (1, len(self.radiator_units))):
+            raise ValueError("solar_heat_flux_w_m2 must be scalar or match radiator_units.")
+        self.solar_heat_flux_w_m2 = solar_flux
         self.relaxation = float(np.clip(relaxation, 0.0, 1.0))
         self.model = str(model)
         if self.model not in {self.MODEL_SEGMENT_BALANCE, self.MODEL_FORTRAN_SHIELD2}:
@@ -145,6 +148,7 @@ class RadiatorThermalShield(BaseComponent):
         tube_area = np.asarray(getattr(unit, "tube_bare_area", np.ones(shape)), dtype=float)
         fin_area = np.asarray(getattr(unit, "fin_radiating_area", np.zeros(shape)), dtype=float)
         area = tube_area + fin_area
+        area *= float(getattr(unit, "radiation_area_multiplier", 1.0))
         if area.shape != tuple(shape):
             area = np.broadcast_to(area, shape)
         area = np.nan_to_num(area, nan=0.0, posinf=0.0, neginf=0.0)
@@ -307,7 +311,11 @@ class RadiatorThermalShield(BaseComponent):
             "residual_k": residual_k,
         }
 
-    def _solve_segment_balance(self, radiator_temperature: float, area: float) -> tuple[float, float, float, float, float, float, bool]:
+    def _solve_segment_balance(
+            self,
+            radiator_temperature: float,
+            area: float,
+            solar_heat_flux_w_m2: float) -> tuple[float, float, float, float, float, float, bool]:
         area = float(area)
         background = max(self.background_temperature_k, 1.0e-3)
         radiator_temperature = max(float(radiator_temperature), 1.0e-3)
@@ -315,7 +323,7 @@ class RadiatorThermalShield(BaseComponent):
             return background, background, background, 0.0, 0.0, 0.0, True
 
         view = self.shield_view_factor
-        q_solar = self.solar_heat_flux_w_m2 * area
+        q_solar = float(solar_heat_flux_w_m2) * area
         if view <= 0.0:
             outer_t4 = background ** 4 + q_solar / (self.outer_emissivity * self.sigma * area)
             outer_temperature = np.power(max(outer_t4, 1.0e-12), 0.25)
@@ -374,7 +382,11 @@ class RadiatorThermalShield(BaseComponent):
         effective_background = np.power(max(effective_t4, 1.0e-12), 0.25)
         return inner_temperature, outer_temperature, effective_background, q_in, q_solar, q_out, solved
 
-    def _compute_effective_background(self, surface_temperature: np.ndarray, area: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    def _compute_effective_background(
+            self,
+            surface_temperature: np.ndarray,
+            area: np.ndarray,
+            solar_heat_flux_w_m2: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
         surface = np.maximum(np.asarray(surface_temperature, dtype=float), 1.0e-3)
         area = np.maximum(np.asarray(area, dtype=float), 0.0)
         inner = np.empty_like(surface)
@@ -393,7 +405,7 @@ class RadiatorThermalShield(BaseComponent):
                 q_solar[index],
                 q_out[index],
                 solved,
-            ) = self._solve_segment_balance(surface[index], area[index])
+            ) = self._solve_segment_balance(surface[index], area[index], solar_heat_flux_w_m2)
             if not solved:
                 failures += 1
 
@@ -423,7 +435,8 @@ class RadiatorThermalShield(BaseComponent):
         previous_backgrounds = list(self.last_background_by_unit)
         self.last_background_by_unit = previous_backgrounds
 
-        for unit in self.radiator_units:
+        solar_flux = np.broadcast_to(self.solar_heat_flux_w_m2, (len(self.radiator_units),))
+        for unit_index, unit in enumerate(self.radiator_units):
             surface = self._surface_temperature(unit)
             area = self._unit_radiation_area(unit, surface.shape)
             if active:
@@ -435,7 +448,7 @@ class RadiatorThermalShield(BaseComponent):
                     q_solar_distribution,
                     q_out_distribution,
                     failures,
-                ) = self._compute_effective_background(surface, area)
+                ) = self._compute_effective_background(surface, area, float(solar_flux[unit_index]))
                 solver_failures += failures
             else:
                 effective_background = np.full_like(surface, max(self.background_temperature_k, 1.0e-3))

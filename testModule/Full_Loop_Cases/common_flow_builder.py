@@ -172,14 +172,14 @@ def build_common_flow_objects(
         hydraulic_diam=float(flow_config.radiator_header_dh_m),
     )
     pump_single_head = 0.5 * float(pump_config.pump_total_head_pa)
-    pump_cls = FlowControlledPumpJunction if bool(pump_config.pump_flow_control) else PumpJunction
+    pump_a_cls = FlowControlledPumpJunction if bool(pump_config.pump_flow_control) else PumpJunction
     pump_target_flow = (
         float(flow_config.total_flow_kg_s)
         if pump_config.target_flow_kg_s is None
         else float(pump_config.target_flow_kg_s)
     )
     pump_kwargs = {"target_flow_kg_s": pump_target_flow} if bool(pump_config.pump_flow_control) else {}
-    pump_a = pump_cls(
+    pump_a = pump_a_cls(
         name="J_PumpA",
         from_vol=radiator_outlet_header.volumes[-1],
         to_vol=pump_mid,
@@ -188,14 +188,13 @@ def build_common_flow_objects(
         delta_p=pump_single_head,
         **pump_kwargs,
     )
-    pump_b = pump_cls(
+    pump_b = PumpJunction(
         name="J_PumpB",
         from_vol=pump_mid,
         to_vol=pump_outlet,
         flow_area=pump_area,
         k_loss=float(flow_config.connector_k_loss),
         delta_p=pump_single_head,
-        **pump_kwargs,
     )
     j_pump_to_core_inlet_segment = None
     j_core_inlet_segment_to_core = None
@@ -238,7 +237,6 @@ def build_common_flow_objects(
     _set_initial_flow(junctions, float(flow_config.total_flow_kg_s))
     if bool(pump_config.pump_flow_control):
         pump_a.set_flow_rate(pump_target_flow)
-        pump_b.set_flow_rate(pump_target_flow)
 
     return {
         "volumes": volumes,

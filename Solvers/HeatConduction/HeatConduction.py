@@ -29,7 +29,7 @@ class BaseHeatConduction(ABC):
         self.mesh = mesh
         self.material = material
         self.name = name
-        self.ode_method = "BDF"
+        self.ode_method = "implicit_euler"
         self.theta_implicit_value = 1.0
         self.max_implicit_property_iterations = 2
         self.implicit_property_tol = 1.0e-3

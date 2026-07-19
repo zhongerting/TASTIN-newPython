@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -427,6 +428,12 @@ def make_manager(fluid=None):
 
 
 class SystemManagerLifecycleTests(unittest.TestCase):
+    def test_initialize_passes_dt_init_to_couplers(self):
+        manager = SystemManager(FakeFluid())
+        with patch.object(manager, "_run_couplers") as run_couplers:
+            manager.initialize_system(dt_init=0.25)
+        run_couplers.assert_called_once_with(dt=0.25)
+
     def test_persistent_and_pre_step_fluid_sources_survive_clear_without_accumulating(self):
         vol = FakeVolume(temperature=300.0)
         fluid = FakeFluid([vol])
@@ -688,7 +695,7 @@ class SystemManagerLifecycleTests(unittest.TestCase):
 
         self.assertAlmostEqual(dt, 1.0e-6)
 
-    def test_compute_adaptive_dt_respects_local_implicit_coupler_time_scale(self):
+    def test_compute_adaptive_dt_does_not_limit_local_implicit_coupler(self):
         fluid = FakeFluidSolidChannel()
         boundary = FakeFluidSolidBoundary([400.0])
         coupler = FluidSolidCouple(
@@ -704,19 +711,21 @@ class SystemManagerLifecycleTests(unittest.TestCase):
         manager = make_manager(FakeFluid(stable_dt=1.0))
         manager.add_coupler(coupler)
 
-        lambda_val = coupler._last_lambda[0]
-        C_fluid = coupler._fluid_node_capacitance(
-            fluid.temperature_vector,
-            fluid.pressure_vector,
-            fluid.density_vector,
-        )[0]
-        C_eff = 5.0 * C_fluid / (5.0 + C_fluid)
-        expected = 0.8 * C_eff / lambda_val
-
         dt = manager.compute_adaptive_dt(min_dt=1.0e-4, max_dt=1.0, safety_factor=0.8)
 
-        self.assertLess(expected, 1.0)
-        self.assertAlmostEqual(dt, expected)
+        self.assertAlmostEqual(dt, 0.8)
+
+    def test_compute_adaptive_dt_can_skip_fluid_cfl_for_implicit_enthalpy(self):
+        manager = make_manager(FakeFluid(stable_dt=1.0e-3))
+
+        dt = manager.compute_adaptive_dt(
+            min_dt=1.0e-4,
+            max_dt=0.1,
+            safety_factor=0.8,
+            respect_fluid_cfl=False,
+        )
+
+        self.assertAlmostEqual(dt, 0.1)
     def test_compute_adaptive_dt_shrinks_after_nonconverged_step_diagnostics(self):
         manager = make_manager(FakeFluid(stable_dt=1.0))
         manager.last_step_diagnostics = {

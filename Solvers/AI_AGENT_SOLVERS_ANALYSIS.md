@@ -164,7 +164,7 @@ manager.step(dt=0.1, inner_iter=5, convergence_tol=1.0e-3)
 
 ## 9. 2026-06-15 local implicit fluid-solid coupling
 
-`FluidSolidCouple` has an opt-in `coupling_time_scheme="local_implicit"` mode. The default remains `"current"`, so existing builders, tests, and restart workflows keep their previous Robin-boundary plus fluid semi-implicit-source behavior.
+`FluidSolidCouple` now defaults to `coupling_time_scheme="local_implicit"` when solid node capacitance is available; capacitance-free compatibility objects retain `current`. The previous behavior remains available through explicit `"current"` mode.
 
 When local implicit mode is enabled, `SystemManager.step(dt, ...)` passes `dt` into `FluidSolidCouple.execute(...)`. The coupler solves the local two-capacitance heat exchange analytically for each interface node, applies `q_to_solid = -q_to_fluid` through a solid-side `FluxBC`, and adds `q_to_fluid` to the fluid channel with zero implicit coefficient. As of 2026-06-30, this no longer removes the fluid-solid physical time-scale limit from adaptive stepping: `FluidSolidCouple.get_max_stable_dt()` still returns `safety_factor * min(C_eff / lambda)` after the first `execute()`, even for `local_implicit`, to keep thin-wall fluid-solid exchange resolved.
 
@@ -221,4 +221,4 @@ C_eff = C_solid * C_fluid / (C_solid + C_fluid)
 dt_coupler = safety_factor * min(C_eff / lambda)
 ```
 
-This keeps `implicit_euler` solid solves in the `SystemManager.compute_adaptive_dt()` loop without relying only on user `max_dt`. It is intentionally conservative for thin radiator walls, where a large global step can cross the wall/fluid exchange time scale even if the local implicit update remains numerically stable. Coupler diagnostics now include `coupling_tau_min_s`, `coupling_dt_limit_s`, and `dt_over_coupling_tau_max` for local implicit exchange.
+As of 2026-07-14, `local_implicit` no longer clamps the global step by the explicit exchange time scale. Its backward-Euler two-capacitance kernel is L-stable and energy-conservative; diagnostics still report `coupling_tau_min_s`, `coupling_dt_limit_s`, and `dt_over_coupling_tau_max` for accuracy assessment. `SystemManager.compute_adaptive_dt(..., respect_fluid_cfl=False)` is available only for callers that use and have validated the fully implicit enthalpy path.

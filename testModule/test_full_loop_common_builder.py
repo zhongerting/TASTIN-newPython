@@ -120,9 +120,8 @@ class FullLoopCommonBuilderTest(unittest.TestCase):
         )
 
         self.assertTrue(hasattr(build["pump_a"], "target_W"))
-        self.assertTrue(hasattr(build["pump_b"], "target_W"))
+        self.assertFalse(hasattr(build["pump_b"], "target_W"))
         self.assertAlmostEqual(build["pump_a"].target_W, 1.15)
-        self.assertAlmostEqual(build["pump_b"].target_W, 1.15)
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,8 +22,10 @@ import numpy as np
 from .embedded_flux_tables import (
     FORTRAN_ORBITAL_HEAT_TABLE_LIBRARY,
     W0_8P12_ORBITAL_HEAT_MATRIX_LIBRARY,
+    W0_8P12_ORBIT_PERIOD_S,
     EmbeddedFluxMatrixLibrary,
     EmbeddedFluxTableLibrary,
+    load_csv_flux_table_library,
 )
 
 

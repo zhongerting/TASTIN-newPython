@@ -74,6 +74,17 @@ class _DummyFluid:
 
 
 class LocalImplicitHeatExchangeTests(unittest.TestCase):
+    def test_coupler_defaults_to_local_implicit(self):
+        coupler = FluidSolidCouple(
+            name="default-coupler",
+            fluid=_DummyFluid(n_nodes=3),
+            solid_boundary_region=_DummyBoundaryRegion(n_nodes=3),
+            heated_perimeter=2.0,
+            correlation_func=lambda Re, Pr, ratio: np.full_like(np.asarray(Re), 25.0),
+            solid_node_capacitance=np.full(3, 5.0, dtype=float),
+        )
+        self.assertEqual(coupler.coupling_time_scheme, "local_implicit")
+
     def test_wall_hotter_reduces_delta_without_sign_reversal(self):
         q_to_fluid, delta_new, c_eff = FluidSolidCouple.compute_local_implicit_exchange(
             delta_old=np.array([100.0]),
@@ -171,7 +182,7 @@ class LocalImplicitHeatExchangeTests(unittest.TestCase):
         self.assertAlmostEqual(diagnostics["coupling_dt_limit_s"], diagnostics["coupling_tau_min_s"])
         self.assertAlmostEqual(diagnostics["dt_over_coupling_tau_max"], diagnostics["local_implicit_dt_over_tau_max"])
 
-    def test_local_implicit_stable_dt_uses_coupling_time_scale(self):
+    def test_local_implicit_stable_dt_does_not_limit_backward_euler_exchange(self):
         fluid = _DummyFluid(n_nodes=3)
         boundary = _DummyBoundaryRegion(n_nodes=3)
 
@@ -191,19 +202,9 @@ class LocalImplicitHeatExchangeTests(unittest.TestCase):
 
         coupler.execute(dt=0.2)
 
-        lambda_vals = coupler._last_lambda
-        C_fluid = coupler._fluid_node_capacitance(
-            fluid.temperature_vector,
-            fluid.pressure_vector,
-            fluid.density_vector,
-        )
-        C_eff = (solid_capacitance * C_fluid) / (solid_capacitance + C_fluid)
-        expected = 0.8 * float(np.min(C_eff / lambda_vals))
-
-        self.assertLess(expected, 10.0)
         self.assertAlmostEqual(
             coupler.get_max_stable_dt(safety_factor=0.8, max_limit=10.0),
-            expected,
+            10.0,
         )
 
     def test_local_implicit_stable_dt_keeps_max_limit_before_first_execute(self):

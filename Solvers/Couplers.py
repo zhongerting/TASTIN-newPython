@@ -184,7 +184,7 @@ class FluidSolidCouple:
                  heated_perimeter: float,
                  correlation_func: Callable[[float, float, float], float],
                  solid_node_capacitance: Optional[np.ndarray] = None,
-                 coupling_time_scheme: str = "current"):
+                 coupling_time_scheme: Optional[str] = None):
         """
         初始化耦合器
 
@@ -210,6 +210,10 @@ class FluidSolidCouple:
         self._local_implicit_flux_bc = None
         self._local_implicit_min_capacitance = 1.0e-10
         self._local_implicit_min_lambda = 1.0e-10
+        if coupling_time_scheme is None:
+            coupling_time_scheme = (
+                "local_implicit" if solid_node_capacitance is not None else "current"
+            )
         self.set_coupling_time_scheme(coupling_time_scheme)
 
         # --- 1. 校验网格一致性 ---
@@ -246,7 +250,7 @@ class FluidSolidCouple:
         )
 
     def set_coupling_time_scheme(self, scheme: str):
-        """Set fluid-solid time coupling scheme without changing legacy defaults."""
+        """Set the fluid-solid time coupling scheme."""
         if scheme not in ("current", "local_implicit"):
             raise ValueError(
                 f"[{self.name}] Unknown coupling_time_scheme={scheme!r}; "
@@ -605,6 +609,11 @@ class FluidSolidCouple:
         :return: 建议的时间步长
         """
         # 如果未提供固体热容信息，无法计算限制，返回上限
+
+        # Local backward-Euler exchange is L-stable; its time scale is a
+        # diagnostic and accuracy measure, not a stability limit.
+        if self.coupling_time_scheme == "local_implicit":
+            return max_limit
 
         if self.solid_node_capacitance is None:
             return max_limit

@@ -10,6 +10,8 @@ from .v15_pipefin_radiator import V15PipeFinRadiatorConfig
 
 
 V15_V71_PROFILE_NAME = "center_0p30m_uniform"
+V15_V71_PUMP_TOTAL_HEAD_PA = 20200.0
+V15_V71_RADIATOR_TUBE_K_LOSS = 38.0
 
 
 def build_center_uniform_axial_power_profile(
@@ -52,6 +54,13 @@ def build_v15_v71_case_a_system(
     pump_config: Optional[FullLoopPumpConfig] = None,
     radiator_config: Optional[V15PipeFinRadiatorConfig] = None,
 ) -> Dict[str, Any]:
+    if pump_config is None:
+        pump_config = FullLoopPumpConfig(pump_total_head_pa=V15_V71_PUMP_TOTAL_HEAD_PA)
+    if radiator_config is None:
+        radiator_config = V15PipeFinRadiatorConfig(
+            radiator_tube_inlet_k_loss=V15_V71_RADIATOR_TUBE_K_LOSS,
+            radiator_tube_outlet_k_loss=V15_V71_RADIATOR_TUBE_K_LOSS,
+        )
     build = build_v15_case_a_system(
         core_config=core_config,
         flow_config=flow_config,

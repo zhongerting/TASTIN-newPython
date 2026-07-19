@@ -598,13 +598,14 @@ compute_adaptive_dt(
     max_dt=0.5,
     safety_factor=0.8,
     use_last_step_diagnostics=True,
+    respect_fluid_cfl=True,
 )
 ```
 
 计算过程：
 
 ```text
-1. 从 fluid_solver.get_max_stable_dt(max_limit=max_dt) 获取流体 CFL 限制
+1. `respect_fluid_cfl=True` 时从 `fluid_solver.get_max_stable_dt(max_limit=max_dt)` 获取流体 CFL 限制；全隐式焓输运经验证后可显式设为 `False`
 2. 乘以 safety_factor
 3. 遍历 couplers，若提供 get_max_stable_dt()，取耦合稳定步长
 4. dt_target = min(dt_fluid, dt_coupler)

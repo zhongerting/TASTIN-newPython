@@ -21,6 +21,8 @@ build/
 # Simulation result artifacts
 *.npz
 *.csv
+!Components/ExternalHeatSources/is58p5_w0_8p12_N18_sum.csv
+!Components/ExternalHeatSources/is58p5_w0_8p12_N78_sum.csv
 CoolantLoop/*.png
 testModule/*.png
 CoolantLoop/*_profiler_report.txt

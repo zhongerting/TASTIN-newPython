@@ -23,7 +23,7 @@ NaK fluid channel
 - 裸管外表面通过 `DynamicRadiationResistanceBC` 向 `T_space` 辐射。
 - 铜带按每个轴向节点独立求解一维准稳态导热。
 - 铜带被视为管两侧对称半翅片：局部净宽度为 `fin_width(z) - tube_outer_diameter`，每侧翅高为该净宽度的一半。
-- `fin_area_scale` 只缩放翅片辐射面积，用于遮挡、视角或有效面积修正；不再代表翅片导热效率。
+- `fin_area_scale` 只保留为几何/标定面积缩放；V15 默认取 `1.0`，内外面遮挡由独立角系数计算，不再借此参数混合表达。
 
 ## 3. 关键参数
 
@@ -37,7 +37,7 @@ NaK fluid channel
 | `fin_width_upper` / `fin_width_lower` | 截锥上/下端局部节距宽度 |
 | `n_fin_width` | 每个轴向切片的翅片横向离散数 |
 | `tube_emissivity` / `fin_emissivity` | 裸管和铜带发射率 |
-| `fin_area_scale` | 翅片有效辐射面积修正 |
+| `fin_area_scale` | 翅片几何/标定面积缩放；V15 默认 `1.0` |
 | `fin_conductivity` | 铜带导热系数，默认常数 |
 
 ## 4. 输出与诊断
@@ -67,7 +67,21 @@ NaK fluid channel
 
 当前 `Tout=727 K` 是后续重新标定显式翅片模型的目标，不是该测试的硬通过条件。
 
-## 7. 2026-06-25 runtime radiation background
+## 7. 分布式翅片外热流
+
+RadiatorPipeWithFin 可通过 set_fin_external_heat_source() 将外热流直接加入准稳态翅片方程。每根辐射管使用一个周向热流密度，该密度沿轴向各段相同；每段只乘本段面积。
+
+翅片吸热采用单侧几何投影面积，并在 V15 中乘入 0.992 转换效率和 Kirchhoff 吸收率 alpha=epsilon_fin：
+
+    A_abs_eff = fin_strip_width * fin_height * illumination_factor * 0.992 * epsilon_fin
+    Q_abs = q_flux * A_abs_eff
+    Q_net_from_root = Q_fin_radiation - Q_abs
+
+fin_area_scale 和 fin_view_factor 仅修正双侧辐射几何面积，不参与单侧受照几何面积；吸收效率与吸收率通过 illuminated_area_scale 独立进入。get_external_heat_absorption_distribution() 返回管壁、翅片和总吸热功率分布，单位均为 W；get_heat_exchange_breakdown() 额外返回 fin_absorption。
+
+能量审计中，gross_rejection 表示管壁与翅片实际向空间辐射的总功率；fin_net_from_root 和 net_rejection 用于描述翅片对管壁根部的净抽热。若审计式已单独加入外热输入，辐射器出口项必须使用 gross_rejection，不能再次用已经减去翅片吸热的 net_rejection。
+
+## 8. 2026-06-25 runtime radiation background
 
 `RadiatorPipeWithFin` now exposes `set_radiation_background_temperature(value)` for optional external boundary modifiers such as the V13 startup thermal shield. The value may be a scalar or one value per axial node. It updates:
 
@@ -78,3 +92,17 @@ NaK fluid channel
 When the shield is disabled, the component keeps the historical default background `T_space`, so existing V12/V13 cases are unchanged. The current shield integration is intentionally a boundary modifier, not a new radiator solid or fluid component.
 
 2026-06-16 warm-start 优化 100 s 对比：默认 `eps_tube=eps_fin=0.80`、`n_axial=8`、`n_fin_width=12` 下，墙钟时间由 `152.88 s` 降至 `143.04 s`，平均翅片迭代数由 `5.44` 降至 `2.33`；出口温度差约 `3.8e-8 K`，总排热相对差约 `6.0e-8 %`。
+
+
+## 9. 2026-07-15 V15 内外面角系数与吸收率
+
+V15 对管壁和翅片采用同一套四项角系数：外面上/下均为 1.0，内面上为 0.0、下为 0.17。一维等效过程保持各项可诊断：
+
+    F_outer = (F_outer_up + F_outer_down) / 2 = 1.0
+    F_inner = F_inner_up + F_inner_down = 0.17
+    F_face = (F_outer + F_inner) / 2 = 0.585
+    epsilon_eff = epsilon_surface * F_face
+
+因此 V15 默认 epsilon_surface=0.8 时，管壁和翅片的 epsilon_eff 都为 0.468。管壁动态辐射边界、翅片准稳态方程、切线热导和排热诊断统一使用该有效发射率。未传入四项角系数的旧调用默认得到 F_face=1.0，保持原有组件行为。
+
+外热仅作用于外侧受照面，不乘上述辐射角系数；管壁和翅片分别使用自身 alpha=epsilon_surface，并乘 0.992 吸收效率：Q_abs=0.992*alpha*q_incident*A_projected。0.992 不用于向外自发辐射。

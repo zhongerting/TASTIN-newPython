@@ -7,6 +7,26 @@ from ThermoCalc import ThermoCalcWrapper as wrapper
 
 
 class ThermoCalcLookupConfigTests(unittest.TestCase):
+    def test_lookup_is_enabled_by_default_when_database_is_explicit(self):
+        calls = []
+
+        def fake_load(*args, **kwargs):
+            calls.append((args, kwargs))
+            return 4
+
+        fake_solver = SimpleNamespace(
+            InputData=lambda: SimpleNamespace(),
+            CalculationMode=SimpleNamespace(FixedVoltage="fixed_u"),
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            with patch.object(wrapper, "te_solver", fake_solver), patch.object(
+                wrapper, "load_emission_lookup_database", fake_load
+            ):
+                model = wrapper.ThermoCalcModel(1, 1, lookup_db="case-db")
+
+        self.assertTrue(model.lookup_enabled)
+        self.assertEqual(calls, [(("case-db",), {"enable": True, "regions": None})])
+
     def test_explicit_lookup_false_overrides_environment(self):
         calls = []
         enabled = []

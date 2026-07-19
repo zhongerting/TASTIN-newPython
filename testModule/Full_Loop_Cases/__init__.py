@@ -11,6 +11,8 @@ from .v14_heatpipe_radiator import V14HeatPipeRadiatorConfig, attach_v14_heatpip
 from .v15_case import build_v15_case_a_system, v15_basic_diagnostics
 from .v15_pipefin_radiator import V15PipeFinRadiatorConfig, attach_v15_pipefin_radiator
 from .v15_v71_case import (
+    V15_V71_PUMP_TOTAL_HEAD_PA,
+    V15_V71_RADIATOR_TUBE_K_LOSS,
     build_center_uniform_axial_power_profile,
     build_v15_v71_case_a_system,
     v15_v71_basic_diagnostics,
@@ -33,6 +35,8 @@ __all__ = [
     "build_v15_case_a_system",
     "v15_basic_diagnostics",
     "build_center_uniform_axial_power_profile",
+    "V15_V71_PUMP_TOTAL_HEAD_PA",
+    "V15_V71_RADIATOR_TUBE_K_LOSS",
     "build_v15_v71_case_a_system",
     "v15_v71_basic_diagnostics",
 ]

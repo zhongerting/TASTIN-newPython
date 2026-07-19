@@ -338,7 +338,7 @@ solid.link_source_buffer(external_buffer)
 
 第二种方式适合与反应堆功率分布、TEC 热源等高频耦合场景共享内存。
 
-时间推进由 `solve_ivp` 完成。代码默认使用 BDF 隐式方法，并在 2D 情况下可注入稀疏雅可比结构。
+通用固体默认使用 `implicit_euler`；失败时按现有 fallback 配置退回 `BDF`。显式选择 `RK45`、`Radau`、`BDF`、`LSODA` 等方法时仍由 `solve_ivp` 推进。
 
 `step()` 必须把温度初值副本传给积分器：
 
