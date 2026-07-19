@@ -301,8 +301,8 @@ runs/accident_100s_final/
 | 反射层最高温度 | 794.368 K |
 | 总流量 | 2.46 kg/s |
 
-全部已记录步的流体求解均收敛；除事故前尚未执行新一次 TEC 电路计算的初始记录外，
-推进后的 TEC 记录均为收敛。输出已包含 `emergency_restart.npz`、`stage_01_restart.npz`
+全部已记录步的流体求解和 TEC 电路计算均收敛；事故前初始记录也已按当前温度显式刷新
+TEC。输出已包含 `emergency_restart.npz`、`stage_01_restart.npz`
 和 `limit_trip.json`，两个终止 restart 的 SHA256 相同，说明它们对应同一已接受状态。
 
 runner 对 TEC 调度阈值加入小于名义周期的浮点容差，并在 `run_config.json` 中同时记录
