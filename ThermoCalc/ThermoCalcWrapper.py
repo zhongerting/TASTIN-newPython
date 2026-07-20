@@ -71,6 +71,15 @@ def _normalize_lookup_regions(regions=None):
     return result or ("core",)
 
 
+def _find_default_lookup_database():
+    runtime_root = Path(current_dir) / "emission_runtime_db_v2"
+    for name in ("pcs_0p02_5torr_tc1500", "pcs_0p02_5torr"):
+        candidate = runtime_root / name
+        if (candidate / "runtime_dense_manifest.json").exists():
+            return candidate
+    return None
+
+
 def _load_runtime_lookup_database(db_path: Path, manifest: dict, regions: tuple[str, ...]) -> int:
     if not hasattr(te_solver, "add_emission_runtime_block"):
         raise RuntimeError("te_solver does not expose runtime lookup API.")
@@ -238,10 +247,24 @@ class ThermoCalcModel:
         self.n_node = n_nodes
 
         if enable_lookup is None:
-            enable_lookup = _env_flag("THERMOCALC_ENABLE_LOOKUP")
-        selected_lookup_db = lookup_db if lookup_db is not None else os.environ.get("THERMOCALC_LOOKUP_DB")
+            enable_lookup = (
+                _env_flag("THERMOCALC_ENABLE_LOOKUP")
+                if "THERMOCALC_ENABLE_LOOKUP" in os.environ
+                else True
+            )
+        default_lookup_db = _find_default_lookup_database()
+        selected_lookup_db = (
+            lookup_db
+            if lookup_db is not None
+            else os.environ.get("THERMOCALC_LOOKUP_DB")
+            or (
+                str(default_lookup_db)
+                if default_lookup_db is not None
+                else None
+            )
+        )
         self.lookup_db = selected_lookup_db
-        self.lookup_enabled = bool(enable_lookup)
+        self.lookup_enabled = bool(enable_lookup and selected_lookup_db)
         self.lookup_regions = lookup_regions
         self.lookup_loaded_blocks = 0
         if selected_lookup_db and self.lookup_enabled:

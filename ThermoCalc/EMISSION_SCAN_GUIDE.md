@@ -371,7 +371,7 @@ Pcs_torr = 2.45e8 / sqrt(Tcs) * exp(-8910 / Tcs)
 core        TE 1300-2150 K, TC 700-900 K,  Vo 0-3.5 V, Pcs 0.02-5.0 torr, 41 Pcs points
 startup     TE 700-1300 K,  TC 500-800 K,  Vo 0-3.5 V, Pcs 0.02-5.0 torr, 21 Pcs points
 high_power  TE 2150-2400 K, TC 750-1000 K, Vo 0-3.5 V, Pcs 0.02-5.0 torr, 41 Pcs points
-accident    TE 700-2400 K,  TC 500-1100 K, Vo 0-3.5 V, Pcs 0.02-5.0 torr, 31 Pcs points
+accident    TE 700-2400 K,  TC 500-1500 K, Vo 0-3.5 V, Pcs 0.02-5.0 torr, 31 Pcs points
 ```
 
 Generate the full manifest and chunk plan:
@@ -380,7 +380,7 @@ Generate the full manifest and chunk plan:
 & "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py plan --db-dir ThermoCalc\emission_database --preset full
 ```
 
-The corrected full plan contains 18,737,388 points in 76 chunks with the
+The corrected full plan contains 22,576,428 points in 97 chunks with the
 current right-boundary-preserving chunk layout. Use multiple
 workers by assigning stable worker indices:
 
@@ -692,3 +692,70 @@ setup first TEC calculate after wire-resistance rebuild: about 7.81 s
 The current performance bottleneck for V13 is no longer local thermionic
 emission. It is dominated by solid heat conduction, especially the many
 radiator tube wall solids in the pipe-fin radiator model.
+
+## 2026-07-20 TC 1500 K Production Extension
+
+This section supersedes the earlier 2026-06-23 status snapshots above.
+
+The accident region now covers TE 700-2400 K, TC 500-1500 K at 10 K
+spacing, Vo 0-3.5 V, and Pcs 0.02-5.0 torr. The other three region axes
+are unchanged. The authoritative local artifacts are:
+
+    raw/audit: ThermoCalc/emission_database/pcs_0p02_5torr_tc1500/
+    runtime:   ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr_tc1500/
+    legacy fallback: ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr/
+
+Current unique-grid and optimization results:
+
+    total points: 22,576,428
+    chunks: 97
+    accident shape: 86 x 101 x 36 x 31
+    accident points: 9,693,576
+    raw invalid points: 668,929
+    safe zero-filled points: 111,719
+    neighbor-imputed points: 557,210
+    unresolved points: 0
+    optimized safe rate: 1.0
+
+Incremental diagnostics for the newly added TC 1110-1500 K planes:
+
+    added points: 3,839,040
+    raw invalid points: 13,399 (0.3490%)
+    safe zero-filled points: 4,447
+    neighbor-imputed points: 8,952
+    unresolved points after optimization: 0
+
+The raw failures are not primarily caused by TC being greater than TE. Only
+74 invalid points have TE <= TC; the other 13,325 have TE > TC. Their dominant
+location is high emitter temperature, low output voltage, and very low cesium
+pressure:
+
+    TE >= 1900 K: 13,320 points (99.4%)
+    TE >= 2200 K: 9,095 points
+    Vo < 1.0 V: 13,269 points (99.0%)
+    Pcs 0.02-0.05 torr: 13,238 points (98.8%)
+    Vo >= 2.0 V: 0 points
+
+Counts by added collector-temperature band are:
+
+    TC 1110-1200 K: 2,041
+    TC 1210-1300 K: 3,392
+    TC 1310-1400 K: 4,016
+    TC 1410-1500 K: 3,950
+
+The 8,952 imputed points are concentrated around TE 2280-2400 K,
+TC 1290-1340 K, Vo 0-0.5 V, and Pcs 0.02-0.035 torr. These figures describe
+raw analytic non-convergence before table optimization. They do not indicate
+remaining runtime lookup failures: all added points are lookup-safe after
+zero filling or neighbor imputation.
+
+The dense runtime v2 export contains both NPZ and TEDB forms and occupies
+644,446,789 bytes in total. Production-pyd loading verified exact runtime
+grid matches at TC 1100, 1110, 1300, and 1500 K. TC 1500 K is inclusive;
+TC 1500.1 K correctly misses. ThermoCalcWrapper prefers the tc1500 directory
+when present and falls back to the legacy directory for compatibility.
+
+Generation and verification must use the repository Conda interpreter. The
+generator manifest records THERMOCALC_TE_SOLVER_DIR when it is explicitly
+provided. summarize --scan-chunks and verify enumerate raw chunks only and
+exclude optimized sidecars.

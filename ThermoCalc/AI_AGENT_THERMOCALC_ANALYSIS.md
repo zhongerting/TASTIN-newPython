@@ -1160,6 +1160,27 @@ Because the TEC solve converged and the radiator/coolant energy balance is sub-w
 
 This is a Python-side persistence change only. It does not alter the C++ TEC solve, Joule heat authority, plasma heat-flux formula, or circuit convergence logic.
 
+## 2026-07-20 emission lookup TC extension
+
+The production accident lookup envelope has been extended from TC 1100 K to
+TC 1500 K while retaining 10 K spacing. The preferred local runtime directory
+is now ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr_tc1500; the previous
+pcs_0p02_5torr directory remains a compatibility fallback.
+
+The full database contains 22,576,428 unique points. Optimization leaves zero
+unresolved points, and the dense runtime v2 NPZ plus TEDB artifacts occupy
+644,446,789 bytes. Exact-grid checks with the root production pyd passed at
+TC 1100, 1110, 1300, and 1500 K; TC 1500.1 K correctly returns a lookup miss.
+
+Within the 3,839,040 newly added TC 1110-1500 K points, 13,399 raw analytic
+points were invalid: 4,447 were safely zero-filled and 8,952 were
+neighbor-imputed. The failures are dominated by TE >= 1900 K, Vo < 1.0 V,
+and Pcs 0.02-0.05 torr; only 74 have TE <= TC. No unresolved point remains
+in the runtime table.
+
+For commands, per-region shapes, provenance notes, and reproduction details,
+read EMISSION_SCAN_GUIDE.md section 2026-07-20 TC 1500 K Production Extension.
+
 ## 2026-07-09 case-level lookup control
 
 `ReactorCore` now accepts `tec_lookup_enabled`, `tec_lookup_db`, and `tec_lookup_regions` and passes them to every `ThermoCalcModel` it creates. `testModule/Full_Loop_Cases_10kW.FullLoopCoreConfig` exposes the same fields so V14_10kW/V15-style full-loop cases can enable or disable lookup without relying on process-wide environment variables.
