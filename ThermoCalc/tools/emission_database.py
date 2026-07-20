@@ -4,6 +4,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import struct
 import subprocess
 import time
@@ -79,7 +80,7 @@ REGIONS: dict[str, dict[str, Any]] = {
         "description": "coarse accident and boundary-protection extension",
         "priority": 3,
         "te": (700.0, 2400.0, 86, True),
-        "tc": (500.0, 1100.0, 61, True),
+        "tc": (500.0, 1500.0, 101, True),
         "vo": (0.0, 3.5, 36, True),
         "pcs": pcs_axis_spec(31),
         "target_points_per_chunk": 300_000,
@@ -154,14 +155,22 @@ def file_sha256(path: Path) -> str | None:
 
 
 def pyd_info() -> dict[str, Any]:
-    candidates = [
+    candidates: list[Path] = []
+    env_dir = os.environ.get("THERMOCALC_TE_SOLVER_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir) / "te_solver.cp312-win_amd64.pyd")
+    candidates.extend([
         ROOT / "build_cp312" / "Release" / "te_solver.cp312-win_amd64.pyd",
         ROOT / "te_solver.cp312-win_amd64.pyd",
-    ]
+    ])
     for path in candidates:
         if path.exists():
+            try:
+                recorded_path = str(path.relative_to(REPO_ROOT))
+            except ValueError:
+                recorded_path = str(path.resolve())
             return {
-                "path": str(path.relative_to(REPO_ROOT)),
+                "path": recorded_path,
                 "sha256": file_sha256(path),
                 "size_bytes": path.stat().st_size,
                 "mtime": path.stat().st_mtime,
@@ -453,6 +462,12 @@ def iter_chunk_summaries(db_dir: Path) -> Iterable[dict[str, Any]]:
         yield load_json(path)
 
 
+def iter_raw_chunk_paths(db_dir: Path) -> Iterable[Path]:
+    for path in sorted((db_dir / "chunks").glob("*/*.npz")):
+        if not path.name.endswith(".optimized.npz"):
+            yield path
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
@@ -545,7 +560,7 @@ def aggregate_axes(db_dir: Path) -> dict[str, list[dict[str, Any]]]:
     pcs_stats: dict[tuple[str, float], list[int]] = {}
     failure_rows = []
     zero_rows = []
-    for chunk_path in sorted((db_dir / "chunks").glob("*/*.npz")):
+    for chunk_path in iter_raw_chunk_paths(db_dir):
         region = chunk_path.parent.name
         with np.load(chunk_path, allow_pickle=False) as data:
             bad = data["done"] & ~(data["finite_flag"] & data["converged"])
@@ -627,7 +642,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     db_dir = args.db_dir
     te_solver = import_te_solver()
     manifest = load_json(db_dir / "manifest.json")
-    chunks = sorted((db_dir / "chunks").glob("*/*.npz"))
+    chunks = list(iter_raw_chunk_paths(db_dir))
     if not chunks:
         raise RuntimeError("No chunk files found.")
     checked = []
