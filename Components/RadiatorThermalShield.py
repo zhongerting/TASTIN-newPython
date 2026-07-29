@@ -53,6 +53,10 @@ class RadiatorThermalShield(BaseComponent):
             relaxation: float = 1.0,
             model: str = MODEL_SEGMENT_BALANCE,
             qsss_w_m2: Optional[Iterable[float]] = None,
+            external_heat_source=None,
+            direct_external_heat_sources: Optional[Iterable] = None,
+            external_heat_absorption_factor: float = 0.992,
+            active_override: Optional[bool] = None,
             strict_fortran: bool = False,
             shield2_initial_temperature_k: float = 200.0,
             shield2_tol_k: float = 1.0e-3,
@@ -80,6 +84,16 @@ class RadiatorThermalShield(BaseComponent):
             self.qsss_w_m2 = np.asarray(qsss_w_m2, dtype=float)
             if self.qsss_w_m2.shape != (8,):
                 raise ValueError("qsss_w_m2 must have shape (8,).")
+        self.external_heat_source = external_heat_source
+        self.direct_external_heat_sources = list(direct_external_heat_sources or ())
+        self._direct_external_heat_scale_factors = [
+            float(getattr(source, "scale_factor", 1.0))
+            for source in self.direct_external_heat_sources
+        ]
+        self.external_heat_absorption_factor = float(external_heat_absorption_factor)
+        if not 0.0 <= self.external_heat_absorption_factor <= 1.0:
+            raise ValueError("external_heat_absorption_factor must be within [0, 1].")
+        self.active_override = None if active_override is None else bool(active_override)
         self.strict_fortran = bool(strict_fortran)
         self.shield2_initial_temperature_k = max(float(shield2_initial_temperature_k), 1.0e-3)
         self.shield2_tol_k = max(float(shield2_tol_k), 1.0e-12)
@@ -140,9 +154,28 @@ class RadiatorThermalShield(BaseComponent):
         return matrix
 
     def _is_active(self, current_time: float) -> bool:
+        if self.active_override is not None:
+            return self.active_override
         if self.active_until_s is None:
             return True
         return float(current_time) <= self.active_until_s
+
+    def set_active(self, active: bool) -> None:
+        """Latch shield presence; retained by global restart files."""
+        self.active_override = bool(active)
+
+    def _update_external_heat_switch(self, current_time: float, active: bool) -> None:
+        for source, nominal_scale in zip(
+                self.direct_external_heat_sources,
+                self._direct_external_heat_scale_factors):
+            source.scale_factor = 0.0 if active else nominal_scale
+        self.qsss_w_m2.fill(0.0)
+        if active and self.external_heat_source is not None:
+            flux = np.asarray(self.external_heat_source.get_heat_flux(current_time), dtype=float)
+            if flux.shape != (6,):
+                raise ValueError("Shield external heat source must return six circumferential values.")
+            # SHIELD2 uses qsss=(alpha/epsilon)*incident; alpha=0.992*epsilon.
+            self.qsss_w_m2[:6] = self.external_heat_absorption_factor * flux
 
     def _unit_radiation_area(self, unit, shape) -> np.ndarray:
         tube_area = np.asarray(getattr(unit, "tube_bare_area", np.ones(shape)), dtype=float)
@@ -201,10 +234,20 @@ class RadiatorThermalShield(BaseComponent):
         n_tubes = len(self.radiator_units)
         sectors = self._shield2_sector_indices(n_tubes)
         tube_t4 = np.asarray([self._shield2_tube_t4(unit) for unit in self.radiator_units], dtype=float)
+        tube_areas = np.asarray([
+            float(np.sum(self._unit_radiation_area(unit, self._surface_temperature(unit).shape)))
+            for unit in self.radiator_units
+        ], dtype=float)
         tc4_rad = np.zeros(12, dtype=float)
         for sector in range(12):
-            values = tube_t4[sectors == sector]
-            tc4_rad[sector] = float(np.mean(values)) if values.size else 0.0
+            mask = sectors == sector
+            values = tube_t4[mask]
+            weights = tube_areas[mask]
+            tc4_rad[sector] = (
+                float(np.average(values, weights=weights))
+                if values.size and float(np.sum(weights)) > 0.0
+                else (float(np.mean(values)) if values.size else 0.0)
+            )
         return tc4_rad, sectors
 
     def _shield2_outer_temperature(self, inner_temperature: float, qsss: float) -> float:
@@ -420,6 +463,7 @@ class RadiatorThermalShield(BaseComponent):
     def pre_step(self, dt: float, current_time: float):
         active = self._is_active(current_time)
         self.last_active = bool(active)
+        self._update_external_heat_switch(current_time, active)
         if self.model == self.MODEL_FORTRAN_SHIELD2:
             self._pre_step_fortran_shield2(active)
             return
@@ -547,6 +591,33 @@ class RadiatorThermalShield(BaseComponent):
         self.last_energy_residual_w = 0.0
         self.last_energy_residual_rel = 0.0
         self.last_solver_failures = 0 if self.last_shield2_converged else 1
+
+    def get_state_dict(self, prefix: str) -> dict:
+        active_state = -1 if self.active_override is None else int(self.active_override)
+        origin = float(getattr(self.external_heat_source, "time_origin_s", 0.0))
+        return {
+            f"{prefix}/active_override": np.array([active_state], dtype=np.int8),
+            f"{prefix}/orbit_time_origin_s": np.array([origin], dtype=float),
+        }
+
+    def load_state_dict(self, data: dict, prefix: str) -> None:
+        active_key = f"{prefix}/active_override"
+        if active_key in data:
+            value = int(np.asarray(data[active_key]).reshape(-1)[0])
+            self.active_override = None if value < 0 else bool(value)
+        origin_key = f"{prefix}/orbit_time_origin_s"
+        if origin_key in data:
+            origin = float(np.asarray(data[origin_key]).reshape(-1)[0])
+            if self.external_heat_source is not None and hasattr(self.external_heat_source, "time_origin_s"):
+                self.external_heat_source.time_origin_s = origin
+            for source in self.direct_external_heat_sources:
+                if hasattr(source, "time_origin_s"):
+                    source.time_origin_s = origin
+        if self.active_override is not None:
+            for source, nominal_scale in zip(
+                    self.direct_external_heat_sources,
+                    self._direct_external_heat_scale_factors):
+                source.scale_factor = 0.0 if self.active_override else nominal_scale
 
     def get_diagnostics(self) -> dict:
         return {

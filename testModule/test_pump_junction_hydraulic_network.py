@@ -129,6 +129,28 @@ class PumpJunctionHydraulicNetworkTests(unittest.TestCase):
         pump.clear_pressure_table()
         self.assertAlmostEqual(self._equivalent_source(network), 750.0)
 
+    def test_prescribed_flow_relaxation_does_not_overshoot_target(self):
+        network, junction = self._build_network(
+            lambda upstream, downstream: FlowJunction(
+                'controlled',
+                upstream,
+                downstream,
+                flow_area=self.area,
+                k_loss=0.0,
+                custom_length=1.0,
+            )
+        )
+        junction.target_W = 2.4
+        junction.W = 2.46
+        network = HydraulicNetwork(
+            network.volumes_obj,
+            [junction],
+            gravity_vector=0.0,
+        )
+        network._calc_momentum_coeffs(0.05)
+
+        self.assertAlmostEqual(network.B_coeffs[0], 2.4)
+
 
 if __name__ == "__main__":
     unittest.main()

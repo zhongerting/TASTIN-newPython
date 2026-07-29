@@ -79,7 +79,7 @@ REGIONS: dict[str, dict[str, Any]] = {
     "accident": {
         "description": "coarse accident and boundary-protection extension",
         "priority": 3,
-        "te": (700.0, 2400.0, 86, True),
+        "te": (700.0, 3000.0, 116, True),
         "tc": (500.0, 1500.0, 101, True),
         "vo": (0.0, 3.5, 36, True),
         "pcs": pcs_axis_spec(31),

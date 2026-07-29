@@ -400,12 +400,14 @@ class OrbitalTableHeatSource(BaseExternalHeatSource):
                  table_library: EmbeddedFluxTableLibrary = FORTRAN_ORBITAL_HEAT_TABLE_LIBRARY,
                  scale_factor: float = 1.0,
                  offset: float = 0.0,
-                 periodic: bool = True):
+                 periodic: bool = True,
+                 time_origin_s: float = 0.0):
         super().__init__(shape)
         self.table_library = table_library
         self.scale_factor = float(scale_factor)
         self.offset = float(offset)
         self.periodic = bool(periodic)
+        self.time_origin_s = float(time_origin_s)
         self.table_ids = self._normalize_table_ids(table_ids)
 
     def _normalize_table_ids(self, table_ids: Union[int, np.ndarray, list, tuple]) -> np.ndarray:
@@ -438,7 +440,7 @@ class OrbitalTableHeatSource(BaseExternalHeatSource):
 
     def _interpolate_table(self, table_id: int, time: float) -> float:
         table = self.table_library.get_table(int(table_id))
-        sample_time = float(time)
+        sample_time = float(time) - self.time_origin_s
         if self.periodic and table.periodic:
             sample_time = self._wrap_time(sample_time, float(table.time[-1]))
         return float(np.interp(sample_time, table.time, table.values))
@@ -458,6 +460,7 @@ class OrbitalTableHeatSource(BaseExternalHeatSource):
                       scale_factor: float = None,
                       offset: float = None,
                       periodic: bool = None,
+                      time_origin_s: float = None,
                       table_library: EmbeddedFluxTableLibrary = None):
         if table_library is not None:
             self.table_library = table_library
@@ -470,6 +473,8 @@ class OrbitalTableHeatSource(BaseExternalHeatSource):
             self.offset = float(offset)
         if periodic is not None:
             self.periodic = bool(periodic)
+        if time_origin_s is not None:
+            self.time_origin_s = float(time_origin_s)
 
 
 

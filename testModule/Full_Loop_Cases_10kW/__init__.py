@@ -1,24 +1,3 @@
-from .common_builder import build_full_loop_common_base
-from .common_config import (
-    FullLoopCoreConfig,
-    FullLoopFlowConfig,
-    FullLoopPumpConfig,
-    ReservedParallelTecConfig,
-)
-from .common_diagnostics import full_loop_common_diagnostics
-from .v14_case import build_v14_case_a_system, v14_basic_diagnostics
-from .v14_heatpipe_radiator import V14HeatPipeRadiatorConfig, attach_v14_heatpipe_radiator
+"""Compatibility import for V14 cases moved under ``Full_Loop_Cases``."""
 
-
-__all__ = [
-    "FullLoopCoreConfig",
-    "FullLoopFlowConfig",
-    "FullLoopPumpConfig",
-    "ReservedParallelTecConfig",
-    "V14HeatPipeRadiatorConfig",
-    "attach_v14_heatpipe_radiator",
-    "build_full_loop_common_base",
-    "build_v14_case_a_system",
-    "full_loop_common_diagnostics",
-    "v14_basic_diagnostics",
-]
+from testModule.Full_Loop_Cases.Full_Loop_Cases_10kW import *  # noqa: F401,F403

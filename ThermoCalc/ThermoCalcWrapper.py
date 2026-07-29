@@ -73,7 +73,7 @@ def _normalize_lookup_regions(regions=None):
 
 def _find_default_lookup_database():
     runtime_root = Path(current_dir) / "emission_runtime_db_v2"
-    for name in ("pcs_0p02_5torr_tc1500", "pcs_0p02_5torr"):
+    for name in ("pcs_0p02_5torr_tc1500_te3000", "pcs_0p02_5torr_tc1500", "pcs_0p02_5torr"):
         candidate = runtime_root / name
         if (candidate / "runtime_dense_manifest.json").exists():
             return candidate

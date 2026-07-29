@@ -843,3 +843,7 @@ manager.load_global_state("restart_state.npz")
 - `Couplers.py`
 - `Neutronics/PointReactor.py`
 
+## 17. 2026-07-22 restart coupling refresh
+
+`load_global_state()` now passes the restored `System/last_dt` to the post-load coupler refresh. This is required by `FluidSolidCouple(mode="local_implicit")`; older restarts without `last_dt` use a small positive fallback. Restart loading therefore no longer fails before the first resumed step merely because local-implicit coupling is active.
+

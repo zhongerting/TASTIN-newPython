@@ -711,7 +711,7 @@ class SystemManager:
         self._sync_solid_times_to_global()
         self._refresh_solid_boundary_cache(update_flux=True)
         self._prepare_fluid_sources_for_coupling()
-        self._run_couplers()
+        self._run_couplers(dt=max(float(getattr(self, '_last_dt', 1.0e-12)), 1.0e-12))
 
         logger.info(f"Global state successfully loaded. Resuming from t={self.global_time}s.")
 

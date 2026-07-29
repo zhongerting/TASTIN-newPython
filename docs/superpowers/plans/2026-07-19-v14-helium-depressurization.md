@@ -814,4 +814,3 @@ git commit -m "record V14 helium accident result"
 ```
 
 Expected: 两组测试全部 PASS；`git diff --check` 无输出；运行产物保留在本地 `runs/`，不批量加入提交。
-

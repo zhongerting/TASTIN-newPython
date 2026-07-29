@@ -371,7 +371,7 @@ Pcs_torr = 2.45e8 / sqrt(Tcs) * exp(-8910 / Tcs)
 core        TE 1300-2150 K, TC 700-900 K,  Vo 0-3.5 V, Pcs 0.02-5.0 torr, 41 Pcs points
 startup     TE 700-1300 K,  TC 500-800 K,  Vo 0-3.5 V, Pcs 0.02-5.0 torr, 21 Pcs points
 high_power  TE 2150-2400 K, TC 750-1000 K, Vo 0-3.5 V, Pcs 0.02-5.0 torr, 41 Pcs points
-accident    TE 700-2400 K,  TC 500-1500 K, Vo 0-3.5 V, Pcs 0.02-5.0 torr, 31 Pcs points
+accident    TE 700-3000 K,  TC 500-1500 K, Vo 0-3.5 V, Pcs 0.02-5.0 torr, 31 Pcs points
 ```
 
 Generate the full manifest and chunk plan:
@@ -380,7 +380,7 @@ Generate the full manifest and chunk plan:
 & "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" ThermoCalc\tools\emission_database.py plan --db-dir ThermoCalc\emission_database --preset full
 ```
 
-The corrected full plan contains 22,576,428 points in 97 chunks with the
+The corrected full plan contains 25,957,908 points in 112 chunks with the
 current right-boundary-preserving chunk layout. Use multiple
 workers by assigning stable worker indices:
 
@@ -697,8 +697,9 @@ radiator tube wall solids in the pipe-fin radiator model.
 
 This section supersedes the earlier 2026-06-23 status snapshots above.
 
-The accident region now covers TE 700-2400 K, TC 500-1500 K at 10 K
-spacing, Vo 0-3.5 V, and Pcs 0.02-5.0 torr. The other three region axes
+At this historical stage, the accident region covered TE 700-2400 K at 20 K
+spacing and TC 500-1500 K at 10 K spacing, with Vo 0-3.5 V and Pcs
+0.02-5.0 torr. The other three region axes
 are unchanged. The authoritative local artifacts are:
 
     raw/audit: ThermoCalc/emission_database/pcs_0p02_5torr_tc1500/
@@ -759,3 +760,53 @@ Generation and verification must use the repository Conda interpreter. The
 generator manifest records THERMOCALC_TE_SOLVER_DIR when it is explicitly
 provided. summarize --scan-chunks and verify enumerate raw chunks only and
 exclude optimized sidecars.
+
+## 2026-07-20 TE 3000 K Production Extension
+
+The current production accident region extends TE from 2400 K to 3000 K
+while retaining the existing 20 K TE spacing. TC remains 500-1500 K at
+10 K spacing. The new artifacts are independent of the previous tc1500
+database:
+
+    raw/audit: ThermoCalc/emission_database/pcs_0p02_5torr_tc1500_te3000/
+    runtime:   ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr_tc1500_te3000/
+    fallback:  ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr_tc1500/
+
+Current unique-grid and optimization results:
+
+    total points: 25,957,908
+    chunks: 112
+    accident shape: 116 x 101 x 36 x 31
+    accident points: 13,075,056
+    global raw invalid points: 971,126
+    global safe zero-filled points: 121,515
+    global neighbor-imputed points: 849,611
+    global unresolved points: 0
+
+Incremental diagnostics for TE 2420-3000 K:
+
+    added points: 3,381,480
+    raw invalid points: 302,197 (8.9368%)
+    safe zero-filled points: 9,796
+    neighbor-imputed points: 292,401
+    unresolved points after optimization: 0
+
+The raw invalid count increases strongly with emitter temperature:
+
+    TE 2420-2600 K: 40,667
+    TE 2620-2800 K: 90,219
+    TE 2820-3000 K: 171,311
+    TE 3000 K plane: 20,866
+
+All added raw results were finite and none had TE <= TC. However, most failed
+points required neighbor imputation rather than safe zero filling. The
+TE > 2400 K data is therefore suitable as a continuous accident lookup
+extension, but it must not be interpreted as independent validation of the
+underlying high-temperature empirical model.
+
+The dense runtime v2 export uses float32, zero compression, and both NPZ and
+TEDB outputs. It contains 25,957,908 points and occupies 746,035,479 bytes.
+Production-pyd loading verified hits at TE 2400, 2420, 2800, and 3000 K;
+TE 3000.1 K correctly misses. A 10,000-point random accident query produced
+10,000 hits. ThermoCalcWrapper prefers the te3000 directory, then the tc1500
+directory, then the legacy directory.

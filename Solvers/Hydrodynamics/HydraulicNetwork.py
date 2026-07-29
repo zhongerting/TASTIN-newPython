@@ -999,9 +999,10 @@ class HydraulicNetwork:
         if np.any(inlet_mask):
             W_old_inlet = np.asarray(W_old_frozen[inlet_mask], dtype=float)
             target_W = self.target_W_vec[inlet_mask]
+            relaxation = min(dt_safe * self.inlet_relaxation_gain, 1.0)
             self.B_coeffs[inlet_mask] = (
                 W_old_inlet
-                + dt_safe * self.inlet_relaxation_gain * (target_W - W_old_inlet)
+                + relaxation * (target_W - W_old_inlet)
             )
 
         if not np.any(normal_mask):

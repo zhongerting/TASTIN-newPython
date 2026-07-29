@@ -932,7 +932,7 @@ Q = explicit - implicit * T_fluid
 
 ### 8.5 入口连接的处理路径
 
-`InletJunction` 在组件层提供 `get_momentum_derivative()`，但在当前 `HydraulicNetwork` 快速路径中，入口连接通过 `target_W_vec` 和 `inlet_relaxation_gain` 直接更新 `B_coeffs`。调试入口流量响应时应优先查看网络层参数。
+`InletJunction` 在组件层提供 `get_momentum_derivative()`，但在当前 `HydraulicNetwork` 快速路径中，入口连接通过 `target_W_vec` 和 `inlet_relaxation_gain` 直接更新 `B_coeffs`。调试入口流量响应时应优先查看网络层参数。离散松弛权重为 `min(dt * inlet_relaxation_gain, 1)`；大时间步最多在本步精确到达目标，不允许越过目标后交替放大。
 
 ### 8.6 物性对象应支持向量化
 

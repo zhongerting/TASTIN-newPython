@@ -2345,20 +2345,20 @@ For V11/V13 timing comparisons, record `coupling_tau_min_s`, `coupling_dt_limit_
 
 ### 2026-07-10 V14_10kW powered debug baseline
 
-`testModule/Full_Loop_Cases_10kW/` is the active 10 kW V14 heat-pipe-radiator package. It should be treated as a local branch of the full-loop work: keep new 10 kW modeling changes inside this directory unless the user explicitly asks to promote them back into `Full_Loop_Cases` or shared component code.
+`testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/` is the active 10 kW V14 heat-pipe-radiator package. It should be treated as a local branch of the full-loop work: keep new 10 kW modeling changes inside this directory unless the user explicitly asks to promote them back into `Full_Loop_Cases` or shared component code.
 
 Primary docs:
 
 ```text
-testModule/Full_Loop_Cases_10kW/README.md
-testModule/Full_Loop_Cases_10kW/V14_210kW_debug/README.md
-testModule/Full_Loop_Cases_10kW/V14_210kW_debug/TUNING_LOG.md
+testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/README.md
+testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_210kW_debug/README.md
+testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_210kW_debug/TUNING_LOG.md
 ```
 
 Primary powered runner:
 
 ```text
-testModule/Full_Loop_Cases_10kW/V14_210kW_debug/run_v14_210kw_debug.py
+testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_210kW_debug/run_v14_210kw_debug.py
 ```
 
 Run assumptions used by the current debug baseline:
@@ -2378,7 +2378,7 @@ Use direct runner invocations for `V14_210kW_debug`. Avoid `python -m unittest` 
 Current best restart:
 
 ```text
-testModule/Full_Loop_Cases_10kW/V14_210kW_debug/runs/final_eps07475_u50p65_wire0335_1200s_from7964/stage_01_restart.npz
+testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_210kW_debug/runs/final_eps07475_u50p65_wire0335_1200s_from7964/stage_01_restart.npz
 ```
 
 Current best parameters:
@@ -2409,7 +2409,7 @@ Interpretation: the result is close to the requested `754.45 K` inlet, `845.65 K
 事故算例位于：
 
 ```text
-testModule/Full_Loop_Cases_10kW/V14_210kW_helium_depressurization/
+testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_210kW_helium_depressurization/
 ```
 
 首读 `README.md`，运行入口为 `run_v14_helium_depressurization.py`。独立初态是正常材料热容
@@ -2450,3 +2450,96 @@ NaN/Inf，也会 fail-closed 保存紧急 restart 和 `limit_trip.json`。
 ## 2026-07-13 ThermoCalc 串联固定电流测试
 
 `test_thermocalc_series_fixed_current.py` 验证串联 `fixed_i` 的四类状态：单根/多根零电流开路、与 `fixed_u` 交叉验证的可实现工作点、有限的不可发电目标回退到正开路电压，以及双重失败时安全返回有限零输出。测试扩展必须从独立构建目录加载，不得覆盖生产 `.pyd`。
+
+### 2026-07-20 V14 210 kW external-heat continuation
+
+The independent runner is `testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_210kW_reactivity_control_external_heat/run_v14_210kw_reactivity_control_external_heat.py`. It defaults to `V14_210kW_reactivity_control/反应性控制/checkpoint_t013864s.npz`, keeps the saved absolute system time, and uses that restart time as phase zero for the `5668.144369 s` N18 external-heat history. Upper and lower rings reuse N18 columns 0 through 17. The original reactivity-control and debug runners remain external-heat-off by default. A `0.05 s` smoke from `13864.2 s` completed with finite thermal/electrical outputs and converged fluid solve.
+### 2026-07-20 V14 fixed-power two-orbit external-heat case
+
+`testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_210kW_fixed_power_external_heat_2orbits/` keeps the core source fixed at `210000 W` and runs the N18 external-heat history for exactly two `5668.144369 s` periods (`11336.288738 s`). It loads the current `checkpoint_t013864s.npz`, uses its saved absolute time as external-heat phase zero, and preserves the adjacent run configuration for TEC lookup and calibrated radiator settings. The original debug runner remains unchanged by default; `case_prefix` now controls output case names as its dataclass field intended.
+### 2026-07-20 V14 fixed-power instantaneous LOCA-1
+
+`testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_210kW_fixed_power_LOCA_1/` starts from the two-orbit
+`checkpoint_t016864s.npz` and models instantaneous complete NaK loss. It removes all
+`FluidSolidCouple` instances and their installed boundary conditions, adds five epsilon=0.8
+vacuum-radiation `GapCouple2D` paths between each representative TFE inner/outer clad, zeros
+fluid sources and flows, and replaces `HydraulicNetwork.step_Picard()` on the case instance
+with a frozen successful no-op. The fixed `210000 W` core source, TEC, solid conduction, N18
+external heat, heat-pipe stored state, and external radiation remain active. Post-accident fluid
+`T/P/h` are recorded as absent (`NaN`) while the pre-accident liquid arrays remain in every
+node snapshot as reference data. Summary CSV and compressed node snapshots are written every
+`0.2 s`. The verified `runs/smoke_0p2s_final/` result completed four `0.05 s` solid steps with
+finite solid/TEC fields, 58 removed fluid-solid couplers, five vacuum gaps, and no hydraulic solve.
+
+### 2026-07-20 LOCA-1 split postprocessing histories
+
+`V14_210kW_fixed_power_LOCA_1` now writes four long-form CSV files at every configured record time: `history_coolant.csv` (volume T/P/h and junction W/v, categorized as core/ordinary_pipe/collector_ring), `history_solids.csv` (all flattened solid temperatures, categorized as core_structure/pipe_wall/heat_pipe), `history_electrical.csv` (terminal metrics and per-TFE/per-axial-node current density, potentials, electron heat transfer, and emitter/collector Joule power), and `history_reactivity.csv` (fuel/electrode/moderator/reflector/total feedback). The existing `history.csv` remains the compact run and energy-audit summary; compressed snapshots remain the array-level reference.
+
+LOCA-1 also supports temperature-limit termination after every solid step. Current thresholds are collector 1500 K, emitter 3000 K, existing coolant 1058 K, moderator 930 K, and reflector 1000 K. A triggered terminal state is written even when it falls between regular record times. Complete coolant loss makes the coolant-temperature criterion inactive and records `coolant_max_T_K=NaN`.
+
+The ε=0.2 and ε=0.5 limit runs completed under `runs/LOCA_1_eps020_until_failure_record0p5s` and `runs/LOCA_1_eps050_until_failure_record0p5s`. Both stopped on `collector_temperature_limit`: ε=0.2 at accident elapsed 19.95 s and collector 1500.747 K; ε=0.5 at 24.25 s and collector 1500.512 K. Both retained 210 kW fixed power, 0.5 s regular records plus the exact terminal state, and empty stderr logs.
+
+LOCA-1 can now hand a fixed-power restart to `PointReactor` with `--enable-reactivity-feedback`; fixed source reapplication is then disabled. `--scram-time 5 --scram-reactivity-dollars -2` applies a persistent external `rho=-2*beta_total=-0.0158642` from accident elapsed 5 s. `--staged-recording` selects 0.5 s records to 20 s, 2 s to 100 s, 5 s to 400 s, 10 s to 600 s, and 20 s afterward. The 5.1 s integration smoke reached 76.258 kW after the scram and wrote the exact endpoint; seven focused tests pass.
+
+For scram runs, the runner now transitions TEC to a persistent open-circuit disabled state when main current is at or below the configurable threshold (default 0.01 A). The transition calls `TFEUnit.clear_tec_sources()` for every representative TFE, preserves passive TEC-gap heat transfer, and sets `core.enable_tec_coupled=False` so later steps do not enter ThermoCalc. The switch time and state are recorded. An integration smoke verified zero current/electric power and no subsequent TEC call; eight focused tests pass. Older scram outputs without the transition are superseded by `tecopen001A` reruns.
+### 2026-07-28 V14 whole-core TEC open-circuit accidents
+
+`V14_210kW_TEC_open_circuit_accident_fixed_power/` and
+`V14_210kW_TEC_open_circuit_accident_reactive_feedback/` start from the two-orbit
+`checkpoint_t019865s.npz`. Both permanently clear active TEC electrical/electron/Joule
+sources while retaining the emitter, collector, passive TEC-gap heat transfer, NaK loop, and
+orbital external heat with the saved period and time origin. The fixed-power case remains at
+210 kW until a temperature trip, then initializes point kinetics at that exact state and adds
+-2 dollars. The feedback case initializes point kinetics at accident start and adds -2 dollars
+to the evolving feedback at a trip. Limits are channel wall 1058 K, fuel pellet 2700 K,
+collector 1023 K, moderator 930 K, and reflector 1000 K; coolant temperature is diagnostic
+only. Checkpoints are written every 50 s, and the 0.1/1/10 s history schedule resets after a
+scram. Focused unit tests plus real restart normal/trip smoke runs verified both control paths,
+zero TEC arrays, continued external heat, converged hydraulics, and persistent -2-dollar scram.
+
+Both formal runs completed one 5668.144369 s orbit without a trip or numerical failure and
+wrote 113 checkpoints each. Fixed-power full-run maxima were wall 893.362 K, fuel 2517.546 K,
+collector 917.759 K, moderator 867.203 K, and reflector 808.874 K. Feedback-case maxima were
+wall 875.492 K, fuel 2459.505 K, collector 898.084 K, moderator 850.731 K, and reflector
+797.831 K; final power was 8.504 kW. The formal histories contain one extra 101 s sample due
+to accumulated floating-point error at the 100 s schedule boundary; physical states and
+restarts are unaffected. The runner now rounds phase elapsed time to microsecond resolution
+before choosing the 0.1/1/10 s interval, with focused regression assertions at both boundaries.
+
+### 2026-07-20 V14 orbital-state helium depressurization
+
+`testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_210kW_helium_depressurization_1/` starts from
+`checkpoint_t019265s.npz` in the two-orbit fixed-power run. At accident time it sets all five
+representative `collector_iclad_gap` gas conductivities to zero while retaining gap radiation,
+NaK hydraulics, fluid-solid coupling, heat pipes, orbital external heat, TEC, and temperature
+feedback. Fixed power is handed off to point kinetics. The two production runs use the LOCA
+temperature limits and staged record schedule; the optional 5 s, -2 dollar scram also uses the
+0.01 A persistent TEC open-circuit policy.
+
+### 2026-07-22 V14 10 kW thermal-shield coupling
+
+`testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/v14_heatpipe_radiator.py` can now attach the existing `RadiatorThermalShield` before the twelve `RingHP` components. The option remains disabled by default. With `thermal_shield_enabled=True`, the ordered 36 representative heat pipes map upper 18 -> shield sectors 0-5 and lower 18 -> sectors 6-11, with physical heat-pipe multipliers included in each sector's `T^4` average. The focused check is `python -m testModule.Full_Loop_Cases.Full_Loop_Cases_10kW.test_v14_thermal_shield_coupling`.
+
+With external heat enabled, the same V14 component now owns the atomic N6/N18 switch. N6 is the exact center-point subset of N18 columns `0,3,...,15`; both use `5668.14 s` and the same saved orbit origin. Shield-present steps apply `0.992*N6` only to the six side panels, with zero top/bottom heat and zero direct heat-pipe N18. `set_active(False)` reverses both sides of the switch in one pre-step. Global restart files save `active_override` and `orbit_time_origin_s`. The 350 K staged runner is `run_v14_shield_radiator_startup.py`.
+
+### 2026-07-22 V14 10 kW prescribed-flow pump contract
+
+`testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/common_flow_builder.py` 的两台串联泵仍各承担总设计压头的一半，但启用 `pump_flow_control` 时只有 `pump_a` 使用 `FlowControlledPumpJunction`；`pump_b` 必须保持普通 `PumpJunction`。闭式串联系统只施加一个总流量约束，不能在两台泵上重复施加，否则中间节点会出现幅值巨大、符号相反的泵压差。低电功率 fixed-I runner 只设置和验收实际具有 `set_flow_rate` 或 `target_W` 的受控泵。
+
+### 2026-07-23 V14 20%电功率固定电流无外热工作点
+
+`testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_20pct_electric_power_fixed_I/`
+的当前工作点为堆芯热功率120.0 kW、总流量2.46 kg/s和TEC固定电流
+213.4691467366893 A，轨道外热流关闭。正式调参采用零保持、零斜坡的直接设定，
+不模拟降功率过程。
+
+最终1500 s运行的末端300 s电功率为2039.144-2042.332 W，均值
+2040.657 W，半极差0.0781%，线性漂移0.1557%；TEC和水力均收敛，未触发
+温度安全限值。正式restart位于
+`runs/noext_iter2_Q120000_1500s/final_restart.npz`，SHA256为
+`21D39F835F4D62A42BE8437BF55147289610E1C5B4B3871F111BE74815BE825E`。
+机器可读验收结果见`no_external_heat_summary.json`。
+
+此前118.5 kW周期外热半周期验证未通过2.0 kW下限，保留在
+`half_orbit_summary.json`中作为历史记录。当前工作点的验收范围仅为关闭外热流的
+固定工况，不能据此声称已达到周期外热条件下的轨道周期稳态。

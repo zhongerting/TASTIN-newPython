@@ -18,6 +18,12 @@ build/
 *.zip
 .vscode/
 .worktrees/
+venv/
+.arts/
+.codeartsdoer/
+_tmp_tests/
+ThermoCalc/build_series_fixed_i_test/
+to_syl程序/
 
 # Simulation result artifacts
 *.npz
@@ -33,3 +39,13 @@ testModule/single_tfe_energy_conservation_v7*/
 testModule/tec_joule_fix_audit_tmp/
 testModule/v7_caseA_*/
 testModule/v8_caseA_*/
+
+# Generated run directories and local result snapshots
+**/runs/*
+!**/runs/.gitkeep
+CoolantLoop/topaz2_*/
+testModule/v[0-9]*_*/
+testModule/single_hp_*/
+testModule/Full_Loop_Cases_VV/*/Validation_*/
+**/calibration_results/
+*_smoke_result.json

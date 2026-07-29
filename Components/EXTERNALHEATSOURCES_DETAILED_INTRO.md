@@ -360,7 +360,7 @@ source = OrbitalMatrixHeatSource(
 
 ### CSV circumferential tables
 
-load_csv_flux_table_library(path, orbit_period_s=...) reads CSV files formatted as a sample index followed by theta columns and exposes each circumferential column as a scalar OrbitalTableHeatSource table. The file must contain at least two rows, finite values, and a strictly increasing sample column. When orbit_period_s is provided, the sample axis is scaled to that physical period. The w0=8.12 deg N6/N18/N78/N200 tables use 360 samples over 6552 s, so their physical sample times are 18.2, 36.4, ..., 6552 s. Values remain in W/m2. V14 uses this path for 18 representative heat-pipe zones and V15 for 78 radiator tubes.
+load_csv_flux_table_library(path, orbit_period_s=...) reads CSV files formatted as a sample index followed by theta columns and exposes each circumferential column as a scalar OrbitalTableHeatSource table. The file must contain at least two rows, finite values, and a strictly increasing sample column. When orbit_period_s is provided, the sample axis is scaled to that physical period. The packaged legacy matrix keeps its 6552 s axis; the V14 startup CSV path explicitly rescales all 360 samples to `5668.14 s`. Values remain in W/m2. V14 uses this path for 18 representative heat-pipe zones and V15 for 78 radiator tubes.
 
 ### External-heat loading and no-double-counting contract
 
@@ -382,3 +382,9 @@ Repeating one circumferential table value over several axial nodes does not mult
 For representative V14 heat pipes, `hp_multipliers` scale the heat exchanged with the collector-ring fluid and scaled diagnostics; they do not create additional external-heat boundary conditions. V15 maps one table column to one physical radiator tube. The topology tests require exactly one `ExternalHeatFluxBC` per V14 representative heat pipe and per V15 radiator tube.
 
 V15 的 RadiatorPipeWithFin 额外支持可选的 distributed_fin 模式。该模式仍只保留一个管壁 ExternalHeatFluxBC，但该边界只使用管壁外侧受照面积；翅片部分通过同一个热流源进入准稳态翅片方程。管壁与翅片的有效吸热面积分别为 `A_outer * illumination * 0.992 * epsilon_tube` 和 `fin_strip_width * fin_height * illumination * 0.992 * epsilon_fin`，即采用 `alpha=epsilon`。它们不乘仅用于双面辐射几何修正的 fin_area_scale、fin_view_factor 或内外面辐射角系数。总吸热诊断必须调用 get_external_heat_absorption_distribution()，不能只累计管壁边界的 q_flux。
+
+### 2026-07-20 V14 10 kW two-ring N18 case
+
+`Full_Loop_Cases_10kW/V14_210kW_reactivity_control_external_heat` explicitly loads the N18 CSV with a `5668.144369 s` period. Upper and lower rings reuse the same columns: sector `n` maps its three representative heat pipes to columns `3n`, `3n+1`, and `3n+2`. `OrbitalTableHeatSource.time_origin_s` is subtracted from absolute system time, so the loaded restart remains at its saved `System/global_time` while that instant is external-heat phase zero. The default remains `time_origin_s=0` and external heat remains disabled in existing 10 kW V14 cases.
+
+The V14 shield startup path uses `5668.14 s` for both histories. Its N6 values are the exact center-point subset of N18 columns `0,3,6,9,12,15`. Shield-present steps apply `qsss=(alpha/epsilon)q_incident=0.992*N6` to the six side panels only; they do not multiply outer emissivity a second time and do not apply N18 to the heat pipes.

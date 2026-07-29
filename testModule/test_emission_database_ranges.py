@@ -21,16 +21,17 @@ from ThermoCalc import ThermoCalcWrapper
 
 
 class EmissionDatabaseRangeTests(unittest.TestCase):
-    def test_accident_region_extends_collector_temperature_to_1500_k(self):
+    def test_accident_region_extends_emitter_and_collector_temperature(self):
         axes = region_axes(REGIONS["accident"])
 
+        np.testing.assert_allclose(axes["TE_axis"], np.arange(700.0, 3001.0, 20.0))
         np.testing.assert_allclose(axes["TC_axis"], np.arange(500.0, 1501.0, 10.0))
-        self.assertEqual(points_for_axes(axes), 9_693_576)
+        self.assertEqual(points_for_axes(axes), 13_075_056)
 
-    def test_full_database_unique_point_count_after_tc_extension(self):
+    def test_full_database_unique_point_count_after_temperature_extensions(self):
         total = sum(points_for_axes(region_axes(spec)) for spec in REGIONS.values())
 
-        self.assertEqual(total, 22_576_428)
+        self.assertEqual(total, 25_957_908)
 
     def test_pyd_info_honors_explicit_solver_directory(self):
         pyd_path = THERMOCALC_DIR / "te_solver.cp312-win_amd64.pyd"
@@ -54,15 +55,15 @@ class EmissionDatabaseRangeTests(unittest.TestCase):
 
         self.assertEqual([path.name for path in paths], ["core_0000.npz"])
 
-    def test_default_runtime_database_prefers_tc1500_extension(self):
+    def test_default_runtime_database_prefers_te3000_extension(self):
         def manifest_exists(path):
-            return path.name == "runtime_dense_manifest.json" and path.parent.name == "pcs_0p02_5torr_tc1500"
+            return path.name == "runtime_dense_manifest.json" and path.parent.name == "pcs_0p02_5torr_tc1500_te3000"
 
         with mock.patch.object(Path, "exists", autospec=True, side_effect=manifest_exists):
             selected = ThermoCalcWrapper._find_default_lookup_database()
 
         self.assertIsNotNone(selected)
-        self.assertEqual(selected.name, "pcs_0p02_5torr_tc1500")
+        self.assertEqual(selected.name, "pcs_0p02_5torr_tc1500_te3000")
 
 
 if __name__ == "__main__":

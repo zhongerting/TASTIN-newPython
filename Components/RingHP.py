@@ -248,6 +248,7 @@ class RingHP(BaseComponent):
                     radiation_inner_down_view_factor=radiation_inner_down_view_factor
                 )
                 hp.hp.initialize_state()
+                hp.radiation_area_multiplier = float(N_hp)
 
                 # 如果用户提供了外热流配置，则在构造阶段直接挂接到这根代表热管上。
                 node_external_heat_config = self._resolve_node_external_heat_config(i)
@@ -355,6 +356,7 @@ class RingHP(BaseComponent):
                 scale_factor=external_heat_config.get('table_scale_factor', 1.0),
                 offset=external_heat_config.get('table_offset', 0.0),
                 periodic=external_heat_config.get('table_periodic', True),
+                time_origin_s=external_heat_config.get('time_origin_s', 0.0),
                 **table_kwargs,
             ))
             return composite_source

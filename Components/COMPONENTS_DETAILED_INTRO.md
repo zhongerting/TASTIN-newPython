@@ -1125,3 +1125,9 @@ terminal_point_uc2
 ## 2026-07-13 heat-pipe shield interface
 
 `HPwithFin` now exposes `get_radiation_surface_temperature()`, `set_radiation_background_temperature()`, and `restore_default_radiation_background()`. This lets the existing `RadiatorThermalShield` drive the heat-pipe bare condenser and reduced-order fin radiation background without adding a second shield solver. `RadiatorThermalShield` accepts either one external heat flux or one value per radiator unit; `radiation_area_multiplier` scales representative-unit area for diagnostics and shield energy balance.
+
+## 2026-07-22 V14 two-ring thermal-shield coupling
+
+`RingHP` assigns each representative `HPwithFin.radiation_area_multiplier` from the matching `hp_multipliers` entry. The `fortran_shield2` radiator-sector `T^4` average is weighted by the resulting tube-plus-fin radiation area. In the current V14 10 kW package, the ordered 36 representatives map as two independent 18-to-6 groups: upper ring to shield sectors 0-5 and lower ring to sectors 6-11. This supersedes the older single-ring 18-to-12 integration sketch in `CIRCUMFERENTIAL_MAPPING_GUIDE.md` for this case only.
+
+For the startup path, `RadiatorThermalShield` can own one six-value orbital source and the 36 direct heat-pipe table sources. Its pre-step enforces mutual exclusion: active shield means `qsss[:6]=0.992*N6` and direct N18 scale zero; inactive shield means zero `qsss` and restored N18. The factor is `alpha/epsilon=0.992` in the SHIELD2 outer balance and is not multiplied by shield emissivity again. `active_override` and the shared orbital `time_origin_s` are component restart fields.

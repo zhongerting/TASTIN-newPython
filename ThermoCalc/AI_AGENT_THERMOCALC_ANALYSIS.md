@@ -1181,9 +1181,23 @@ in the runtime table.
 For commands, per-region shapes, provenance notes, and reproduction details,
 read EMISSION_SCAN_GUIDE.md section 2026-07-20 TC 1500 K Production Extension.
 
+## 2026-07-20 emission lookup TE extension
+
+The current production accident lookup envelope is TE 700-3000 K at 20 K
+spacing and TC 500-1500 K at 10 K spacing. The preferred runtime directory is
+ThermoCalc/emission_runtime_db_v2/pcs_0p02_5torr_tc1500_te3000, with the tc1500
+and legacy directories retained as fallbacks.
+
+The full table contains 25,957,908 points. The added TE 2420-3000 K range has
+3,381,480 points, including 302,197 raw analytic failures: 9,796 were safely
+zero-filled and 292,401 were neighbor-imputed. The final table has zero
+unresolved points. Treat TE > 2400 K as an accident lookup extension rather
+than validation of the empirical high-temperature model. Detailed counts,
+artifact sizes, and boundary checks are in EMISSION_SCAN_GUIDE.md.
+
 ## 2026-07-09 case-level lookup control
 
-`ReactorCore` now accepts `tec_lookup_enabled`, `tec_lookup_db`, and `tec_lookup_regions` and passes them to every `ThermoCalcModel` it creates. `testModule/Full_Loop_Cases_10kW.FullLoopCoreConfig` exposes the same fields so V14_10kW/V15-style full-loop cases can enable or disable lookup without relying on process-wide environment variables.
+`ReactorCore` now accepts `tec_lookup_enabled`, `tec_lookup_db`, and `tec_lookup_regions` and passes them to every `ThermoCalcModel` it creates. `testModule/Full_Loop_Cases/Full_Loop_Cases_10kW.FullLoopCoreConfig` exposes the same fields so V14_10kW/V15-style full-loop cases can enable or disable lookup without relying on process-wide environment variables.
 
 Precedence:
 

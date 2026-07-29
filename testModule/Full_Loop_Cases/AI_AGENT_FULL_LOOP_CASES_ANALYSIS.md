@@ -132,7 +132,7 @@ Validation entry points:
 
 ## 2026-07-10 Full_Loop_Cases_10kW branch
 
-`testModule/Full_Loop_Cases_10kW/` is a copied V14 heat-pipe-radiator full-loop package for the 10 kW / five-ring core work. It is intentionally local to that directory: avoid changing the shared `Full_Loop_Cases` builders unless the same behavior is required by both the original V14/V15 and the 10 kW branch.
+`testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/` is a copied V14 heat-pipe-radiator full-loop package for the 10 kW / five-ring core work. It is intentionally local to that directory: avoid changing the shared `Full_Loop_Cases` builders unless the same behavior is required by both the original V14/V15 and the 10 kW branch.
 
 Key differences from the original V14 package:
 
@@ -146,7 +146,7 @@ Key differences from the original V14 package:
 Powered debug runner:
 
 ```text
-testModule/Full_Loop_Cases_10kW/V14_210kW_debug/run_v14_210kw_debug.py
+testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_210kW_debug/run_v14_210kw_debug.py
 ```
 
 This runner uses fixed core power (`210000 W`), fixed target loop flow (`2.46 kg/s`), implicit-Euler solid conduction, disabled orbital external heat flux, and optional TEC lookup. Use direct runner invocations for this workflow; do not use `python -m unittest` as the debug entry.
@@ -154,7 +154,7 @@ This runner uses fixed core power (`210000 W`), fixed target loop flow (`2.46 kg
 Current best powered baseline:
 
 ```text
-testModule/Full_Loop_Cases_10kW/V14_210kW_debug/runs/final_eps07475_u50p65_wire0335_1200s_from7964
+testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_210kW_debug/runs/final_eps07475_u50p65_wire0335_1200s_from7964
 restart = stage_01_restart.npz
 radiator_emissivity = 0.7475
 tec_voltage = 50.65 V
