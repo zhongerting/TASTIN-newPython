@@ -49,7 +49,10 @@ class LowPowerRunConfig:
     staged_recording: bool = False
     resume_from: Optional[Path] = None
     fixed_current_a: Optional[float] = None
+    initial_power_w: Optional[float] = None
+    initial_flow_kg_s: Optional[float] = None
     external_heat_enabled: bool = True
+    enforce_outlet_limit: bool = True
 
 
 def validate_run_config(config: LowPowerRunConfig) -> None:
@@ -75,6 +78,10 @@ def validate_run_config(config: LowPowerRunConfig) -> None:
         current = float(config.fixed_current_a)
         if not math.isfinite(current) or current <= 0.0:
             raise ValueError("fixed_current_a must be finite and positive")
+    for name in ("initial_power_w", "initial_flow_kg_s"):
+        raw = getattr(config, name)
+        if raw is not None and (not math.isfinite(float(raw)) or float(raw) <= 0.0):
+            raise ValueError(f"{name} must be finite and positive when provided")
     if config.ramp_shape not in ("cubic", "quintic"):
         raise ValueError("ramp_shape must be cubic or quintic")
 
@@ -109,6 +116,7 @@ def make_manifest(
                 else float(config.fixed_current_a)
             ),
             "external_heat_enabled": bool(config.external_heat_enabled),
+            "enforce_outlet_limit": bool(config.enforce_outlet_limit),
         },
     }
 
@@ -126,7 +134,8 @@ def restore_trajectory_config(
         restored["tec_update_interval_s"] = trajectory["tec_update_interval_s"]
     if "ramp_shape" in trajectory:
         restored["ramp_shape"] = trajectory["ramp_shape"]
-    for name in ("fixed_current_a", "external_heat_enabled"):
+    for name in ("fixed_current_a", "external_heat_enabled",
+                 "enforce_outlet_limit"):
         if name in trajectory:
             restored[name] = trajectory[name]
     return replace(config, **restored)
@@ -720,8 +729,14 @@ def _run_low_power_case_impl(
         else:
             fixed_u = None
             initial_current = float(config.fixed_current_a)
-            initial_thermal_power = float(config.final_power_w)
-            initial_flow = float(config.final_flow_kg_s)
+            initial_thermal_power = float(
+                config.initial_power_w
+                if config.initial_power_w is not None else config.final_power_w
+            )
+            initial_flow = float(
+                config.initial_flow_kg_s
+                if config.initial_flow_kg_s is not None else config.final_flow_kg_s
+            )
             _apply_fixed_core_power(build, initial_thermal_power)
             set_total_flow_target(build, initial_flow)
         core.setup_tec_circuit(
@@ -783,7 +798,10 @@ def _run_low_power_case_impl(
         if initial_nonfinite is not None
         else evaluate_hard_trip(
             fixed_i, initial_outlet_k=initial_outlet,
-            enforce_outlet_limit=outlet_limit_is_active(initial_elapsed),
+            enforce_outlet_limit=(
+                bool(config.enforce_outlet_limit)
+                and outlet_limit_is_active(initial_elapsed)
+            ),
         )
     )
     if initial_trip is not None:
@@ -851,7 +869,10 @@ def _run_low_power_case_impl(
             if trip_payload is None:
                 trip_payload = evaluate_hard_trip(
                     row, initial_outlet_k=initial_outlet,
-                    enforce_outlet_limit=outlet_limit_is_active(elapsed),
+                    enforce_outlet_limit=(
+                        bool(config.enforce_outlet_limit)
+                        and outlet_limit_is_active(elapsed)
+                    ),
                 )
         if trip_payload is not None:
             stop_reason = str(trip_payload["stop_reason"])
@@ -975,7 +996,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--staged-recording", action="store_true")
     parser.add_argument("--resume-from", type=Path)
     parser.add_argument("--fixed-current", type=float)
+    parser.add_argument("--initial-power", type=float)
+    parser.add_argument("--initial-flow", type=float)
     parser.add_argument("--disable-external-heat", action="store_true")
+    parser.add_argument("--disable-outlet-limit", action="store_true")
     return parser
 
 
@@ -990,8 +1014,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         final_power_w=args.final_power, final_flow_kg_s=args.final_flow,
         checkpoint_interval_s=args.checkpoint_interval,
         staged_recording=args.staged_recording, resume_from=args.resume_from,
-        fixed_current_a=args.fixed_current,
+        fixed_current_a=args.fixed_current, initial_power_w=args.initial_power,
+        initial_flow_kg_s=args.initial_flow,
         external_heat_enabled=not args.disable_external_heat,
+        enforce_outlet_limit=not args.disable_outlet_limit,
     ))
     return exit_code_for_result(result)
 

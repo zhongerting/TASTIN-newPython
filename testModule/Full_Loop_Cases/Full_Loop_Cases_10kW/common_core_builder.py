@@ -225,8 +225,18 @@ def build_full_loop_core(
             return base_solid_materials[key]
         return tfe_materials[key]
 
+    tec_gap_gas = str(core_config.tec_gap_gas).strip().lower()
+    if tec_gap_gas == "cesium":
+        tec_gap_material = Cesium()
+    elif tec_gap_gas == "helium":
+        tec_gap_material = Helium()
+    else:
+        raise ValueError("tec_gap_gas must be Cesium or Helium.")
+
     cfg_fg = GapConfig("simplified", 5678.0, Xenon(), 0.15, 0.15)
-    cfg_tec = GapConfig("simplified", 29.0, Cesium(), 0.15, 0.60)
+    cfg_tec = GapConfig(
+        "simplified", float(core_config.tec_gap_h_eq_w_m2_k), tec_gap_material, 0.15, 0.60,
+    )
     cfg_he = GapConfig("simplified", 5678.0, Helium(), 0.60, 0.80)
     cfg_co2 = GapConfig("simplified", 53.6, CarbonDioxide(), 0.80, 0.80)
 

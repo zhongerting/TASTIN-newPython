@@ -99,10 +99,32 @@ def test_series_fixed_current_double_failure_returns_finite_zero_output():
     assert result["iteration_count"] == 1
     _assert_finite_tec_state(model)
 
+def test_series_fixed_resistance_matches_fixed_voltage_operating_point():
+    voltage_model = _make_model("fixed_u", 1.6)
+    voltage_model.calculate(verbose=False)
+    voltage_result = voltage_model.get_global_results()
+    assert voltage_result["converged"] is True
+
+    target_current = float(voltage_result["Iout"])
+    resistance = float(voltage_result["Uout"]) / target_current
+    resistance_model = _make_model("fixed_r", resistance, i_guess=target_current)
+    resistance_model.build()
+    resistance_model._circuit.Iout = 0.0
+    resistance_model._circuit.Uout = 0.0
+    resistance_model.calculate(verbose=False)
+    resistance_result = resistance_model.get_global_results()
+
+    assert resistance_result["converged"] is True
+    assert resistance_result["Iout"] > 0.0
+    assert resistance_result["Uout"] > 0.0
+    assert abs(resistance_result["Uout"] - resistance_result["Iout"] * resistance) <= 1.0e-3
+    assert np.isclose(resistance_result["Iout"], target_current, rtol=0.02, atol=0.1)
+    _assert_finite_tec_state(resistance_model)
 
 if __name__ == "__main__":
     test_series_fixed_current_zero_target_returns_finite_open_circuit()
     test_series_fixed_current_matches_fixed_voltage_operating_point()
     test_series_fixed_current_rejects_non_generating_target_and_opens_circuit()
     test_series_fixed_current_double_failure_returns_finite_zero_output()
+    test_series_fixed_resistance_matches_fixed_voltage_operating_point()
     print("ThermoCalc series fixed-current checks passed.")

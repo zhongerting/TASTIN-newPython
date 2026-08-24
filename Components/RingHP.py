@@ -150,13 +150,30 @@ class RingHP(BaseComponent):
                  radiation_outer_up_view_factor: float = 1.0,
                  radiation_outer_down_view_factor: float = 1.0,
                  radiation_inner_up_view_factor: Optional[float] = None,
-                 radiation_inner_down_view_factor: Optional[float] = None):
+                 radiation_inner_down_view_factor: Optional[float] = None,
+                 hp_heat_transfer_multipliers: Optional[List[float]] = None):
         super().__init__(name)
 
         n_nodes = fluid_channel.n_nodes
         if len(hp_multipliers) != n_nodes:
             raise ValueError(
                 f"[{name}] hp_multipliers 长度 ({len(hp_multipliers)}) 必须与流体节点数 ({n_nodes}) 一致。"
+            )
+        if hp_heat_transfer_multipliers is None:
+            hp_heat_transfer_multipliers = [1.0] * n_nodes
+        if len(hp_heat_transfer_multipliers) != n_nodes:
+            raise ValueError(
+                f"[{name}] hp_heat_transfer_multipliers 长度 "
+                f"({len(hp_heat_transfer_multipliers)}) 必须与流体节点数 ({n_nodes}) 一致。"
+            )
+        heat_transfer_multipliers = np.asarray(hp_heat_transfer_multipliers, dtype=float)
+        if (
+            not np.all(np.isfinite(heat_transfer_multipliers))
+            or np.any(heat_transfer_multipliers < 0.0)
+            or np.any(heat_transfer_multipliers > 1.0)
+        ):
+            raise ValueError(
+                f"[{name}] hp_heat_transfer_multipliers 必须是 [0, 1] 范围内的有限数值。"
             )
 
         self.fluid_channel = fluid_channel
@@ -204,6 +221,7 @@ class RingHP(BaseComponent):
         self._hp_presence_mask = np.zeros(n_nodes, dtype=bool)
         self._hp_external_heat_enabled = np.zeros(n_nodes, dtype=bool)
         self._hp_multipliers = np.asarray(hp_multipliers, dtype=float)
+        self._hp_heat_transfer_multipliers = heat_transfer_multipliers.copy()
 
         # ===== B. 为每个流体控制体构造代表热管 =====
         for i in range(n_nodes):
@@ -312,7 +330,8 @@ class RingHP(BaseComponent):
                     solid_boundary_region=hp.hp.boundaries['outer_eva'],
                     heated_perimeter=hp_peri_single,
                     correlation_func=liquid_metal_crossflow_corr,
-                    solid_node_capacitance=cap_hp
+                    solid_node_capacitance=cap_hp,
+                    coupling_multiplier=float(self._hp_heat_transfer_multipliers[i])
                 )
                 self.coupler_hps.append(coupler_hp)
 
@@ -575,6 +594,31 @@ class RingHP(BaseComponent):
         """返回各流体节点对应的动态局部阻力参数。"""
         return copy.deepcopy(self._hp_dynamic_loss_params)
 
+    @property
+    def hp_heat_transfer_multipliers(self) -> np.ndarray:
+        """返回各流体节点的有效传热比例（不改变额定热管数量）。"""
+        values = np.array(self._hp_heat_transfer_multipliers, copy=True)
+        hp_pos = 0
+        for node_index, present in enumerate(self._hp_presence_mask):
+            if present:
+                values[node_index] = float(self.coupler_hps[hp_pos].coupling_multiplier)
+                hp_pos += 1
+        return values
+
+    def set_hp_heat_transfer_multiplier(self, node_index: int, multiplier: float) -> None:
+        """Set one node's effective transfer fraction and its live coupler."""
+        index = int(node_index)
+        if index != node_index or not 0 <= index < self.n_header_nodes:
+            raise IndexError(f"[{self.name}] heat-pipe node index out of range: {node_index}")
+        value = float(multiplier)
+        if not np.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError(f"[{self.name}] heat-transfer multiplier must be finite and in [0, 1].")
+        self._hp_heat_transfer_multipliers[index] = value
+        if not self._hp_presence_mask[index]:
+            return
+        hp_pos = int(np.count_nonzero(self._hp_presence_mask[:index]))
+        self.coupler_hps[hp_pos].coupling_multiplier = value
+
     def get_total_heat_rejection(self) -> float:
         """返回所有代表热管当前的总向外散热量。"""
         total_q = 0.0
@@ -632,6 +676,8 @@ class RingHP(BaseComponent):
             'n_hp_units': len(self.hp_units),
             'hp_presence_mask': np.array(self._hp_presence_mask, copy=True),
             'hp_multipliers': np.array(self._hp_multipliers, copy=True),
+            'hp_heat_transfer_multipliers': self.hp_heat_transfer_multipliers,
+            'hp_effective_transfer_multipliers': self.hp_heat_transfer_multipliers,
             'hp_external_heat_enabled': np.array(self._hp_external_heat_enabled, copy=True),
             'hp_k_loss_distribution': np.array(self._hp_k_loss_distribution, copy=True),
             'hp_dynamic_loss_params': copy.deepcopy(self._hp_dynamic_loss_params),

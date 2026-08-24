@@ -184,7 +184,8 @@ class FluidSolidCouple:
                  heated_perimeter: float,
                  correlation_func: Callable[[float, float, float], float],
                  solid_node_capacitance: Optional[np.ndarray] = None,
-                 coupling_time_scheme: Optional[str] = None):
+                 coupling_time_scheme: Optional[str] = None,
+                 coupling_multiplier: float = 1.0):
         """
         初始化耦合器
 
@@ -199,6 +200,11 @@ class FluidSolidCouple:
         self.solid_bound = solid_boundary_region
         self.perimeter = heated_perimeter
         self.correlation_func = correlation_func
+        self.coupling_multiplier = float(coupling_multiplier)
+        if not np.isfinite(self.coupling_multiplier) or self.coupling_multiplier < 0.0:
+            raise ValueError(
+                f"[{name}] coupling_multiplier must be a finite non-negative value."
+            )
 
         # [新增] 固体热容缓存 (用于稳定性计算)
         self.solid_node_capacitance = solid_node_capacitance
@@ -348,6 +354,53 @@ class FluidSolidCouple:
             return None
         return dict(self._last_coupling_diagnostics)
 
+    def _execute_zero_coupling(self, T_f: np.ndarray, T_wall: np.ndarray,
+                               interface_relaxation: float) -> None:
+        """Disable this interface without leaving a residual exchange term."""
+        zero = np.zeros_like(T_f, dtype=float)
+        if hasattr(self.solid_bound, "compute_net_flux_for_solver"):
+            self.solid_bound.compute_net_flux_for_solver()
+        self.solid_bc.R_ext[:] = 1.0e30
+        self.solid_bc.T_ext[:] = T_f
+        if self._local_implicit_flux_bc is not None:
+            self._local_implicit_flux_bc.update_params(zero)
+        self.fluid.add_coupling_source_distribution(zero, zero)
+
+        current_state = {
+            "lambda": zero.copy(),
+            "T_f": np.asarray(T_f, dtype=float).copy(),
+            "T_wall": np.asarray(T_wall, dtype=float).copy(),
+            "explicit": zero.copy(),
+            "implicit": zero.copy(),
+        }
+        previous_state = self._interface_relaxation_previous
+        previous_shapes_match = self._interface_state_shapes_match(previous_state, current_state)
+        self._last_coupling_diagnostics = {
+            "name": self.name,
+            "type": type(self).__name__,
+            "coupling_time_scheme": self.coupling_time_scheme,
+            "coupling_multiplier": self.coupling_multiplier,
+            "interface_relaxation": float(interface_relaxation),
+            "relaxed": False,
+            "has_previous_state": bool(previous_shapes_match),
+            "interface_residual": 0.0,
+            "source_residual": 0.0,
+            "delta_lambda": 0.0 if previous_shapes_match else None,
+            "delta_T_f": 0.0 if previous_shapes_match else None,
+            "delta_T_wall": 0.0 if previous_shapes_match else None,
+            "delta_explicit": 0.0 if previous_shapes_match else None,
+            "delta_implicit": 0.0 if previous_shapes_match else None,
+            "max_lambda": 0.0,
+            "max_explicit": 0.0,
+            "max_h": 0.0,
+            "max_Re": 0.0,
+            "max_Pr": 0.0,
+            "max_Nu": 0.0,
+            "coupling_disabled": True,
+        }
+        self._last_lambda = zero.copy()
+        self._interface_relaxation_previous = current_state
+
     @TEASAProfiler.profile
     def execute(self, interface_relaxation: float = 1.0, dt: Optional[float] = None):
         """
@@ -367,6 +420,11 @@ class FluidSolidCouple:
         if hasattr(self.solid_bound, "compute_net_flux_for_solver"):
             self.solid_bound.compute_net_flux_for_solver()
         T_wall = np.asarray(self.solid_bound.T_surface, dtype=float).copy()
+
+        if self.coupling_multiplier == 0.0:
+            self._execute_zero_coupling(T_f, T_wall, interface_relaxation)
+            return
+
         rho = self.fluid.density_vector
         vel = self.fluid.velocity_vector  # 特征流速
 
@@ -421,7 +479,7 @@ class FluidSolidCouple:
         # === D. 计算耦合系数 (Lambda) ===
         # Lambda = h * A [W/K]
         # 这是半隐式耦合的核心系数
-        lambda_vals = h_vals * self.node_areas
+        lambda_vals = h_vals * self.node_areas * self.coupling_multiplier
         safe_lambda = np.maximum(lambda_vals, 1e-8)
 
         # === E. 更新固体边界 (Robin BC) ===
@@ -565,6 +623,7 @@ class FluidSolidCouple:
             "name": self.name,
             "type": type(self).__name__,
             "coupling_time_scheme": scheme,
+            "coupling_multiplier": self.coupling_multiplier,
             "interface_relaxation": float(interface_relaxation),
             "relaxed": bool(interface_relaxation < 1.0 and previous_shapes_match),
             "has_previous_state": bool(previous_shapes_match),

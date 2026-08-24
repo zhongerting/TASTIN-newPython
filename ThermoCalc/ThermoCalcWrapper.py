@@ -558,6 +558,17 @@ class ThermoCalcModel:
             self._zero_emission_skipped = False
             self._zero_emission_reason = None
             self._circuit.calc()
+            if (
+                getattr(self._circuit, "isFixedR", False)
+                and float(self._circuit.Iout) == 0.0
+                and float(self._circuit.Uout) == 0.0
+            ):
+                converged = bool(getattr(self._circuit, "converged", False))
+                iteration_count = int(getattr(self._circuit, "iterationCount", 0))
+                self._apply_zero_emission_result()
+                self._circuit.converged = converged
+                self._circuit.iterationCount = iteration_count
+                self._zero_emission_skipped = False
         t1 = time.time()
 
         dt_ms = (t1 - t0) * 1000.0

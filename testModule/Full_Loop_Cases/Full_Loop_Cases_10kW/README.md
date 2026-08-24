@@ -141,14 +141,18 @@ The `fortran_shield2` mapping uses upper-ring units 0-17 for shield sectors 0-5 
 
 When `thermal_shield_enabled` and `external_heat_enabled` are both true, V14 uses the six center samples `(0, 3, 6, 9, 12, 15)` from N18 as the numerically identical N6 history. Both histories use `5668.14 s` and one `time_origin_s`. With the shield present, only `qsss[:6] = 0.992 * N6` is active and direct N18 is zero; after `shield.set_active(False)`, `qsss` becomes zero and N18 is restored in the same pre-step. The latch and orbit origin are included in global restart files.
 
-Use `run_v14_shield_radiator_startup.py` for staged 350 K checks. Pass `--restart-in <previous/final_restart.npz>` for the next S-stage and add `--withdraw-shield` only in the stage that removes the shield.
+Use `run_v14_shield_radiator_startup.py` for Stage 0. The startup-only TEC gap contains helium with `h_eq=5678 W/m2/K`; the common powered-case default remains cesium with `h_eq=29 W/m2/K`. The accepted run starts the zero-power, TEC-off, shield-attached loop near `300 K` at `0.615 kg/s` (`25%` rated flow), advances `1800 s`, writes the five `history*.csv` tables every `10 s`, and keeps only the final restart. Its directory is `V14_210kW_start/phase_0_shielded_1800s_complete`; final coolant temperatures are `298.492-298.852 K`.
+
+Stage 1 uses `V14_210kW_start/run_v14_reactivity_startup.py`. It starts point kinetics from `1 W`, holds `+0.50 $` without withdrawal, keeps TEC off and flow at `0.615 kg/s`, writes all five CSV tables every `1 s`, and stops at the first `10 kW` crossing. The accepted helium-gap run reached `10000.0009 W` in `141.45251 s` and saved only `V14_210kW_start/stage_1_fixed_0p50_to_10kw/final_restart.npz`.
+
+Stage 2 uses `V14_210kW_start/run_v14_power_ramp.py`. It removes point kinetics, prescribes a `600 W/s` ramp from 10 to `70 kW`, keeps TEC off, writes the five CSV tables every `1 s`, and saves restart state every `50 s` plus the final state. The shield is jettisoned when the minimum loop coolant temperature reaches `373 K`; the controlled flow rises from `0.615` to `1.23 kg/s` when `CoreOutletConnector.T >= 500 K`. The accepted helium-gap ramp ended after `100.00000 s` at `70 kW`; neither threshold was reached (minimum coolant `304.401 K`, core outlet `358.896 K`, maximum coolant `379.636 K`), so the shield remained attached and flow remained at 25%.
 
 When both `thermal_shield_enabled` and `external_heat_enabled` are true, V14 uses the six center samples `(0, 3, 6, 9, 12, 15)` from the N18 CSV as the numerically identical N6 shield history. N6 and N18 share the `5668.14 s` period and `time_origin_s`. While the shield is present, only `qsss[:6] = 0.992 * N6` is applied and all direct N18 sources are zeroed; after `shield.set_active(False)`, `qsss` is zero and N18 is restored in the same pre-step. The active latch and orbit origin are included in the global restart.
 
-The staged 350 K debug entry point is:
+The formal Stage 0 entry point is:
 
 ```powershell
-& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m testModule.Full_Loop_Cases.Full_Loop_Cases_10kW.run_v14_shield_radiator_startup --output-dir <dir> --duration 60 --max-dt 0.2
+& "E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe" -m testModule.Full_Loop_Cases.Full_Loop_Cases_10kW.run_v14_shield_radiator_startup --output-dir testModule\Full_Loop_Cases\Full_Loop_Cases_10kW\V14_210kW_start\phase_0_shielded_1800s_complete --duration 1800 --max-dt 0.2 --record-interval 10 --initial-temperature 300 --target-flow 0.615
 ```
 
 Pass `--restart-in <previous/final_restart.npz>` for the next S-stage and add `--withdraw-shield` only at the stage that removes the shield.
@@ -213,3 +217,24 @@ V14 hydraulic-only smoke:
 ```
 
 For `V14_210kW_debug`, prefer direct runner invocations instead of `python -m unittest`; the debug workflow is a staged case runner, not a unit-test entry.
+
+## V14 Heat-Pipe Transfer-Failure Accidents
+
+The following three accident folders start from
+`V14_210kW_fixed_power_external_heat_2orbits/runs/two_orbits_from13864_20260720/checkpoint_t019865s.npz`:
+
+| Folder | Failure signature |
+| --- | --- |
+| `V14_210kW_heatpipe_partial_failure/` | Upper A5, local node 2, effective heat transfer 50% |
+| `V14_210kW_heatpipe_single_node_failure/` | Matching upper/lower A5 local node 2, effective heat transfer 0% |
+| `V14_210kW_heatpipe_sector_failure/` | Matching upper/lower A5, all three local nodes, effective heat transfer 0% |
+
+The failure changes only fluid-to-evaporator heat-transfer coupling. Nominal heat-pipe counts, hydraulic loss maps, flow areas, radiation areas, and orbital external heat remain unchanged. TEC calculation remains enabled and the thermal shield remains disabled. Coolant temperature is recorded but is not a trip criterion. The initial controller holds 210 kW; the first solid-temperature limit crossing switches to point kinetics and applies -2 dollars. Limits are channel wall 1058 K, fuel pellet 2700 K, collector 1023 K, moderator 930 K, and reflector 1000 K.
+
+Each runner defaults to one orbital period (`5668.144369 s`), records the five history tables every 1 s, writes periodic restart files every 100 s, and writes explicit accident-start, scram-event, and final restart files. If scram occurs, the run continues until at least half an orbital period after scram (and never shorter than the configured minimum duration).
+## Half-Radiator Transfer-Failure Accident
+
+`V14_210kW_heatpipe_half_radiator_failure/` disables sectors A1-A3 in both
+upper and lower rings. This disables 6 of 12 radiator sectors and 171 of the
+nominal 340 heat pipes (about 50.3 percent), while preserving the hydraulic
+paths and orbital external-heat boundary.

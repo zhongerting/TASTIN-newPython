@@ -36,6 +36,8 @@ class FullLoopCoreConfig:
     core_name: str = "TOPAZ2_FullLoop_Core"
     solid_heat_capacity_scale: float = 1.0
     solid_heat_capacity_scale_scope: str = "global_outer"
+    tec_gap_h_eq_w_m2_k: float = 29.0
+    tec_gap_gas: str = "Cesium"
     global_outer_heat_capacity_scale: Optional[float] = None
     main_tec_enabled: bool = True
     main_tec_mode: str = "fixed_u"

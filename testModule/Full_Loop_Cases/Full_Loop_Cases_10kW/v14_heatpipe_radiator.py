@@ -32,6 +32,7 @@ SEGMENT_PATH: Tuple[Tuple[str, str, str], ...] = (
 )
 UPPER_HP_MULTIPLIERS: Tuple[Tuple[int, int, int], ...] = ((8, 9, 9),) * 5 + ((8, 8, 8),)
 LOWER_HP_MULTIPLIERS: Tuple[Tuple[int, int, int], ...] = ((10, 10, 11),) * 6
+_UNIT_HP_HEAT_TRANSFER_FACTORS: Tuple[Tuple[float, float, float], ...] = ((1.0, 1.0, 1.0),) * 6
 EXTERNAL_HEAT_CSV = (
     next(parent for parent in Path(__file__).resolve().parents if (parent / "testModule").is_dir())
     / 'Components'
@@ -97,6 +98,15 @@ class V14HeatPipeRadiatorConfig:
     external_heat_scale_factor: float = 1.0
     external_heat_absorption_efficiency: float = 0.992
 
+    # Effective fluid-to-heat-pipe transfer fractions. These do not alter
+    # nominal heat-pipe count, flow blockage, radiation area, or external heat.
+    upper_hp_heat_transfer_factors: Tuple[Tuple[float, float, float], ...] = (
+        _UNIT_HP_HEAT_TRANSFER_FACTORS
+    )
+    lower_hp_heat_transfer_factors: Tuple[Tuple[float, float, float], ...] = (
+        _UNIT_HP_HEAT_TRANSFER_FACTORS
+    )
+
     thermal_shield_enabled: bool = False
     thermal_shield_initially_active: bool | None = None
     thermal_shield_active_until_s: float | None = None
@@ -143,6 +153,23 @@ def _validate_config(config: V14HeatPipeRadiatorConfig) -> None:
         raise ValueError("V14 ring_sector_n_nodes must be 3 to match the declared segment multipliers.")
     if len(config.manifold_lengths_m) != 3 or len(config.manifold_node_counts) != 3:
         raise ValueError("V14 requires exactly three manifold lengths and node counts.")
+    for label, factors in (
+        ("upper", config.upper_hp_heat_transfer_factors),
+        ("lower", config.lower_hp_heat_transfer_factors),
+    ):
+        if len(factors) != len(SEGMENT_PATH) or any(len(values) != 3 for values in factors):
+            raise ValueError(
+                f"V14 {label}_hp_heat_transfer_factors must have shape (6, 3)."
+            )
+        factor_array = np.asarray(factors, dtype=float)
+        if (
+            not np.all(np.isfinite(factor_array))
+            or np.any(factor_array < 0.0)
+            or np.any(factor_array > 1.0)
+        ):
+            raise ValueError(
+                f"V14 {label}_hp_heat_transfer_factors must be finite values in [0, 1]."
+            )
     for label, down_view in (
         ("upper", config.upper_hp_down_view_factor),
         ("lower", config.lower_hp_down_view_factor),
@@ -243,6 +270,7 @@ def _make_ring_hp(
     fluid_channel: Any,
     solid_header: HeatConduction2D,
     hp_multipliers: Sequence[int],
+    hp_heat_transfer_multipliers: Sequence[float],
     external_heat_config: Dict[str, Any] | None,
     config: V14HeatPipeRadiatorConfig,
 ) -> RingHP:
@@ -261,6 +289,7 @@ def _make_ring_hp(
         fluid_channel=fluid_channel,
         solid_header=solid_header,
         hp_multipliers=list(hp_multipliers),
+        hp_heat_transfer_multipliers=list(hp_heat_transfer_multipliers),
         header_flow_area=float(config.ring_area_m2),
         header_dh=float(config.ring_dh_m),
         header_heated_perimeter=float(config.ring_perimeter_m),
@@ -312,6 +341,7 @@ def _make_ring_set(
     initial_t: float,
     branch_flow: float,
     hp_multipliers: Sequence[Tuple[int, int, int]],
+    hp_heat_transfer_factors: Sequence[Tuple[float, float, float]],
     external_heat_library: Any,
     config: V14HeatPipeRadiatorConfig,
 ):
@@ -324,8 +354,8 @@ def _make_ring_set(
     entry_links = []
     exit_links = []
 
-    for sector_index, ((sector_name, start_key, end_key), multipliers) in enumerate(
-            zip(SEGMENT_PATH, hp_multipliers)):
+    for sector_index, ((sector_name, start_key, end_key), multipliers, heat_transfer_factors) in enumerate(
+            zip(SEGMENT_PATH, hp_multipliers, hp_heat_transfer_factors)):
         full_name = f"{prefix}_{sector_name}"
         channel = make_channel(
             name=f"{full_name}_Channel",
@@ -345,6 +375,7 @@ def _make_ring_set(
             prefix=prefix,
             fluid_channel=channel,            solid_header=solid,
             hp_multipliers=multipliers,
+            hp_heat_transfer_multipliers=heat_transfer_factors,
             external_heat_config=(
                 _external_heat_config_for_sector(external_heat_library, sector_index, config)
                 if external_heat_library is not None else None
@@ -511,6 +542,7 @@ def attach_v14_heatpipe_radiator(build: Dict[str, Any], config: V14HeatPipeRadia
         initial_t=initial_t,
         branch_flow=upper_branch_flow,
         hp_multipliers=UPPER_HP_MULTIPLIERS,
+        hp_heat_transfer_factors=config.upper_hp_heat_transfer_factors,
         external_heat_library=external_heat_library,
         config=config,
     )
@@ -522,6 +554,7 @@ def attach_v14_heatpipe_radiator(build: Dict[str, Any], config: V14HeatPipeRadia
         initial_t=initial_t,
         branch_flow=lower_branch_flow,
         hp_multipliers=LOWER_HP_MULTIPLIERS,
+        hp_heat_transfer_factors=config.lower_hp_heat_transfer_factors,
         external_heat_library=external_heat_library,
         config=config,
     )
@@ -624,10 +657,16 @@ def attach_v14_heatpipe_radiator(build: Dict[str, Any], config: V14HeatPipeRadia
     build["ring_sectors"] = ring_sectors
     build["ring_solids"] = ring_solids
     build["ring_hps"] = ring_hps
+    # Keep the two physical ring groups available to accident adapters while
+    # retaining the historical combined list for existing callers.
+    build["upper_ring_hps"] = upper["ring_hps"]
+    build["lower_ring_hps"] = lower["ring_hps"]
     build["radiator_units"] = radiator_units
     build["radiator_thermal_shield"] = thermal_shield
     build["upper_heatpipe_count"] = upper_hp_count
     build["lower_heatpipe_count"] = lower_hp_count
+    build["upper_hp_heat_transfer_factors"] = config.upper_hp_heat_transfer_factors
+    build["lower_hp_heat_transfer_factors"] = config.lower_hp_heat_transfer_factors
     build["upper_ring_segment_entry_junctions"] = upper["entry_links"]
     build["lower_ring_segment_entry_junctions"] = lower["entry_links"]
     build["ring_segment_entry_junctions"] = upper["entry_links"] + lower["entry_links"]

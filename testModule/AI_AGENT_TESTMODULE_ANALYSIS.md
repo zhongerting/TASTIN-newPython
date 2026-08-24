@@ -2457,6 +2457,33 @@ The independent runner is `testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_2
 ### 2026-07-20 V14 fixed-power two-orbit external-heat case
 
 `testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_210kW_fixed_power_external_heat_2orbits/` keeps the core source fixed at `210000 W` and runs the N18 external-heat history for exactly two `5668.144369 s` periods (`11336.288738 s`). It loads the current `checkpoint_t013864s.npz`, uses its saved absolute time as external-heat phase zero, and preserves the adjacent run configuration for TEC lookup and calibrated radiator settings. The original debug runner remains unchanged by default; `case_prefix` now controls output case names as its dataclass field intended.
+
+### 2026-08-13 V14 210 kW fast-shutdown baseline
+
+`testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_210kW_fast_shutdown/`
+starts from the completed two-orbit fixed-power `stage_01_restart.npz` at
+absolute time `25200.488738 s`. It hands the saved `210000 W` total power to
+`PointReactor`, calibrates temperature feedback at the loaded hot state, and
+immediately applies a persistent `-2 dollar` external reactivity. The normal
+`2.46 kg/s` flow, heat-pipe/radiator model, fixed-voltage TEC circuit, and
+absolute orbital external-heat phase remain unchanged. TEC electrical coupling
+opens only after current falls to or below `0.01 A`; passive gap heat transfer
+is retained. The default duration is one `5668.144369 s` orbit, with five CSV
+histories every `1 s` and restart checkpoints every `100 s`.
+
+The `1 s` smoke handoff split `210000 W` into `197329.474 W` fission power and
+`12670.526 W` decay heat. At `t+1 s`, total power was `70647.798 W`, both pump
+flows remained approximately `2.46 kg/s`, TEC output was `10603.975 W`, and
+the hydraulic solve remained converged.
+
+The runner also accepts its own point-kinetics final restart for later-orbit
+continuation. It restores the saved precursor/decay-heat and feedback-reference
+state instead of reinitializing point kinetics, preserves the original shutdown
+time for continuous `shutdown_elapsed_s`, and restores a previously zero-current
+TEC as explicitly open. Continuations use `0.01 s` for the first `2 s` to settle
+the rebuilt hydraulic state, then return to `0.05 s`. The first full shutdown
+orbit completed at `t+5668.144369 s` with `3222.360 W` decay heat, negligible
+fission power, coolant `574.475-581.680 K`, and zero TEC output.
 ### 2026-07-20 V14 fixed-power instantaneous LOCA-1
 
 `testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/V14_210kW_fixed_power_LOCA_1/` starts from the two-orbit
@@ -2520,7 +2547,40 @@ temperature limits and staged record schedule; the optional 5 s, -2 dollar scram
 
 `testModule/Full_Loop_Cases/Full_Loop_Cases_10kW/v14_heatpipe_radiator.py` can now attach the existing `RadiatorThermalShield` before the twelve `RingHP` components. The option remains disabled by default. With `thermal_shield_enabled=True`, the ordered 36 representative heat pipes map upper 18 -> shield sectors 0-5 and lower 18 -> sectors 6-11, with physical heat-pipe multipliers included in each sector's `T^4` average. The focused check is `python -m testModule.Full_Loop_Cases.Full_Loop_Cases_10kW.test_v14_thermal_shield_coupling`.
 
-With external heat enabled, the same V14 component now owns the atomic N6/N18 switch. N6 is the exact center-point subset of N18 columns `0,3,...,15`; both use `5668.14 s` and the same saved orbit origin. Shield-present steps apply `0.992*N6` only to the six side panels, with zero top/bottom heat and zero direct heat-pipe N18. `set_active(False)` reverses both sides of the switch in one pre-step. Global restart files save `active_override` and `orbit_time_origin_s`. The 350 K staged runner is `run_v14_shield_radiator_startup.py`.
+### V14 heat-pipe transfer-failure accident runners
+
+The three focused runners under `Full_Loop_Cases_10kW/` use the compatible
+210 kW external-heat restart at `t=19864.7 s`. Their failure maps affect only
+the evaporator fluid-solid coupling multiplier; nominal heat-pipe counts,
+hydraulic loss parameters, flow areas, radiation areas, and orbital external
+heat remain active. A multiplier of zero uses the exact zero-coupling path,
+which removes the active heat-transfer source while retaining passive solid
+conduction. TEC remains enabled and the thermal shield is disabled.
+
+The cases are:
+
+- `V14_210kW_heatpipe_partial_failure`: upper A5 local node 2 at 50% transfer.
+- `V14_210kW_heatpipe_single_node_failure`: matching upper/lower A5 local node 2 at 0% transfer.
+- `V14_210kW_heatpipe_sector_failure`: matching upper/lower A5 all three local nodes at 0% transfer.
+
+Each runner holds fixed 210 kW until one solid temperature limit is reached,
+then initializes point kinetics and applies -2 dollars. Coolant temperature
+is diagnostic only; the channel-wall limit is separate. Default limits are
+1058 K (channel wall), 2700 K (fuel), 1023 K (collector), 930 K (moderator),
+and 1000 K (reflector). The default duration is one orbital period
+(`5668.144369 s`), history tables are written every 1 s, periodic restart
+files every 100 s, and accident-start/scram/final restart files are always
+written. A scrammed case runs for at least another half orbit after scram.
+
+Before long runs, use `testModule.test_fluid_solid_couple_multiplier`,
+`testModule.Full_Loop_Cases.Full_Loop_Cases_10kW.test_v14_thermal_shield_coupling`,
+and the three runners with `--duration 2 --output-dir <temporary-directory>`.
+
+With external heat enabled, the same V14 component now owns the atomic N6/N18 switch. N6 is the exact center-point subset of N18 columns `0,3,...,15`; both use `5668.14 s` and the same saved orbit origin. Shield-present steps apply `0.992*N6` only to the six side panels, with zero top/bottom heat and zero direct heat-pipe N18. `set_active(False)` reverses both sides of the switch in one pre-step. Global restart files save `active_override` and `orbit_time_origin_s`. The startup runner is `run_v14_shield_radiator_startup.py`; accepted Stage 0 results are under `Full_Loop_Cases_10kW/V14_210kW_start/phase_0_shielded_1800s_complete`. Stages 0-2 use a startup-only helium TEC gap with `h_eq=5678 W/m2/K`; other powered V14 cases retain the common cesium default `h_eq=29 W/m2/K`. Stage 0 runs zero power for `1800 s` from `300 K`, with TEC off, shield attached and total flow `0.615 kg/s`; the five CSV tables use a `10 s` interval and only the final NPZ is retained. Final coolant temperatures are `298.492-298.852 K`.
+
+Stage 1 uses `Full_Loop_Cases_10kW/V14_210kW_start/run_v14_reactivity_startup.py`. It loads the Stage 0 restart, initializes point kinetics at `1 W`, holds `+0.50 $` without withdrawal, preserves the `0.615 kg/s` flow and TEC-off state, writes the five CSV tables every `1 s`, and stops at the first 10 kW crossing. The accepted helium-gap result in `stage_1_fixed_0p50_to_10kw` reached `10000.0009 W` after `141.45251 s` and contains only the final NPZ.
+
+Stage 2 uses `Full_Loop_Cases_10kW/V14_210kW_start/run_v14_power_ramp.py`. It disables point kinetics, prescribes `600 W/s` from 10 to `70 kW`, and keeps TEC off. The five CSV tables use a `1 s` interval; restart files are written every `50 s` and at completion. The shield is removed when the minimum loop coolant reaches `373 K`, including an immediate start check, and the controlled total flow rises from `0.615` to `1.23 kg/s` when `CoreOutletConnector.T >= 500 K`. The accepted helium-gap `stage_2_power_ramp_10kw_to_70kw` run reached `70 kW` in `100.00000 s`; final minimum, core-outlet, and maximum coolant temperatures were `304.401 K`, `358.896 K`, and `379.636 K`, so neither transition fired.
 
 ### 2026-07-22 V14 10 kW prescribed-flow pump contract
 
@@ -2543,3 +2603,113 @@ With external heat enabled, the same V14 component now owns the atomic N6/N18 sw
 此前118.5 kW周期外热半周期验证未通过2.0 kW下限，保留在
 `half_orbit_summary.json`中作为历史记录。当前工作点的验收范围仅为关闭外热流的
 固定工况，不能据此声称已达到周期外热条件下的轨道周期稳态。
+
+## 2026-08-03 V14 210 kW startup Stage 3 lookup and trial
+
+`Full_Loop_Cases/Full_Loop_Cases_10kW/V14_210kW_start/run_v14_startup_stages.py` explicitly loads `core,startup,high_power,accident` from the default dense runtime v2 database. At 2802 s this changed lookup coverage from 0/2146 to 2146/2146 points. The 2800-2824 s verification run uses the series fixed-resistance no-generation fallback and records `tec_generating`; after a transient 0.606 A / 1.1 mW point at 2802 s, the tested interval returns finite zero electrical output without repeated failed outer iterations. The partial trial directory is retained under `startup_5000s_final/stage_3_stopped_24s_lookup_nogen_review`. Fixed-resistance TEC updates now return explicit zero current and voltage both for the early no-generation test and after exhausting 100 outer iterations; the wrapper also clears per-element electrical fields and Joule-power arrays before coupling, so failed trial state is not written into Stage 3 history or electrode heat sources. The focused regression is `test_thermocalc_interface.py::test_fixed_resistance_zero_output_clears_failed_node_state`.
+
+## 2026-08-06 V14 210 kW startup fixed-current probes
+
+`V14_210kW_start/run_v14_t2800_fixed_i_probe.py` evaluates a saved thermal state without advancing the coupled system. At the Stage 2 `t=2800 s` final restart, TEC surface temperatures were `TE=738.432-898.808 K` and `TC=738.238-863.219 K`; both the guarded and forced-C++ series `fixed_i=200 A` probes returned finite zero output with `converged=False`. At Stage 3 `checkpoint_t03700.000s.npz`, the same 58-element series probe used `TE=1063.459-2177.214 K` and `TC=749.900-876.671 K` and converged in one circuit iteration at `I=200 A`, `U=54.7510466 V`, and `Pe=10950.2093 W`. This demonstrates that the hot state can generate at 200 A; the continuing zero-output startup is caused by the `Rload=0.003 ohm` fixed-resistance strategy, not by insufficient high-state emitter temperature. A follow-up earliest-checkpoint probe found that `checkpoint_t02850.000s.npz` already converges at `I=200 A`, `U=2.8593556 V`, and `Pe=571.8711 W` with `TE=745.679-1723.969 K`; therefore the no-generation Stage 3 trajectory is already invalid before its first 50 s checkpoint and must be recomputed from the `t=2800 s` Stage 2 restart. A fixed-current U-I scan at the same temperature field also proves that the specified `Rload=0.003 ohm` has a physical load-line intersection near `I=218.7 A`: the TEC gives `U=0.6564785 V` while the load requires `0.6561 V`. The production fixed-resistance secant solver nevertheless failed to return within a 600 s diagnostic and the startup path fell back to zero output. The four configured wire resistances sum to `0.00352 ohm` per TEC and approximately `0.20416 ohm` over 58 series elements, 68 times the external load; the small external load places the root near the short-circuit knee and exposes the unbracketed fixed-resistance iteration weakness, but does not eliminate the physical operating point.
+## 2026-08-06 V14 startup fixed-resistance solver acceptance
+
+V14_210kW_start/run_v14_t2800_fixed_i_probe.py now also accepts
+--mode fixed_r --resistance-ohm VALUE, so saved temperature fields can test
+the production series load-line solver without advancing the coupled system.
+
+With the rebuilt Python 3.12 extension, the Stage 2 t=2800 s restart returns
+in about 1 ms through the low-temperature zero-emission guard:
+TE=738.432-898.808 K, TC=738.238-863.219 K, finite zero output, and no C++
+load-line iterations. At Stage 3 checkpoint_t02850.000s.npz,
+Rload=0.003 ohm converges to I=218.703142 A, U=0.656109428 V, and
+Pload=143.493193 W in 15 sampled current evaluations; all saved TEC arrays
+are finite. The existing Stage 3 controller checks the result after each
+coupled step and will switch immediately to strict fixed_i=216 A because
+the accepted current exceeds the threshold. Full Stage 3 was not restarted
+during this acceptance.
+### 2026-08-06 V14 Stage 3 persistent fixed-R recovery
+
+The first rebuilt Stage 3 run used max_dt=0.2 s and stopped at about 2804.9 s
+after hydraulic NaN. A max_dt=0.05 s rerun reproduced the prior stable
+hydraulic trajectory but remained at zero electrical output through 2877 s.
+Its own checkpoint_t02850.000s.npz independently converged at Rload=0.003 ohm
+to I=222.100115 A, U=0.666300345 V, and Pload=147.985383 W. This isolated the
+problem to persistent circuit initialization after earlier zero-output
+cleanup, not to the thermal state or load line. That run was stopped.
+
+After adding fixed-R voltage-seed recovery and rebuilding the extension, the
+formal restart from the original Stage 2 t=2800 s state is under
+startup_5000s_fixed_r_recoveryfix_20260806 with max_dt=0.05 s. It retains
+1 s five-CSV history and 50 s checkpoints. The old runs remain as diagnostics.
+### 2026-08-06 V14 Stage 3 216 A event restart
+
+The Stage 3 runner now saves checkpoint_tec_switch_tXXXXXXXXXs.npz immediately
+after the fixed-R current first reaches 216 A and before rebuilding the circuit
+as strict fixed_i=216 A. The event path is retained in the final summary as
+tec_current_limit_switch_restart.
+
+In startup_5000s_fixed_r_switchrestart_20260806, the persistent pre-generation
+circuit was advanced to the regular checkpoint_t02850.000s.npz, then resumed
+from that checkpoint to rebuild all TEC internal iteration state. The fixed-R
+solve crossed the threshold at t=2850.030 s. The pre-switch event state is
+checkpoint_tec_switch_t02850.030s.npz, SHA256
+30450A32FE82BB9EF0411F85BD1A9F7227798CFE71898046131A99E40CA168F0.
+The continuation then reported converged fixed_i=216 A; electrical power rose
+from about 714.64 W at t=2851 s to 1557.98 W at t=2860 s.
+### 2026-08-06 V14 Stage 3 completion at 5000 s
+
+The supervised fixed-I continuation completed at absolute t=5000 s and wrote
+final_restart.npz. Final values were I=216 A, U=41.659673 V, electrical power
+8998.489 W, prescribed reactor power 210 kW, controlled flow 2.46 kg/s,
+fluid temperature 718.864-844.184 K, and global solid temperature
+582.484-2365.881 K. TEC convergence remained true. The final restart SHA256
+is 1AF2A054BCECDAB604B4DB86B78FA3AD68A4B0CDF3E6833FEEE49039DA16749F.
+
+The five history CSV files cover 2800-5000 s at 1 s summary intervals, and
+50 s checkpoints are retained. This passes the requested Stage 3 control and
+TEC workflow. It is not a strict hydraulic-convergence acceptance: the runner
+uses fluid_max_iter=1 with fail_on_fluid_nonconvergence=False, and stderr
+continues to contain finite-residual hydraulic non-convergence warnings.
+### 2026-08-06 V14 Stage 3 fixed-I hold to 10000 s
+
+V14_210kW_start/run_v14_stage3_hold_5000_to_10000.py continues from the
+accepted 5000 s final restart while preserving 210 kW prescribed power,
+2.46 kg/s flow, cesium gap heat transfer, enabled TEC, and strict fixed_i=216 A.
+It writes a separate five-CSV history every 1 s and checkpoints every 50 s
+under startup_10000s_fixed_i_continuation_20260806/. The initial continuation
+check reached 5007 s with converged TEC and about 9.002 kW electrical power.
+### 2026-08-07 V14 Stage 3 fixed-I hold completion at 10000 s
+
+The 5000-10000 s fixed-I continuation completed and wrote final_restart.npz,
+SHA256 CE6730645C695E030211C061CC92D14ACBD265A3E762A34E8834B16356D20340.
+At 10000 s, TEC remained converged at 216 A and 42.443351 V, producing
+9167.764 W. This is 169.274 W (1.88%) above the accepted 5000 s result.
+Final coolant temperatures were 729.096-862.876 K and global solid
+temperatures were 694.570-2368.575 K.
+
+Over the final 100 s, coolant min/max still rose at about
+0.00385/0.00255 K/s, global solid min/max at 0.00484/0.000353 K/s, and
+electrical power at 0.0223 W/s. The state is closer to a plateau but is not a
+strict thermal steady state. Hydraulic single-iteration warnings remain under
+the same non-fail-closed runner policy.
+
+### 2026-08-15 V14 20% electric-power endpoint calibration
+
+The formal no-external-heat 20% endpoint restart was advanced for one full
+external-heat period at fixed current 213.4691467366893 A and 2.46 kg/s. The
+candidate thermal powers 120.5, 121.0, and 121.5 kW produced terminal electric
+powers 2096.8718, 2153.1970, and 2210.5385 W, respectively, against the exact
+20% target 2163.0637 W. All three runs completed with converged hydraulics and
+TEC; linear interpolation gives the working endpoint setpoint
+121086.033950196 W. The new complete trajectory uses
+`V14_210kW_low_electric_power_fixed_I/runs/continuation_40pct_period10s_then_40to20_record1s_Q121086_20260815/`;
+the older 120 kW trajectory is retained as a comparison only.
+
+The resulting trajectory completed all three stages. The 40% hold used 10 s
+history records, the 40% to 20% descent used 1 s records, and the following
+20% cooling period used 10 s records; restart checkpoints were written every
+60 s, 60 s, and 100 s respectively. After the final cooling period the
+121086.033950196 W setpoint produced 2137.8100 W electrical output (19.7665%
+of the 10815.3183 W full-power baseline), so the complete-trajectory endpoint
+is 25.2536 W below the strict 20% target even though the isolated endpoint
+calibration interpolated to that target.

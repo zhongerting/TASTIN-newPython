@@ -229,12 +229,24 @@ class LowPowerControlTests(unittest.TestCase):
             {"dt_s": 0.0}, {"duration_s": 0.0}, {"record_interval_s": -1.0},
             {"hold_before_ramp_s": -1.0}, {"ramp_duration_s": -1.0},
             {"checkpoint_interval_s": -1.0}, {"final_power_w": 0.0},
-            {"final_flow_kg_s": math.nan}, {"fluid_max_iter": 0},
+            {"final_flow_kg_s": math.nan}, {"initial_power_w": 0.0},
+            {"initial_flow_kg_s": math.nan}, {"fluid_max_iter": 0},
         ):
             values = dict(runner.LowPowerRunConfig().__dict__)
             values.update(change)
             with self.subTest(change=change), self.assertRaises(ValueError):
                 runner.validate_run_config(runner.LowPowerRunConfig(**values))
+
+    def test_fixed_current_run_can_chain_from_a_saved_power_setpoint(self):
+        config = runner.LowPowerRunConfig(
+            fixed_current_a=213.4691467366893,
+            initial_power_w=138600.0,
+            initial_flow_kg_s=2.46,
+            final_power_w=120000.0,
+        )
+        runner.validate_run_config(config)
+        self.assertEqual(config.initial_power_w, 138600.0)
+        self.assertEqual(config.final_power_w, 120000.0)
 
     def test_manifest_persists_source_baseline_and_trajectory(self):
         config = runner.LowPowerRunConfig(

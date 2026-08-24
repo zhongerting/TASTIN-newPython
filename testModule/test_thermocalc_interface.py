@@ -159,6 +159,42 @@ def test_low_temperature_fixed_voltage_cpp_iteration_returns_when_guard_disabled
     assert np.all(np.isfinite(result["joulePowerE"]))
     assert np.all(np.isfinite(result["joulePowerC"]))
 
+def test_fixed_resistance_zero_output_clears_failed_node_state():
+    from types import SimpleNamespace
+
+    fields = (
+        "J", "V", "UE", "UC", "IEsecSingle", "ICsecSingle",
+        "phiE", "phiC", "Vd", "joulePowerE", "joulePowerC",
+    )
+    tec = SimpleNamespace(**{
+        field: np.full(N_NODES, np.nan) for field in fields
+    })
+    tec.I = tec.U = 1.0
+    for name in (
+        "terminalPointUE1", "terminalPointUE2",
+        "terminalPointUC1", "terminalPointUC2",
+    ):
+        setattr(tec, name, np.nan)
+    circuit = SimpleNamespace(
+        isFixedR=True, isFixedU=False, isParallelFixedU=False,
+        isFixedI=False, isParallelFixedI=False, isParallelLoadCurve=False,
+        Iout=0.0, Uout=0.0, converged=False, iterationCount=7,
+        TECs=[tec], calc=lambda: None,
+    )
+    model = ThermoCalcModel(n_elements=1, n_nodes=N_NODES)
+    model._circuit = circuit
+    model._should_skip_zero_emission = lambda: False
+    model.calculate(verbose=False)
+
+    assert circuit.Iout == 0.0
+    assert circuit.Uout == 0.0
+    assert circuit.converged is False
+    assert circuit.iterationCount == 7
+    assert model._zero_emission_skipped is False
+    for field in fields:
+        assert np.all(np.asarray(getattr(tec, field)) == 0.0)
+
+
 def test_uniform_and_nonuniform_runtime_interfaces():
     uniform = _make_model(nonuniform=False)
     uniform_results = uniform.get_tec_results(0)
@@ -193,5 +229,6 @@ if __name__ == "__main__":
     test_fixed_current_rejects_invalid_target()
     test_low_temperature_fixed_voltage_auto_skips_zero_emission_case()
     test_low_temperature_fixed_voltage_cpp_iteration_returns_when_guard_disabled()
+    test_fixed_resistance_zero_output_clears_failed_node_state()
     test_uniform_and_nonuniform_runtime_interfaces()
     print("ThermoCalc interface checks passed.")

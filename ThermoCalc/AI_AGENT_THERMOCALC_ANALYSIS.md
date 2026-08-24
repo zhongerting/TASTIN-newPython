@@ -1212,3 +1212,39 @@ Verification:
 ```text
 E:\Users\HC Zhao\anaconda3\envs\tastin-python\python.exe -m unittest testModule.test_thermocalc_lookup_config testModule.test_full_loop_10kw_core_geometry.FullLoop10kWCoreGeometryTests.test_v14_10kw_tec_lookup_config_reaches_thermocalc
 ```
+
+## 2026-08-06 Series fixed-resistance bracketed load-line solve
+
+circuitTECs::resistanceFixedCircuitCalc() now solves
+U_TEC(I) - I*Rload = 0 with a bracketed secant/bisection search centered on
+the previous valid current or configured current guess. Every sampled
+circuitCalc(I) must report a finite voltage and converged=true; acceptance
+requires both a 1e-3 V load-line residual and a 1e-2 A bracket. Invalid loads or
+a missing valid bracket return finite Iout=Uout=0 with converged=false
+instead of reporting a failed solve as converged.
+
+ThermoCalcModel.calculate() clears all per-element electrical and Joule-power
+fields whenever series fixed resistance returns zero output, while preserving
+the C++ convergence flag and iteration count. The normal low-temperature
+zero-emission guard remains a distinct successful skipped state.
+
+The Python 3.12 production extension was rebuilt as
+ThermoCalc/te_solver.cp312-win_amd64.pyd, SHA256
+AC513C79BDB9A08E69CC1381A3A5763CCD6A4FCA329A3519EC697AC8CC96355D.
+Focused interface and series-circuit tests pass. At the V14 t=2850 s
+restart with 58 TECs and Rload=0.003 ohm, the solver converges in 15 sampled
+current evaluations to I=218.703142 A, U=0.656109428 V, and
+Pload=143.493193 W; all exported node fields are finite.
+### 2026-08-06 fixed-R recovery after zero-output cleanup
+
+A persistent startup circuit can legitimately return zero output before the
+emitter field is hot enough. The Python cleanup then sets Uout to zero. The
+next fixed-R solve now restores its first circuit voltage seed from the load
+line before entering circuitCalc(); an invalid sampled point also forces the
+following point to reinitialize. This allows the same circuit object to
+recover when later temperature updates create a valid operating point.
+
+The focused series regression explicitly zeros Iout/Uout on a hot fixed-R
+model and verifies recovery to the fixed-U reference load line. The rebuilt
+production extension SHA256 is
+AC513C79BDB9A08E69CC1381A3A5763CCD6A4FCA329A3519EC697AC8CC96355D.

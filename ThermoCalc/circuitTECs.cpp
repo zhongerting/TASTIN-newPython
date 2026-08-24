@@ -709,44 +709,105 @@ namespace std {
 		return Iout;
 	}
 	double circuitTECs::resistanceFixedCircuitCalc() {
-		// 迭代中用到的值
-		double coefficient = 0.;
-		// 电流迭代初值
 		converged = false;
 		iterationCount = 0;
-		double I0 = Iout, I1 = Iout + 10., I2 = 0.;
-		// 分别计算迭代结果，并作为迭代初值
-		double dU0 = I0 * Rload - circuitCalc(I0);
-		double dU1 = I1 * Rload - circuitCalc(I1);
-		// 弦割法迭代循环
-		for (int nIter = 0; nIter < 100; ++nIter) {
-			iterationCount = nIter + 1;
-			coefficient = dU1 - dU0;
-			if (abs(coefficient) < 1.e-3) {
-				coefficient = 1.e-3 * abs(dU1 - dU0) / (dU1 - dU0);
-			}
-
-			I2 = I1 - dU1 * (I1 - I0) / coefficient;
-
-			if (I2 <= 0.) {
-				I2 = I1 + 5.;
-			}
-
-			if (fabs(I2 - I1) < 1.e-1) {
-				Iout = I2;
-				Uout = I2 * Rload;
-				converged = true;
-				return I2;
-			}
-
-			I0 = I1;
-			I1 = I2;
-
-			dU0 = dU1;
-			dU1 = I1 * Rload - circuitCalc(I1);
+		if (!isfinite(Rload) || Rload <= 0.0) {
+			Iout = 0.0;
+			Uout = 0.0;
+			return 0.0;
 		}
 
-		return 0.;
+		const double voltageTol = 1.0e-3;
+		const double currentTol = 1.0e-2;
+		auto evaluate = [&](double current, double& voltage, double& residual) -> bool {
+			if (!isfinite(current) || current < 0.0) {
+				return false;
+			}
+			if (isFirst) {
+				const double loadVoltage = current * Rload;
+				Uout = loadVoltage > 0.0 ? loadVoltage
+					: (isfinite(Utarget) && Utarget > 0.0 ? Utarget : 1.0);
+			}
+			voltage = circuitCalc(current);
+			residual = voltage - current * Rload;
+			++iterationCount;
+			const bool valid = converged && isfinite(voltage) && isfinite(residual);
+			if (!valid) {
+				isFirst = true;
+			}
+			return valid;
+		};
+
+		const double previousCurrent = isfinite(Iout) && Iout > 0.0 ? Iout : 0.0;
+		const double configuredCurrent = isfinite(Utarget) && Utarget > 0.0
+			? Utarget / Rload : 0.0;
+		const double guess = previousCurrent > 0.0 ? previousCurrent
+			: (configuredCurrent > 0.0 ? configuredCurrent : 10.0);
+		const double factors[] = { 1.0, 0.95, 1.05, 0.85, 1.15, 0.5, 1.5, 0.0, 2.0, 3.0 };
+
+		double loI = 0.0, loF = 0.0, hiI = 0.0, hiF = 0.0;
+		bool haveLo = false, haveHi = false;
+		for (double factor : factors) {
+			double voltage = 0.0, residual = 0.0;
+			const double current = guess * factor;
+			if (!evaluate(current, voltage, residual)) {
+				continue;
+			}
+			if (fabs(residual) <= voltageTol) {
+				Iout = current;
+				Uout = voltage;
+				converged = true;
+				return Iout;
+			}
+			if (residual > 0.0 && (!haveLo || current > loI)) {
+				loI = current;
+				loF = residual;
+				haveLo = true;
+			}
+			if (residual < 0.0 && (!haveHi || current < hiI)) {
+				hiI = current;
+				hiF = residual;
+				haveHi = true;
+			}
+			if (haveLo && haveHi && loI < hiI) {
+				break;
+			}
+		}
+
+		if (haveLo && haveHi && loI < hiI) {
+			for (int nIter = 0; nIter < 32; ++nIter) {
+				double trial = hiI - hiF * (hiI - loI) / (hiF - loF);
+				if (!isfinite(trial) || trial <= loI || trial >= hiI) {
+					trial = 0.5 * (loI + hiI);
+				}
+				double voltage = 0.0, residual = 0.0;
+				if (!evaluate(trial, voltage, residual)) {
+					trial = 0.5 * (loI + hiI);
+					if (!evaluate(trial, voltage, residual)) {
+						break;
+					}
+				}
+				if (fabs(residual) <= voltageTol && fabs(hiI - loI) <= currentTol) {
+					Iout = trial;
+					Uout = voltage;
+					converged = true;
+					return Iout;
+				}
+				if (residual > 0.0) {
+					loI = trial;
+					loF = residual;
+				}
+				else {
+					hiI = trial;
+					hiF = residual;
+				}
+			}
+		}
+
+		Iout = 0.0;
+		Uout = 0.0;
+		converged = false;
+		return 0.0;
 	}
 
 	double circuitTECs::iFixedCircuitCalc() {
